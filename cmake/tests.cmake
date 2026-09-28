@@ -367,6 +367,9 @@ phaseshift_add_test(NAME test_parallel_topology SOURCE unit/test_parallel_topolo
 phaseshift_add_test(NAME test_qwen35_pp_boundary SOURCE unit/test_qwen35_pp_boundary.hip
     LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1
     LIBRARIES phaseshift_qwen35 phaseshift_gpu)
+phaseshift_add_test(NAME test_qwen35_synthetic_e2e SOURCE unit/test_qwen35_synthetic_e2e.hip
+    LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 4
+    LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_io phaseshift_gpu)
 
 if(PHASESHIFT_HAVE_RCCL)
     phaseshift_add_test(NAME test_rccl_transport SOURCE unit/test_rccl_transport.hip
