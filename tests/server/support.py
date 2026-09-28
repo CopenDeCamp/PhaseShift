@@ -1,0 +1,629 @@
+"""Shared helpers for the PhaseShift Server acceptance scripts.
+
+These scripts drive real processes (phaseshift-compute, phaseshift-server,
+LocalAI). They never import the PhaseShift C++ API.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SERVER_SCRIPT = REPO_ROOT / "src" / "apps" / "server" / "phaseshift_server.py"
+COMMON_DIR = REPO_ROOT / "src" / "apps" / "common"
+
+
+def build_dir() -> Path:
+    return Path(os.environ.get("PHASESHIFT_BUILD_DIR", REPO_ROOT / "build"))
+
+
+def compute_binary() -> Path:
+    env = os.environ.get("PHASESHIFT_COMPUTE")
+    if env:
+        return Path(env)
+    return build_dir() / "phaseshift-compute"
+
+
+def server_binary() -> Path:
+    env = os.environ.get("PHASESHIFT_SERVER")
+    if env:
+        return Path(env)
+    return build_dir() / "phaseshift-server"
+
+
+def localai_binary() -> str | None:
+    env = os.environ.get("PHASESHIFT_LOCALAI_BINARY")
+    if env and Path(env).is_file():
+        return env
+    for candidate in (build_dir() / "local-ai", REPO_ROOT / "build" / "local-ai"):
+        if candidate.is_file():
+            return str(candidate)
+    from shutil import which
+
+    return which("local-ai")
+
+
+def model_dir() -> Path:
+    env = (
+        os.environ.get("PHASESHIFT_SERVER_MODEL_DIR")
+        or os.environ.get("PHASESHIFT_MODEL_DIR")
+    )
+    if env:
+        return Path(env)
+    return REPO_ROOT / "models" / "Qwen3.5-4B"
+
+
+_CONSTRAINT_INFO_CACHE: dict[str, str | None] = {}
+_PROCESSOR_CACHE: dict[str, object] = {}
+
+
+def load_processor():
+    if "processor" not in _PROCESSOR_CACHE:
+        if str(COMMON_DIR) not in sys.path:
+            sys.path.insert(0, str(COMMON_DIR))
+        from phaseshift_chat import codec
+
+        _PROCESSOR_CACHE["processor"] = codec.load_processor(str(model_dir()))
+    return _PROCESSOR_CACHE["processor"]
+
+
+def prompt_ids(text: str) -> list[int]:
+    processor = load_processor()
+    from phaseshift_chat import codec
+
+    return codec.prompt_ids(
+        processor, [{"role": "user", "content": text}], enable_thinking=False)
+
+
+def decode_ids(generated_ids) -> str:
+    processor = load_processor()
+    from phaseshift_chat import codec
+
+    return codec.decode_generated(processor, generated_ids)
+
+
+def xgrammar_version() -> str | None:
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version("xgrammar")
+    except Exception:  # noqa: BLE001 - missing package is reported by the contract test
+        return None
+
+
+def generation_stop_probe() -> dict:
+    """Developer diagnostic for the generation stop token contract."""
+    processor = load_processor()
+    with open(model_dir() / "config.json", "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    text_config = config.get("text_config", config)
+    tokenizer = getattr(processor, "tokenizer", processor)
+    model_eos = text_config.get("eos_token_id")
+    tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
+
+    def token_repr(token_id):
+        if token_id is None:
+            return None
+        try:
+            return tokenizer.convert_ids_to_tokens(int(token_id))
+        except Exception:  # noqa: BLE001 - diagnostic only
+            return None
+
+    oracle_terminal = None
+    oracle_path = REPO_ROOT / "tests" / "e2e" / "fixtures" / "qwen35_4b_oracle.json"
+    if oracle_path.is_file():
+        oracle = json.loads(oracle_path.read_text())
+        for case in oracle.get("cases", []):
+            if case.get("name") == "chat_single":
+                ids = case.get("generated_ids") or []
+                if ids:
+                    oracle_terminal = ids[-1]
+    return {
+        "model_config_eos": model_eos,
+        "tokenizer_eos_metadata": tokenizer_eos,
+        "model_eos_token": token_repr(model_eos),
+        "tokenizer_eos_token": token_repr(tokenizer_eos),
+        "oracle_terminal_token": oracle_terminal,
+    }
+
+
+def constraint_tokenizer_info() -> str | None:
+    if "path" in _CONSTRAINT_INFO_CACHE:
+        return _CONSTRAINT_INFO_CACHE["path"]
+    path = None
+    try:
+        import json as _json
+
+        import xgrammar
+
+        if str(COMMON_DIR) not in sys.path:
+            sys.path.insert(0, str(COMMON_DIR))
+        from phaseshift_chat import codec
+
+        processor = codec.load_processor(str(model_dir()))
+        with open(model_dir() / "config.json", "r", encoding="utf-8") as handle:
+            config = _json.load(handle)
+        text_config = config.get("text_config", config)
+        tokenizer = getattr(processor, "tokenizer", processor)
+        info = xgrammar.TokenizerInfo.from_huggingface(
+            tokenizer,
+            vocab_size=int(text_config.get("vocab_size", 0)) or None,
+            stop_token_ids=[int(text_config["eos_token_id"])]
+            if text_config.get("eos_token_id") is not None else None,
+        )
+        import tempfile
+
+        directory = tempfile.mkdtemp(prefix="phaseshift-test-constraint-")
+        info_path = Path(directory) / "xgrammar-tokenizer-info.json"
+        info_path.write_text(info.serialize_json(), encoding="utf-8")
+        path = str(info_path)
+    except Exception:  # noqa: BLE001 - constraints are optional in tests
+        path = None
+    _CONSTRAINT_INFO_CACHE["path"] = path
+    return path
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def ensure_chat_import():
+    if str(COMMON_DIR) not in sys.path:
+        sys.path.insert(0, str(COMMON_DIR))
+    from phaseshift_chat import codec  # noqa: E402
+
+    return codec
+
+
+class Failure(RuntimeError):
+    pass
+
+
+class Checker:
+    def __init__(self, name: str):
+        self.name = name
+        self.passed = 0
+        self.failed = 0
+
+    def check(self, label: str, condition: bool, detail: str = "") -> None:
+        if condition:
+            self.passed += 1
+            print(f"[PASS] {self.name}:{label}")
+        else:
+            self.failed += 1
+            print(f"[FAIL] {self.name}:{label} :: {detail}")
+
+    def done(self) -> int:
+        print(f"{self.name}: passed={self.passed} failed={self.failed}")
+        return 0 if self.failed == 0 else 1
+
+
+def http_json(url: str, payload: dict, timeout: float = 600.0):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def http_get_json(url: str, timeout: float = 10.0):
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def http_post_status(url: str, payload: dict, timeout: float = 600.0):
+    """POST JSON and return ``(status, body_text)`` without raising on 4xx/5xx."""
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", errors="replace")
+
+
+def backend_request_count(log_path: Path) -> int:
+    if not log_path.is_file():
+        return 0
+    return sum(1 for line in log_path.read_text().splitlines() if line.strip())
+
+
+def localai_vanilla_binary() -> str | None:
+    """A vanilla (unpatched) LocalAI v4.10.0 binary for negative probe tests."""
+    env = os.environ.get("PHASESHIFT_LOCALAI_VANILLA_BINARY")
+    if env and Path(env).is_file():
+        return env
+    return None
+
+
+def localai_chat_only_binary() -> str | None:
+    """A LocalAI v4.10.0 binary carrying only the Chat fail-closed patch.
+
+    Used to prove the Responses structured transport is additionally required.
+    """
+    env = os.environ.get("PHASESHIFT_LOCALAI_CHAT_ONLY_BINARY")
+    if env and Path(env).is_file():
+        return env
+    return None
+
+
+def localai_no_tool_policy_binary() -> str | None:
+    """A LocalAI v4.10.0 binary without the tool-policy transport patch.
+
+    Used to prove the backend rejects tool requests from an older runtime.
+    """
+    env = os.environ.get("PHASESHIFT_LOCALAI_NO_TOOL_POLICY_BINARY")
+    if env and Path(env).is_file():
+        return env
+    return None
+
+
+def http_sse(url: str, payload: dict, timeout: float = 600.0):
+    """Yield each SSE ``data:`` payload (excluding the terminal ``[DONE]``)."""
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        for raw in response:
+            line = raw.decode("utf-8").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                return
+            yield json.loads(data)
+
+
+class ComputeHarness:
+    """Spawns phaseshift-compute --serve-stdio and speaks the JSONL protocol."""
+
+    def __init__(self, log_path: Path | None = None, arena_gib: int = 24,
+                 max_seq_len: int = 256, device: int = 0,
+                 max_concurrent_requests: int = 1,
+                 kv_cache_capacity_tokens: int = 0,
+                 prefix_cache_capacity_tokens: int = 0,
+                 prefix_cache_max_entries: int = 16,
+                 constraint_tokenizer_info: str | None = None,
+                 constraint_trace: bool = False,
+                 batch_trace: bool = False,
+                 graph_debug: bool = False,
+                 kv_cache_dtype: str = "bf16",
+                 prefix_cache_trace: bool = False,
+                 dflash2_model_dir: str | None = None,
+                 dflash2_drafts: int = 7):
+        self.log_path = log_path
+        self.arena_gib = arena_gib
+        self.max_seq_len = max_seq_len
+        self.device = device
+        self.max_concurrent_requests = max_concurrent_requests
+        self.kv_cache_capacity_tokens = kv_cache_capacity_tokens
+        self.prefix_cache_capacity_tokens = prefix_cache_capacity_tokens
+        self.prefix_cache_max_entries = prefix_cache_max_entries
+        self.constraint_tokenizer_info = constraint_tokenizer_info
+        self.constraint_trace = constraint_trace
+        self.batch_trace = batch_trace
+        self.graph_debug = graph_debug
+        self.kv_cache_dtype = kv_cache_dtype
+        self.prefix_cache_trace = prefix_cache_trace
+        self.dflash2_model_dir = dflash2_model_dir
+        self.dflash2_drafts = dflash2_drafts
+        self.proc: subprocess.Popen | None = None
+        self.stderr_lines: list[str] = []
+        self._stderr_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        binary = compute_binary()
+        if not binary.is_file():
+            raise Failure(f"phaseshift-compute not found: {binary}")
+        argv = [
+            str(binary),
+            "--model-dir", str(model_dir()),
+            "--serve-stdio",
+            "--max-seq-len", str(self.max_seq_len),
+            "--arena-gib", str(self.arena_gib),
+            "--device", str(_test_device(self.device)),
+            "--kv-cache-dtype", self.kv_cache_dtype,
+            "--max-concurrent-requests", str(self.max_concurrent_requests),
+            "--kv-cache-capacity-tokens", str(self.kv_cache_capacity_tokens),
+            "--prefix-cache-capacity-tokens", str(self.prefix_cache_capacity_tokens),
+            "--prefix-cache-max-entries", str(self.prefix_cache_max_entries),
+        ]
+        if self.constraint_tokenizer_info is not None:
+            argv += ["--constraint-tokenizer-info", str(self.constraint_tokenizer_info)]
+        if self.dflash2_model_dir is not None:
+            argv += ["--dflash2-model-dir", str(self.dflash2_model_dir),
+                     "--dflash2-drafts", str(self.dflash2_drafts)]
+        env = dict(os.environ)
+        if self.batch_trace:
+            env["PHASESHIFT_BATCH_TRACE"] = "1"
+        if self.constraint_trace:
+            env["PHASESHIFT_CONSTRAINT_TRACE"] = "1"
+        if self.graph_debug:
+            env["PHASESHIFT_GRAPH_DEBUG"] = "1"
+        if self.prefix_cache_trace:
+            env["PHASESHIFT_PREFIX_CACHE_TRACE"] = "1"
+        self.proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
+        self._stderr_thread = threading.Thread(target=self._pump_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _pump_stderr(self) -> None:
+        assert self.proc is not None and self.proc.stderr is not None
+        for line in self.proc.stderr:
+            self.stderr_lines.append(line.rstrip("\n"))
+            if self.log_path is not None:
+                with open(self.log_path, "a", encoding="utf-8") as handle:
+                    handle.write(line)
+
+    def wait_ready(self, timeout: float = 300.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if "PHASESHIFT_SERVE_READY" in self.stderr_lines:
+                return
+            if self.proc is not None and self.proc.poll() is not None:
+                raise Failure(
+                    f"compute exited early rc={self.proc.returncode}: "
+                    + "\n".join(self.stderr_lines[-20:]))
+            time.sleep(0.2)
+        raise Failure("compute did not become ready")
+
+    def send(self, payload: dict) -> None:
+        assert self.proc is not None and self.proc.stdin is not None
+        self.proc.stdin.write(json.dumps(payload) + "\n")
+        self.proc.stdin.flush()
+
+    def send_batch(self, payloads: list[dict]) -> None:
+        """Write several commands in one flush.
+
+        The serve loop drains every buffered line before running a step, so a
+        single atomic write lets a test issue a command and its cancel together
+        without racing the first prefill.
+        """
+        assert self.proc is not None and self.proc.stdin is not None
+        text = "".join(json.dumps(payload) + "\n" for payload in payloads)
+        self.proc.stdin.write(text)
+        self.proc.stdin.flush()
+
+    def recv(self, timeout: float = 300.0) -> dict:
+        assert self.proc is not None and self.proc.stdout is not None
+        result: list[str] = []
+
+        def _read():
+            result.append(self.proc.stdout.readline())
+
+        thread = threading.Thread(target=_read, daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise Failure("timed out waiting for compute event")
+        line = result[0].strip()
+        if not line:
+            raise Failure("compute closed stdout")
+        return json.loads(line)
+
+    def count_load_events(self) -> int:
+        return sum(1 for line in self.stderr_lines if "PHASESHIFT_SERVE_READY" in line)
+
+    def batch_steps(self) -> list[tuple[int, int]]:
+        steps = []
+        for line in self.stderr_lines:
+            if not line.startswith("PHASESHIFT_BATCH_STEP"):
+                continue
+            parts = dict(
+                token.split("=") for token in line.split()[1:] if "=" in token)
+            steps.append((int(parts.get("requests", 0)), int(parts.get("tokens", 0))))
+        return steps
+
+    def close(self) -> None:
+        if self.proc is None:
+            return
+        try:
+            self.send({"op": "shutdown"})
+            self.recv(timeout=30)
+        except Exception:  # noqa: BLE001 - teardown is best effort
+            pass
+        try:
+            self.proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+        self.proc = None
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+
+
+def _test_device(default: int) -> int:
+    """Resolve the GPU device for a harness.
+
+    A shared multi-GPU host can have device 0 busy; ``PHASESHIFT_TEST_DEVICE``
+    lets a run pin the suite to a free device without editing every test.
+    """
+    raw = os.environ.get("PHASESHIFT_TEST_DEVICE")
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw)
+
+
+class ServerHarness:
+    """Starts the phaseshift-server launcher and waits for readiness."""
+
+    def __init__(self, log_path: Path | None = None, env: dict | None = None,
+                 startup_timeout: float = 240.0, max_seq_len: int = 512,
+                 arena_gib: int = 24, device: int = 0,
+                 max_concurrent_requests: int = 1,
+                 kv_cache_capacity_tokens: int = 0,
+                 prefix_cache_capacity_tokens: int = 0,
+                 prefix_cache_max_entries: int = 16,
+                 use_defaults: bool = False,
+                 kv_cache_dtype: str = "bf16",
+                 dflash2_model_dir: str | None = None,
+                 dflash2_drafts: int = 7):
+        self.log_path = log_path or (Path("/tmp") / f"phaseshift-server-{os.getpid()}.log")
+        self.env = dict(os.environ)
+        if env:
+            self.env.update(env)
+        self.startup_timeout = startup_timeout
+        self.max_seq_len = max_seq_len
+        self.arena_gib = arena_gib
+        self.device = device
+        self.max_concurrent_requests = max_concurrent_requests
+        self.kv_cache_capacity_tokens = kv_cache_capacity_tokens
+        self.prefix_cache_capacity_tokens = prefix_cache_capacity_tokens
+        self.prefix_cache_max_entries = prefix_cache_max_entries
+        self.use_defaults = use_defaults
+        self.kv_cache_dtype = kv_cache_dtype
+        self.dflash2_model_dir = dflash2_model_dir
+        self.dflash2_drafts = dflash2_drafts
+        self.proc: subprocess.Popen | None = None
+        self.port = free_port()
+        self.base_url = ""
+
+    def start(self) -> None:
+        binary = server_binary()
+        if not binary.is_file():
+            raise Failure(f"phaseshift-server not found: {binary}")
+        localai = localai_binary()
+        if localai is None:
+            raise Failure(
+                "LocalAI runtime not found. Set PHASESHIFT_LOCALAI_BINARY to a "
+                "LocalAI v4.10.0 binary.")
+        argv = [
+            str(binary),
+            "--model-dir", str(model_dir()),
+            "--port", str(self.port),
+            "--device", str(_test_device(self.device)),
+            "--localai-binary", localai,
+            "--startup-timeout", str(int(self.startup_timeout)),
+        ]
+        if not self.use_defaults:
+            argv += [
+                "--max-seq-len", str(self.max_seq_len),
+                "--arena-gib", str(self.arena_gib),
+                "--max-concurrent-requests", str(self.max_concurrent_requests),
+                "--kv-cache-capacity-tokens", str(self.kv_cache_capacity_tokens),
+                "--prefix-cache-capacity-tokens", str(self.prefix_cache_capacity_tokens),
+                "--prefix-cache-max-entries", str(self.prefix_cache_max_entries),
+                "--kv-cache-dtype", self.kv_cache_dtype,
+            ]
+        if self.dflash2_model_dir is not None:
+            argv += ["--dflash2-model-dir", str(self.dflash2_model_dir),
+                     "--dflash2-drafts", str(self.dflash2_drafts)]
+        self._log = open(self.log_path, "w")
+        self.proc = subprocess.Popen(
+            argv, stdout=self._log, stderr=subprocess.STDOUT, env=self.env)
+        self.base_url = f"http://127.0.0.1:{self.port}/v1"
+        self._wait_ready()
+
+    def _wait_ready(self) -> None:
+        deadline = time.monotonic() + self.startup_timeout
+        while time.monotonic() < deadline:
+            if self.proc is not None and self.proc.poll() is not None:
+                raise Failure(f"server exited rc={self.proc.returncode}")
+            try:
+                payload = http_get_json(f"{self.base_url}/models")
+                if any(m.get("id") == "phaseshift" for m in payload.get("data", [])):
+                    return
+            except (urllib.error.URLError, OSError, ValueError):
+                pass
+            time.sleep(0.5)
+        raise Failure("server did not become ready")
+
+    def close(self) -> None:
+        if self.proc is None:
+            return
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=40)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(timeout=10)
+        self.proc = None
+        try:
+            self._log.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+
+def compute_pids() -> list[int]:
+    """PIDs of live phaseshift-compute --serve-stdio processes."""
+    pids = []
+    proc_root = Path("/proc")
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode()
+        except OSError:
+            continue
+        if "phaseshift-compute" in cmdline and "--serve-stdio" in cmdline:
+            pids.append(int(entry.name))
+    return sorted(pids)
+
+
+def cli_generated_ids(messages: list[dict], max_new_tokens: int, device: int = 1) -> list[int]:
+    """Run phaseshift-cli-equivalent tokenization + compute for parity checks."""
+    codec = ensure_chat_import()
+    processor = codec.load_processor(str(model_dir()))
+    ids = codec.prompt_ids(processor, messages)
+    binary = compute_binary()
+    with subprocess.Popen(
+        [
+            str(binary),
+            "--model-dir", str(model_dir()),
+            "--input-ids-file", "/dev/stdin",
+            "--max-new-tokens", str(max_new_tokens),
+            "--max-seq-len", "512",
+            "--arena-gib", "24",
+            "--device", str(device),
+            "--temperature", "0",
+            "--top-p", "1.0",
+            "--top-k", "0",
+            "--seed", "0",
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
+    ) as proc:
+        stdout, stderr = proc.communicate("\n".join(str(t) for t in ids) + "\n", timeout=600)
+        if proc.returncode != 0:
+            raise Failure(f"compute parity run failed: {stderr[-2000:]}")
+        for line in stdout.splitlines():
+            if line.startswith("GENERATED_IDS="):
+                return [int(x) for x in line[len("GENERATED_IDS="):].split(",") if x.strip()]
+    raise Failure("GENERATED_IDS not found in compute output")

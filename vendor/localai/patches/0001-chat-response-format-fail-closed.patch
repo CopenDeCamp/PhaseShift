@@ -1,0 +1,102 @@
+Upstream: LocalAI
+Base: v4.10.0 (7ad0cbf259f0c7bf9920fe2438fc3630ecd6c672)
+Scope: Chat Completions response_format only
+Purpose: fail closed on response-format grammar conversion errors
+Behavior change: json_schema conversion failure now returns HTTP 400 before
+  generation instead of logging and continuing unconstrained.
+Unmodified: tool/function grammar handling, Responses structured transport,
+  backend.proto.
+
+Apply inside a LocalAI v4.10.0 source checkout from its root:
+  git apply vendor/localai/patches/0001-chat-response-format-fail-closed.patch
+
+diff --git a/core/http/endpoints/openai/chat.go b/core/http/endpoints/openai/chat.go
+index 11f8b93..58499c6 100644
+--- a/core/http/endpoints/openai/chat.go
++++ b/core/http/endpoints/openai/chat.go
+@@ -381,40 +381,76 @@ func ChatEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evaluator
+ 			noActionDescription = config.FunctionsConfig.NoActionDescriptionName
+ 		}
+ 
+-		// If we are using a response format, we need to generate a grammar for it
++		// If we are using a response format, we need to generate a grammar for it.
++		// Structured output is fail-closed: a response_format we cannot convert to
++		// a grammar is rejected with a client error before any generation starts,
++		// rather than silently continuing unconstrained.
+ 		if config.ResponseFormatMap != nil {
+ 			d := schema.ChatCompletionResponseFormat{}
+ 			dat, err := json.Marshal(config.ResponseFormatMap)
+ 			if err != nil {
+-				return err
++				return echo.NewHTTPError(
++					http.StatusBadRequest,
++					"invalid response_format: "+err.Error(),
++				)
+ 			}
+ 			err = json.Unmarshal(dat, &d)
+ 			if err != nil {
+-				return err
++				return echo.NewHTTPError(
++					http.StatusBadRequest,
++					"invalid response_format: "+err.Error(),
++				)
+ 			}
+ 
+ 			switch d.Type {
++			case "text":
++				// Explicit plain text: no grammar, identical to an unconstrained request.
+ 			case "json_object":
++				if strings.TrimSpace(functions.JSONBNF) == "" {
++					return echo.NewHTTPError(
++						http.StatusInternalServerError,
++						"response_format json_object produced an empty grammar (internal invariant)",
++					)
++				}
+ 				input.Grammar = functions.JSONBNF
+ 			case "json_schema":
+ 				d := schema.JsonSchemaRequest{}
+ 				dat, err := json.Marshal(config.ResponseFormatMap)
+ 				if err != nil {
+-					return err
++					return echo.NewHTTPError(
++						http.StatusBadRequest,
++						"invalid response_format json_schema: "+err.Error(),
++					)
+ 				}
+ 				err = json.Unmarshal(dat, &d)
+ 				if err != nil {
+-					return err
++					return echo.NewHTTPError(
++						http.StatusBadRequest,
++						"invalid response_format json_schema: "+err.Error(),
++					)
+ 				}
+ 				fs := &functions.JSONFunctionStructure{
+ 					AnyOf: []functions.Item{d.JsonSchema.Schema},
+ 				}
+ 				g, err := fs.Grammar(config.FunctionsConfig.GrammarOptions()...)
+-				if err == nil {
+-					input.Grammar = g
+-				} else {
+-					xlog.Error("Failed generating grammar", "error", err)
++				if err != nil {
++					return echo.NewHTTPError(
++						http.StatusBadRequest,
++						"invalid or unsupported response_format json_schema",
++					).SetInternal(err)
+ 				}
++				if strings.TrimSpace(g) == "" {
++					return echo.NewHTTPError(
++						http.StatusBadRequest,
++						"response_format json_schema produced an empty grammar",
++					)
++				}
++				input.Grammar = g
++			default:
++				return echo.NewHTTPError(
++					http.StatusBadRequest,
++					"unsupported response_format type: "+string(d.Type),
++				)
+ 			}
+ 		}
+ 

@@ -1,0 +1,2409 @@
+#include <phaseshift/models/qwen35/dflash2/executor.h>
+#include <phaseshift/models/qwen35/dflash2/context_state.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/attention.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/candidate_selector.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/feature_concat.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/grouped_dynamic_conv.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/kv_ring.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/noise_input.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/rmsnorm.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/rope.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/swiglu.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/topk.h>
+#include <phaseshift/models/qwen35/kernels/optimized/activation_quantize.h>
+#include <phaseshift/models/qwen35/kernels/optimized/elementwise.h>
+#include <phaseshift/models/qwen35/kernels/optimized/embedding.h>
+#include <phaseshift/models/qwen35/kernels/optimized/linear/bf16.h>
+#include <phaseshift/models/qwen35/kernels/optimized/linear/psq4.h>
+#include <phaseshift/models/qwen35/kernels/optimized/linear/psq8.h>
+#include <phaseshift/models/qwen35/runtime/linear_selector.h>
+#include <phaseshift/runtime/program/int8_activation_workspace.h>
+#include <cstdint>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace ps::qwen35::dflash2 {
+
+namespace {
+
+template <typename T>
+Status allocate_contiguous_tensor(
+    gpu::GpuArena& arena,
+    const std::vector<std::size_t>& shape,
+    gpu::Tensor& out) {
+    if (shape.empty()) {
+        return Status::invalid_argument("tensor shape must be non-empty", __FILE__, __LINE__);
+    }
+    std::size_t count = 1;
+    for (std::size_t d : shape) {
+        if (d == 0) {
+            return Status::invalid_argument("tensor shape has a zero dim", __FILE__, __LINE__);
+        }
+        if (std::numeric_limits<std::size_t>::max() / count < d) {
+            return Status::invalid_argument("tensor element count overflow", __FILE__, __LINE__);
+        }
+        count *= d;
+    }
+    if (std::numeric_limits<std::size_t>::max() / count < sizeof(T)) {
+        return Status::invalid_argument("tensor byte count overflow", __FILE__, __LINE__);
+    }
+    auto view = arena.allocate_aligned(count * sizeof(T), 128);
+    if (!view.ok()) return view.status();
+    auto backing = view.release();
+    std::vector<std::size_t> strides(shape.size());
+    std::size_t stride = 1;
+    for (std::size_t i = shape.size(); i-- > 0;) {
+        strides[i] = stride;
+        stride *= shape[i];
+    }
+    auto result = gpu::Tensor::create<T>(backing, shape, strides);
+    if (!result.ok()) return result.status();
+    out = result.release();
+    return Status::make_ok();
+}
+
+std::optional<ps::kernel::Bf16GemmConfig> select_bf16_gemm(
+    const ps::weights::MatrixWeight& weight,
+    uint32_t rows,
+    uint32_t input_row_stride,
+    const void* weight_ptr,
+    const void* input_ptr,
+    bool allow_exact_rows = true) {
+    runtime::Bf16GemmSelectorInput lin;
+    lin.rows = rows;
+    lin.out_features = weight.rows;
+    lin.k = weight.cols;
+    lin.input_row_stride = input_row_stride;
+    lin.weight_aligned16 = (reinterpret_cast<uintptr_t>(weight_ptr) & 15u) == 0u;
+    lin.input_aligned16 = (reinterpret_cast<uintptr_t>(input_ptr) & 15u) == 0u;
+    lin.verify_exact = false;
+    lin.allow_exact_rows = allow_exact_rows;
+    return runtime::select_bf16_gemm_config(lin);
+}
+
+std::optional<ps::kernel::Bf16GemmConfig> select_bf16_gemm_exact(
+    const ps::weights::MatrixWeight& weight,
+    uint32_t rows,
+    uint32_t input_row_stride,
+    const void* weight_ptr,
+    const void* input_ptr) {
+    runtime::Bf16GemmSelectorInput lin;
+    lin.rows = rows;
+    lin.out_features = weight.rows;
+    lin.k = weight.cols;
+    lin.input_row_stride = input_row_stride;
+    lin.weight_aligned16 = (reinterpret_cast<uintptr_t>(weight_ptr) & 15u) == 0u;
+    lin.input_aligned16 = (reinterpret_cast<uintptr_t>(input_ptr) & 15u) == 0u;
+    lin.verify_exact = true;
+    return runtime::select_bf16_gemm_config(lin);
+}
+
+const gpu::Tensor& conv_base_kernel(
+    const DFlash2LayerWeights& layer,
+    bool attention_conv) {
+    return attention_conv ? layer.attention_conv_base_kernel : layer.mlp_conv_base_kernel;
+}
+
+bool topk_reference_enabled() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_TOPK_REFERENCE");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool attention_reference_enabled() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_ATTENTION_REFERENCE");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+uint32_t int2_head_mode_env() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_INT2_HEAD");
+    if (env == nullptr || env[0] == '\0')
+        return 0u;
+    const long v = std::strtol(env, nullptr, 10);
+    if (v <= 0)
+        return 0u;
+    if (v >= 2)
+        return 2u;
+    return 1u;
+}
+
+uint32_t int2_pool_env(uint32_t max_pool) {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_DRAFT_RERANK");
+    uint32_t pool = 32u;
+    if (env != nullptr && env[0] != '\0') {
+        const long v = std::strtol(env, nullptr, 10);
+        if (v > 0)
+            pool = static_cast<uint32_t>(v);
+    }
+    if (pool > max_pool)
+        pool = max_pool;
+    if (pool < ps::kernel::kDflash2TopKMaxK)
+        pool = ps::kernel::kDflash2TopKMaxK;
+    return pool;
+}
+
+bool int2_symmetric_codebook_env() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_INT2_CODEBOOK");
+    return env != nullptr && std::strcmp(env, "symmetric") == 0;
+}
+
+bool int2_diag_enabled() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_INT2_DIAG");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+bool int2_timing_enabled() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_INT2_TIMING");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+struct Int2DiagCounters {
+    uint64_t rounds = 0u;
+    uint64_t rows = 0u;
+    uint64_t top1_hit = 0u;
+    uint64_t top16_hits = 0u;
+    uint64_t containment = 0u;
+    uint64_t selector_cov = 0u;
+    uint64_t rerank_set_match = 0u;
+    uint64_t rerank_ordered = 0u;
+    uint64_t rerank_top1_match = 0u;
+    uint64_t token_match = 0u;
+    double quant_ms = 0.0;
+    double coarse_ms = 0.0;
+    double topn_ms = 0.0;
+    double rerank_ms = 0.0;
+    double top16_ms = 0.0;
+    double full_ms = 0.0;
+    double selector_ms = 0.0;
+    double pipeline_ms = 0.0;
+};
+
+Int2DiagCounters& int2_diag_counters() {
+    static Int2DiagCounters counters;
+    return counters;
+}
+
+const ps::kernel::DFlash2TopKPlan& topk_plan() {
+    static const ps::kernel::DFlash2TopKPlan plan = ps::kernel::dflash2_topk_default_plan();
+    return plan;
+}
+
+const ps::weights::MatrixWeight& conv_kernel_projection(
+    const DFlash2LayerWeights& layer,
+    bool attention_conv) {
+    return attention_conv ? layer.attention_conv_kernel_projection
+                          : layer.mlp_conv_kernel_projection;
+}
+
+Status check_conv_args(
+    const DFlash2Executor& executor,
+    const bf16_t* hidden,
+    const bf16_t* output,
+    uint32_t rows) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (hidden == nullptr || output == nullptr) {
+        return Status::invalid_argument("dflash2 conv buffers are null", __FILE__, __LINE__);
+    }
+    if (rows > executor.max_rows) {
+        return Status::invalid_argument("dflash2 conv rows exceed max_rows", __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status conv_apply_dynamic_conv(
+    DFlash2Executor& executor,
+    const DFlash2LayerWeights& layer,
+    bool attention_conv,
+    const bf16_t* conv_input,
+    uint32_t rows,
+    bf16_t* output,
+    uint32_t phase,
+    const char* tag,
+    hipStream_t stream) {
+    const uint32_t hidden_size = static_cast<uint32_t>(executor.config->hidden_size);
+    const gpu::Tensor& base = conv_base_kernel(layer, attention_conv);
+    const hipError_t err = ps::kernel::launch_dflash2_grouped_dynamic_conv(
+        conv_input, executor.conv_dynamic.data<bf16_t>(), base.data<bf16_t>(), output, rows,
+        hidden_size, static_cast<uint32_t>(executor.config->conv_group_size), phase, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error((std::string("dflash2 ") + tag + " launch").c_str(),
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status layer_gemm_bf16(
+    const ps::weights::MatrixWeight& weight,
+    const bf16_t* input,
+    uint32_t input_row_stride,
+    bf16_t* output,
+    uint32_t output_row_stride,
+    uint32_t rows,
+    const char* tag,
+    hipStream_t stream,
+    bool allow_exact_rows = true) {
+    const auto config = select_bf16_gemm(weight, rows, input_row_stride,
+                                         weight.bf16.data<void>(), input, allow_exact_rows);
+    if (!config) {
+        return Status::unsupported(
+            (std::string("dflash2 ") + tag + " has no optimized bf16 gemm geometry").c_str(),
+            __FILE__, __LINE__);
+    }
+    const hipError_t err = ps::kernel::launch_gemm_bf16(
+        *config, weight.bf16.data<bf16_t>(), input, output,
+        ps::kernel::Bf16GemmOutputDType::BF16, rows, weight.rows, weight.cols,
+        input_row_stride, output_row_stride, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error((std::string("dflash2 ") + tag + " launch").c_str(),
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+
+
+
+}  // namespace
+
+Status dflash2_quantize_a8(
+    DFlash2Executor& executor,
+    const bf16_t* input,
+    uint32_t rows,
+    uint32_t k,
+    uint32_t input_row_stride,
+    const char* tag,
+    hipStream_t stream) {
+    if (rows == 0u) {
+        return Status::invalid_argument(
+            (std::string("dflash2 ") + tag + " activation quantize rows is zero").c_str(),
+            __FILE__, __LINE__);
+    }
+    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
+    if (layout.codes_bytes() > static_cast<std::size_t>(executor.backbone_act_codes.dim(0)) ||
+        layout.scales_bytes() >
+            static_cast<std::size_t>(executor.backbone_act_scales.dim(0)) * sizeof(float)) {
+        return Status::invalid_state(
+            (std::string("dflash2 ") + tag + " activation workspace too small").c_str(),
+            __FILE__, __LINE__);
+    }
+    const hipError_t err = ps::kernel::launch_activation_quantize_e4m3(
+        input, reinterpret_cast<uint8_t*>(executor.backbone_act_codes.data<int8_t>()),
+        executor.backbone_act_scales.data<float>(), rows, k, layout.k_padded,
+        input_row_stride, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error((std::string("dflash2 ") + tag + " activation quantize launch")
+                                     .c_str(),
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    executor.act_valid_k = k;
+    executor.act_valid_rows = rows;
+    return Status::make_ok();
+}
+
+Status dflash2_gemm_psq4(
+    DFlash2Executor& executor,
+    const ps::weights::MatrixWeight& weight,
+    bf16_t* output,
+    uint32_t output_row_stride,
+    uint32_t rows,
+    const char* tag,
+    hipStream_t stream) {
+    if (weight.encoding != ps::weights::MatrixEncoding::Psq4 || !weight.preshuffled ||
+        weight.weight_scale_group != 32u || weight.k_padded < weight.cols ||
+        (weight.k_padded % 32u) != 0u) {
+        return Status::invalid_argument(
+            (std::string("dflash2 ") + tag + " psq4 weight layout invalid").c_str(),
+            __FILE__, __LINE__);
+    }
+    if (rows == 0u || weight.cols != executor.act_valid_k ||
+        rows > executor.act_valid_rows) {
+        return Status::invalid_state(
+            (std::string("dflash2 ") + tag + " psq4 activation workspace is stale").c_str(),
+            __FILE__, __LINE__);
+    }
+    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(weight.cols, rows);
+    if (layout.k_padded != weight.k_padded) {
+        return Status::invalid_state(
+            (std::string("dflash2 ") + tag + " psq4 activation k mismatch").c_str(),
+            __FILE__, __LINE__);
+    }
+    if (layout.codes_bytes() > static_cast<std::size_t>(executor.backbone_act_codes.dim(0)) ||
+        layout.scales_bytes() >
+            static_cast<std::size_t>(executor.backbone_act_scales.dim(0)) * sizeof(float)) {
+        return Status::invalid_state(
+            (std::string("dflash2 ") + tag + " activation workspace too small").c_str(),
+            __FILE__, __LINE__);
+    }
+    const ps::qwen35::runtime::Psq4GemmSelectorInput lin{rows, weight.rows, weight.cols,
+                                                         weight.k_padded};
+    const auto config = ps::qwen35::runtime::select_psq4_gemm_config(lin);
+    if (!config) {
+        return Status::unsupported(
+            (std::string("dflash2 ") + tag + " has no optimized psq4 gemm geometry").c_str(),
+            __FILE__, __LINE__);
+    }
+    const hipError_t err = ps::kernel::launch_gemm_psq4_w4a8_wmma_auto(
+        *config, weight.codes.data<uint8_t>(), weight.scales.data<uint8_t>(),
+        executor.backbone_act_codes.data<int8_t>(), executor.backbone_act_scales.data<float>(),
+        output, ps::kernel::Psq4GemmOutputDType::BF16, rows, weight.rows, weight.k_padded,
+        weight.storage_scale_stride_bytes, layout.code_row_stride_bytes,
+        layout.scale_row_stride_bytes, output_row_stride, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error((std::string("dflash2 ") + tag + " psq4 gemm launch").c_str(),
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status dflash2_linear(
+    DFlash2Executor& executor,
+    const ps::weights::MatrixWeight& weight,
+    const bf16_t* input,
+    uint32_t input_row_stride,
+    bf16_t* output,
+    uint32_t output_row_stride,
+    uint32_t rows,
+    const char* tag,
+    hipStream_t stream,
+    bool allow_exact_rows) {
+    if (weight.encoding == ps::weights::MatrixEncoding::Psq4) {
+        Status st = dflash2_quantize_a8(executor, input, rows, weight.cols, input_row_stride,
+                                        tag, stream);
+        if (!st.ok()) return st;
+        return dflash2_gemm_psq4(executor, weight, output, output_row_stride, rows, tag,
+                                 stream);
+    }
+    if (weight.encoding != ps::weights::MatrixEncoding::Bf16) {
+        return Status::unsupported(
+            (std::string("dflash2 ") + tag + " weight encoding unsupported").c_str(),
+            __FILE__, __LINE__);
+    }
+    return layer_gemm_bf16(weight, input, input_row_stride, output, output_row_stride, rows,
+                           tag, stream, allow_exact_rows);
+}
+
+Result<DFlash2Executor> create_dflash2_executor(
+    const DFlash2Config& config,
+    const DFlash2Weights& weights,
+    gpu::GpuArena& arena,
+    const DFlash2ExecutorConfig& exec_config) {
+    if (exec_config.max_rows == 0u) {
+        return Status::invalid_argument("dflash2 max_rows must be non-zero", __FILE__, __LINE__);
+    }
+    if (!weights.present) {
+        return Status::invalid_argument("dflash2 weights are not loaded", __FILE__, __LINE__);
+    }
+    if (weights.layers.size() != config.num_hidden_layers) {
+        return Status::invalid_argument("dflash2 layer count mismatch", __FILE__, __LINE__);
+    }
+    if (config.num_target_layer_ids != ps::kernel::kDFlash2TargetTaps) {
+        return Status::invalid_argument("dflash2 target tap count mismatch", __FILE__, __LINE__);
+    }
+    if (config.conv_kernel_size != ps::kernel::kDFlash2ConvKernelSize) {
+        return Status::invalid_argument("dflash2 conv kernel size mismatch", __FILE__, __LINE__);
+    }
+
+    DFlash2Executor ex;
+    ex.config = &config;
+    ex.weights = &weights;
+    ex.max_rows = exec_config.max_rows;
+    ex.max_context_rows = exec_config.max_context_rows != 0u ? exec_config.max_context_rows
+                                                             : exec_config.max_rows;
+
+    const std::size_t rows = exec_config.max_rows;
+    const std::size_t ctx_rows = ex.max_context_rows;
+    const std::size_t hidden = config.hidden_size;
+    const std::size_t q_features = config.attention_q_rows();
+    const std::size_t kv_features = config.attention_kv_rows();
+    const std::size_t intermediate = config.intermediate_size;
+
+    auto alloc = [&](const std::vector<std::size_t>& shape, gpu::Tensor& dst) -> Status {
+        return allocate_contiguous_tensor<bf16_t>(arena, shape, dst);
+    };
+
+    Status st = alloc({rows, config.tap_feature_size()}, ex.target_concat);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.target_fc);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.target_feature);
+    if (!st.ok()) return st;
+    st = alloc({rows, config.conv_projection_rows()}, ex.conv_dynamic);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.conv_output);
+    if (!st.ok()) return st;
+
+    st = alloc({rows, hidden}, ex.layer_input_norm);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.attention_prepared);
+    if (!st.ok()) return st;
+    st = alloc({rows, q_features}, ex.q_raw);
+    if (!st.ok()) return st;
+    st = alloc({rows, q_features}, ex.q_norm);
+    if (!st.ok()) return st;
+    st = alloc({rows, q_features}, ex.q_rope);
+    if (!st.ok()) return st;
+    st = alloc({rows, kv_features}, ex.k_noise_raw);
+    if (!st.ok()) return st;
+    st = alloc({rows, kv_features}, ex.k_noise_norm);
+    if (!st.ok()) return st;
+    st = alloc({rows, kv_features}, ex.k_noise_rope);
+    if (!st.ok()) return st;
+    st = alloc({rows, kv_features}, ex.v_noise);
+    if (!st.ok()) return st;
+    st = alloc({rows, q_features}, ex.attention_context);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.attention_o);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.attention_finished);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.attention_residual);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.post_attention_norm);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.mlp_prepared);
+    if (!st.ok()) return st;
+    st = alloc({rows, intermediate}, ex.mlp_gate);
+    if (!st.ok()) return st;
+    st = alloc({rows, intermediate}, ex.mlp_up);
+    if (!st.ok()) return st;
+    st = alloc({rows, intermediate}, ex.mlp_swiglu);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.mlp_down);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.mlp_finished);
+    if (!st.ok()) return st;
+
+    st = alloc({ctx_rows, kv_features}, ex.k_ctx_raw);
+    if (!st.ok()) return st;
+    st = alloc({ctx_rows, kv_features}, ex.k_ctx_norm);
+    if (!st.ok()) return st;
+    st = alloc({ctx_rows, kv_features}, ex.k_ctx_rope);
+    if (!st.ok()) return st;
+    st = alloc({ctx_rows, kv_features}, ex.v_ctx);
+    if (!st.ok()) return st;
+
+    st = alloc({rows, hidden}, ex.backbone_hidden_a);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.backbone_hidden_b);
+    if (!st.ok()) return st;
+    st = alloc({rows, hidden}, ex.backbone_output);
+    if (!st.ok()) return st;
+
+    ex.target_lm_head = exec_config.target_lm_head;
+    ex.draft_rows = config.block_size > 0u ? config.block_size - 1u : 0u;
+    const std::size_t draft = ex.draft_rows;
+    if (draft == 0u) {
+        return Status::invalid_argument("dflash2 block_size must be > 1", __FILE__, __LINE__);
+    }
+
+    st = alloc({draft, config.selector_rank}, ex.selector_hidden_proj);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<float>(arena, {draft, config.vocab_size},
+                                           ex.proposal_logits);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<int32_t>(arena, {draft, config.selector_top_k},
+                                             ex.proposal_topk_ids);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<float>(arena, {draft, config.selector_top_k},
+                                           ex.proposal_topk_logits);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<int32_t>(arena, {draft}, ex.proposal_tokens);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<int32_t>(
+        arena, {draft, ps::kernel::kDflash2TopKScratchPerRow}, ex.topk_scratch_ids);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<float>(
+        arena, {draft, ps::kernel::kDflash2TopKScratchPerRow}, ex.topk_scratch_logits);
+    if (!st.ok()) return st;
+
+    const uint32_t act_k = exec_config.target_lm_head != nullptr
+                               ? exec_config.target_lm_head->cols
+                               : static_cast<uint32_t>(hidden);
+    const auto act_layout =
+        ps::runtime::Int8ActivationWorkspaceLayout::make(act_k, static_cast<uint32_t>(draft));
+    st = allocate_contiguous_tensor<int8_t>(
+        arena, {act_layout.codes_bytes()}, ex.activation_codes);
+    if (!st.ok()) return st;
+    st = allocate_contiguous_tensor<float>(
+        arena, {act_layout.scales_bytes() / sizeof(float)}, ex.activation_scales);
+    if (!st.ok()) return st;
+
+    ex.int2_head_mode = int2_head_mode_env();
+    if (ex.int2_head_mode != 0u) {
+        if (exec_config.target_lm_head == nullptr) {
+            return Status::invalid_argument(
+                "dflash2 int2 draft head requires a target lm_head", __FILE__, __LINE__);
+        }
+        const ps::weights::MatrixWeight& head = *exec_config.target_lm_head;
+        if (head.encoding != ps::weights::MatrixEncoding::Psq8 || !head.preshuffled ||
+            head.weight_scale_group != 32u || (head.k_padded % 32u) != 0u) {
+            return Status::invalid_argument(
+                "dflash2 int2 draft head requires a preshuffled psq8 lm_head", __FILE__,
+                __LINE__);
+        }
+        const uint32_t vocab = head.rows;
+        const uint32_t k_padded = head.k_padded;
+        ex.int2_pool = int2_pool_env(ps::kernel::kDflash2Int2MaxPool);
+        ex.int2_partitions = ps::kernel::dflash2_int2_default_partitions(vocab);
+        ex.int2_scratch_row_stride =
+            ex.int2_partitions * ps::kernel::kDflash2Int2MaxPool;
+
+        const std::size_t code_bytes =
+            ((static_cast<std::size_t>(vocab) + 15u) / 16u) *
+            static_cast<std::size_t>(k_padded) * 4u;
+        st = allocate_contiguous_tensor<uint8_t>(arena, {code_bytes}, ex.int2_codes);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<uint8_t>(arena, {1280u}, ex.int2_tables);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<int32_t>(arena, {draft, ex.int2_pool},
+                                                 ex.int2_pool_ids);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(arena, {draft, ex.int2_pool},
+                                               ex.int2_pool_logits);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(arena, {draft, ex.int2_pool},
+                                               ex.int2_rerank_logits);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(arena, {draft, vocab}, ex.int2_coarse_logits);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<int32_t>(
+            arena, {draft, ex.int2_scratch_row_stride}, ex.int2_scratch_ids);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(
+            arena, {draft, ex.int2_scratch_row_stride}, ex.int2_scratch_logits);
+        if (!st.ok()) return st;
+
+        hipEvent_t int2_ev0 = nullptr;
+        hipEvent_t int2_ev1 = nullptr;
+        hipEvent_t int2_ev2 = nullptr;
+        (void)hipEventCreate(&int2_ev0);
+        (void)hipEventCreate(&int2_ev1);
+        (void)hipEventCreate(&int2_ev2);
+        (void)hipEventRecord(int2_ev0, nullptr);
+
+        gpu::Tensor histogram_tensor;
+        st = allocate_contiguous_tensor<uint64_t>(arena, {256u}, histogram_tensor);
+        if (!st.ok()) return st;
+        hipError_t herr = hipMemset(histogram_tensor.data<uint64_t>(), 0,
+                                    256u * sizeof(uint64_t));
+        if (herr != hipSuccess) {
+            return Status::hip_error("dflash2 int2 histogram reset",
+                                     hipGetErrorString(herr), __FILE__, __LINE__);
+        }
+        herr = ps::kernel::launch_dflash2_int2_code_histogram(
+            head.codes.data<uint8_t>(), head.scales.data<uint8_t>(), head.rows, k_padded,
+            head.storage_scale_stride_bytes, histogram_tensor.data<uint64_t>(), nullptr);
+        if (herr != hipSuccess) {
+            return Status::hip_error("dflash2 int2 code histogram launch",
+                                     hipGetErrorString(herr), __FILE__, __LINE__);
+        }
+        std::vector<uint64_t> histogram(256u, 0ull);
+        herr = hipMemcpy(histogram.data(), histogram_tensor.data<uint64_t>(),
+                         256u * sizeof(uint64_t), hipMemcpyDeviceToHost);
+        if (herr != hipSuccess) {
+            return Status::hip_error("dflash2 int2 histogram read", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
+        }
+        ex.int2_codebook = ps::kernel::dflash2_int2_derive_codebook(
+            histogram.data(), int2_symmetric_codebook_env());
+        const ps::kernel::Dflash2Int2Codebook codebook_lloyd =
+            ps::kernel::dflash2_int2_derive_codebook(histogram.data(), false);
+        const ps::kernel::Dflash2Int2Codebook codebook_symmetric =
+            ps::kernel::dflash2_int2_derive_codebook(histogram.data(), true);
+        std::printf(
+            "DFLASH2_INT2_CODEBOOK lloyd=[%.6f %.6f %.6f %.6f] error=%.6g "
+            "symmetric=[%.6f %.6f %.6f %.6f] error=%.6g chosen=%s\n",
+            codebook_lloyd.decoded[0], codebook_lloyd.decoded[1], codebook_lloyd.decoded[2],
+            codebook_lloyd.decoded[3],
+            ps::kernel::dflash2_int2_codebook_weight_error(codebook_lloyd, histogram.data()),
+            codebook_symmetric.decoded[0], codebook_symmetric.decoded[1],
+            codebook_symmetric.decoded[2], codebook_symmetric.decoded[3],
+            ps::kernel::dflash2_int2_codebook_weight_error(codebook_symmetric,
+                                                           histogram.data()),
+            int2_symmetric_codebook_env() ? "symmetric" : "lloyd");
+        std::vector<uint8_t> tables(1280u, 0u);
+        ps::kernel::dflash2_int2_build_tables(ex.int2_codebook, tables.data(),
+                                              reinterpret_cast<uint32_t*>(tables.data() + 256u));
+        herr = hipMemcpy(ex.int2_tables.data<uint8_t>(), tables.data(), tables.size(),
+                         hipMemcpyHostToDevice);
+        if (herr != hipSuccess) {
+            return Status::hip_error("dflash2 int2 table upload", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
+        }
+        (void)hipEventRecord(int2_ev1, nullptr);
+        herr = ps::kernel::launch_dflash2_int2_pack(
+            head.codes.data<uint8_t>(), ex.int2_tables.data<uint8_t>(),
+            ex.int2_codes.data<uint8_t>(), head.rows, k_padded, nullptr);
+        if (herr != hipSuccess) {
+            return Status::hip_error("dflash2 int2 pack launch", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
+        }
+        if (int2_diag_enabled()) {
+            st = allocate_contiguous_tensor<int32_t>(
+                arena, {draft, ps::kernel::kDflash2TopKMaxK}, ex.int2_diag_ids);
+            if (!st.ok()) return st;
+            st = allocate_contiguous_tensor<float>(
+                arena, {draft, ps::kernel::kDflash2TopKMaxK}, ex.int2_diag_logits);
+            if (!st.ok()) return st;
+            st = allocate_contiguous_tensor<int32_t>(arena, {draft}, ex.int2_diag_tokens);
+            if (!st.ok()) return st;
+        }
+        (void)hipEventRecord(int2_ev2, nullptr);
+        herr = hipDeviceSynchronize();
+        if (herr != hipSuccess) {
+            return Status::hip_error("dflash2 int2 startup sync", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
+        }
+        float int2_hist_ms = 0.0f;
+        float int2_pack_ms = 0.0f;
+        (void)hipEventElapsedTime(&int2_hist_ms, int2_ev0, int2_ev1);
+        (void)hipEventElapsedTime(&int2_pack_ms, int2_ev1, int2_ev2);
+        std::printf("DFLASH2_INT2_INIT codes_bytes=%zu histogram_ms=%.2f pack_ms=%.2f\n",
+                    code_bytes, static_cast<double>(int2_hist_ms),
+                    static_cast<double>(int2_pack_ms));
+        (void)hipEventDestroy(int2_ev0);
+        (void)hipEventDestroy(int2_ev1);
+        (void)hipEventDestroy(int2_ev2);
+    }
+
+    ex.backbone_psq4 = weights.backbone_psq4;
+    if (ex.backbone_psq4) {
+        const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+        const uint32_t tap_k = static_cast<uint32_t>(config.tap_feature_size());
+        const uint32_t q_k = static_cast<uint32_t>(config.attention_q_rows());
+        const uint32_t inter_k = static_cast<uint32_t>(config.intermediate_size);
+        const uint32_t rows = exec_config.max_rows;
+        const uint32_t ctx_rows = exec_config.max_context_rows;
+        if (ctx_rows == 0u) {
+            return Status::invalid_argument("dflash2 max_context_rows must be non-zero",
+                                            __FILE__, __LINE__);
+        }
+        const ps::runtime::Int8ActivationWorkspaceLayout layouts[] = {
+            ps::runtime::Int8ActivationWorkspaceLayout::make(tap_k, rows),
+            ps::runtime::Int8ActivationWorkspaceLayout::make(hidden, ctx_rows),
+            ps::runtime::Int8ActivationWorkspaceLayout::make(inter_k, rows),
+            ps::runtime::Int8ActivationWorkspaceLayout::make(q_k, rows),
+            ps::runtime::Int8ActivationWorkspaceLayout::make(hidden, rows),
+        };
+        uint64_t max_codes = 0;
+        uint64_t max_scales = 0;
+        for (const auto& l : layouts) {
+            if (l.codes_bytes() > max_codes) max_codes = l.codes_bytes();
+            if (l.scales_bytes() > max_scales) max_scales = l.scales_bytes();
+        }
+        st = allocate_contiguous_tensor<int8_t>(arena, {max_codes}, ex.backbone_act_codes);
+        if (!st.ok()) return st;
+        st = allocate_contiguous_tensor<float>(arena, {max_scales / sizeof(float)},
+                                               ex.backbone_act_scales);
+        if (!st.ok()) return st;
+    }
+
+    ex.target_embed_tokens = exec_config.target_embed_tokens;
+    if (exec_config.target_embed_tokens != nullptr) {
+        if (exec_config.target_embed_tokens->rows != config.vocab_size ||
+            exec_config.target_embed_tokens->cols != config.hidden_size) {
+            return Status::invalid_argument("dflash2 target embed_tokens shape mismatch",
+                                            __FILE__, __LINE__);
+        }
+        st = allocate_contiguous_tensor<int32_t>(arena, {config.block_size}, ex.noise_token_ids);
+        if (!st.ok()) return st;
+        st = alloc({config.block_size, hidden}, ex.noise_embedding);
+        if (!st.ok()) return st;
+    }
+
+    ex.initialized = true;
+    return ex;
+}
+
+Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
+    executor.target_concat = gpu::Tensor{};
+    executor.target_fc = gpu::Tensor{};
+    executor.target_feature = gpu::Tensor{};
+    executor.conv_dynamic = gpu::Tensor{};
+    executor.conv_output = gpu::Tensor{};
+    executor.layer_input_norm = gpu::Tensor{};
+    executor.attention_prepared = gpu::Tensor{};
+    executor.q_raw = gpu::Tensor{};
+    executor.q_norm = gpu::Tensor{};
+    executor.q_rope = gpu::Tensor{};
+    executor.k_noise_raw = gpu::Tensor{};
+    executor.k_noise_norm = gpu::Tensor{};
+    executor.k_noise_rope = gpu::Tensor{};
+    executor.v_noise = gpu::Tensor{};
+    executor.attention_context = gpu::Tensor{};
+    executor.attention_o = gpu::Tensor{};
+    executor.attention_finished = gpu::Tensor{};
+    executor.attention_residual = gpu::Tensor{};
+    executor.post_attention_norm = gpu::Tensor{};
+    executor.mlp_prepared = gpu::Tensor{};
+    executor.mlp_gate = gpu::Tensor{};
+    executor.mlp_up = gpu::Tensor{};
+    executor.mlp_swiglu = gpu::Tensor{};
+    executor.mlp_down = gpu::Tensor{};
+    executor.mlp_finished = gpu::Tensor{};
+    executor.k_ctx_raw = gpu::Tensor{};
+    executor.k_ctx_norm = gpu::Tensor{};
+    executor.k_ctx_rope = gpu::Tensor{};
+    executor.v_ctx = gpu::Tensor{};
+    executor.backbone_hidden_a = gpu::Tensor{};
+    executor.backbone_hidden_b = gpu::Tensor{};
+    executor.backbone_output = gpu::Tensor{};
+    executor.target_lm_head = nullptr;
+    executor.target_embed_tokens = nullptr;
+    executor.draft_rows = 0;
+    executor.noise_token_ids = gpu::Tensor{};
+    executor.noise_embedding = gpu::Tensor{};
+    executor.selector_hidden_proj = gpu::Tensor{};
+    executor.proposal_logits = gpu::Tensor{};
+    executor.proposal_topk_ids = gpu::Tensor{};
+    executor.proposal_topk_logits = gpu::Tensor{};
+    executor.proposal_tokens = gpu::Tensor{};
+    executor.topk_scratch_ids = gpu::Tensor{};
+    executor.topk_scratch_logits = gpu::Tensor{};
+    executor.activation_codes = gpu::Tensor{};
+    executor.activation_scales = gpu::Tensor{};
+    executor.backbone_act_codes = gpu::Tensor{};
+    executor.backbone_act_scales = gpu::Tensor{};
+    executor.backbone_psq4 = false;
+    executor.act_valid_k = 0u;
+    executor.act_valid_rows = 0u;
+    executor.int2_head_mode = 0u;
+    executor.int2_pool = 0u;
+    executor.int2_codes = gpu::Tensor{};
+    executor.int2_tables = gpu::Tensor{};
+    executor.int2_pool_ids = gpu::Tensor{};
+    executor.int2_pool_logits = gpu::Tensor{};
+    executor.int2_rerank_logits = gpu::Tensor{};
+    executor.int2_scratch_ids = gpu::Tensor{};
+    executor.int2_scratch_logits = gpu::Tensor{};
+    executor.int2_coarse_logits = gpu::Tensor{};
+    executor.int2_diag_ids = gpu::Tensor{};
+    executor.int2_diag_logits = gpu::Tensor{};
+    executor.int2_diag_tokens = gpu::Tensor{};
+    executor.int2_scratch_row_stride = 0u;
+    executor.int2_partitions = 0u;
+    executor.max_rows = 0;
+    executor.max_context_rows = 0;
+    executor.weights = nullptr;
+    executor.config = nullptr;
+    executor.initialized = false;
+    return Status::make_ok();
+}
+
+Status dflash2_project_target_features(
+    DFlash2Executor& executor,
+    const bf16_t* const* target_taps,
+    uint32_t tap_count,
+    uint32_t rows,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (target_taps == nullptr) {
+        return Status::invalid_argument("dflash2 target taps are null", __FILE__, __LINE__);
+    }
+    if (tap_count != ps::kernel::kDFlash2TargetTaps) {
+        return Status::invalid_argument("dflash2 target tap count mismatch", __FILE__, __LINE__);
+    }
+    if (rows > executor.max_rows) {
+        return Status::invalid_argument("dflash2 rows exceed max_rows", __FILE__, __LINE__);
+    }
+    if (rows == 0u) {
+        return Status::make_ok();
+    }
+    for (uint32_t t = 0; t < tap_count; ++t) {
+        if (target_taps[t] == nullptr) {
+            return Status::invalid_argument("dflash2 target tap is null", __FILE__, __LINE__);
+        }
+    }
+
+    const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
+    const uint32_t concat_stride = static_cast<uint32_t>(executor.target_concat.dim(1));
+
+    hipError_t err = ps::kernel::launch_dflash2_feature_concat(
+        target_taps[0], target_taps[1], target_taps[2], target_taps[3], target_taps[4],
+        hidden, rows, executor.target_concat.data<bf16_t>(), concat_stride, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 feature concat launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+
+    const ps::weights::MatrixWeight& fc = executor.weights->fc;
+    Status st = dflash2_linear(executor, fc, executor.target_concat.data<bf16_t>(),
+                               concat_stride, executor.target_fc.data<bf16_t>(),
+                               static_cast<uint32_t>(executor.target_fc.dim(1)), rows, "fc",
+                               stream);
+    if (!st.ok()) return st;
+
+    err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+        executor.target_fc.data<bf16_t>(), executor.weights->hidden_norm_weight.data<bf16_t>(),
+        executor.target_feature.data<bf16_t>(), rows, hidden, hidden,
+        executor.config->rms_norm_eps, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 hidden norm launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status dflash2_grouped_conv_prepare(
+    DFlash2Executor& executor,
+    const bf16_t* hidden,
+    const DFlash2LayerWeights& layer,
+    bool attention_conv,
+    uint32_t rows,
+    bf16_t* output,
+    hipStream_t stream) {
+    Status st = check_conv_args(executor, hidden, output, rows);
+    if (!st.ok()) return st;
+    if (rows == 0u) {
+        return Status::make_ok();
+    }
+
+    const uint32_t hidden_size = static_cast<uint32_t>(executor.config->hidden_size);
+    const ps::weights::MatrixWeight& projection = conv_kernel_projection(layer, attention_conv);
+
+    Status gemm_st = dflash2_linear(executor, projection, hidden, hidden_size,
+                                    executor.conv_dynamic.data<bf16_t>(),
+                                    static_cast<uint32_t>(executor.conv_dynamic.dim(1)), rows,
+                                    "conv kernel_projection", stream);
+    if (!gemm_st.ok()) return gemm_st;
+
+    return conv_apply_dynamic_conv(executor, layer, attention_conv, hidden, rows, output, 0u,
+                                   "conv prepare", stream);
+}
+
+Status dflash2_grouped_conv_finish(
+    DFlash2Executor& executor,
+    const bf16_t* hidden,
+    const DFlash2LayerWeights& layer,
+    bool attention_conv,
+    uint32_t rows,
+    bf16_t* output,
+    hipStream_t stream) {
+    Status st = check_conv_args(executor, hidden, output, rows);
+    if (!st.ok()) return st;
+    if (rows == 0u) {
+        return Status::make_ok();
+    }
+
+    const uint32_t hidden_size = static_cast<uint32_t>(executor.config->hidden_size);
+    const gpu::Tensor& base = conv_base_kernel(layer, attention_conv);
+    hipError_t err = ps::kernel::launch_dflash2_grouped_dynamic_conv(
+        hidden, executor.conv_dynamic.data<bf16_t>(), base.data<bf16_t>(), output, rows,
+        hidden_size, static_cast<uint32_t>(executor.config->conv_group_size), 1u, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 conv finish launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+namespace {
+
+Status layer_rmsnorm_direct(
+    const bf16_t* input,
+    const gpu::Tensor& weight,
+    bf16_t* output,
+    uint32_t rows,
+    uint32_t features,
+    uint32_t group_size,
+    float eps,
+    const char* tag,
+    hipStream_t stream) {
+    const hipError_t err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+        input, weight.data<bf16_t>(), output, rows, features, group_size, eps, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error((std::string("dflash2 ") + tag + " launch").c_str(),
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status layer_attention_tail(
+    DFlash2Executor& executor,
+    const DFlash2LayerWeights& layer,
+    const bf16_t* hidden_in,
+    uint32_t block_rows,
+    bf16_t* output,
+    hipStream_t stream) {
+    const DFlash2Config& config = *executor.config;
+    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+    const uint32_t q_features = static_cast<uint32_t>(config.attention_q_rows());
+    const uint32_t intermediate = static_cast<uint32_t>(config.intermediate_size);
+    const float eps = config.rms_norm_eps;
+
+    Status st = dflash2_linear(executor, layer.attn_o_proj,
+                               executor.attention_context.data<bf16_t>(), q_features,
+                               executor.attention_o.data<bf16_t>(), hidden, block_rows,
+                               "o_proj", stream);
+    if (!st.ok()) return st;
+
+    st = dflash2_grouped_conv_finish(executor, executor.attention_o.data<bf16_t>(), layer,
+                                     true, block_rows,
+                                     executor.attention_finished.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+
+    hipError_t err = hipSuccess;
+    err = ps::kernel::launch_residual_add_bf16(
+        hidden_in, hidden, executor.attention_finished.data<bf16_t>(), hidden,
+        executor.attention_residual.data<bf16_t>(), hidden, block_rows, hidden, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 attention residual launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+
+    st = layer_rmsnorm_direct(
+        executor.attention_residual.data<bf16_t>(), layer.post_attention_layernorm_weight,
+        executor.post_attention_norm.data<bf16_t>(), block_rows, hidden, hidden, eps,
+        "post attention norm", stream);
+    if (!st.ok()) return st;
+
+    st = dflash2_grouped_conv_prepare(executor, executor.post_attention_norm.data<bf16_t>(),
+                                      layer, false, block_rows,
+                                      executor.mlp_prepared.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+
+    const bf16_t* mlp_prepared = executor.mlp_prepared.data<bf16_t>();
+    if (executor.backbone_psq4) {
+        st = dflash2_quantize_a8(executor, mlp_prepared, block_rows, hidden, hidden,
+                                 "mlp_gate", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.mlp_gate_proj, executor.mlp_gate.data<bf16_t>(),
+                               intermediate, block_rows, "mlp_gate", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.mlp_up_proj, executor.mlp_up.data<bf16_t>(),
+                               intermediate, block_rows, "mlp_up", stream);
+        if (!st.ok()) return st;
+    } else {
+        st = layer_gemm_bf16(layer.mlp_gate_proj, mlp_prepared, hidden,
+                             executor.mlp_gate.data<bf16_t>(), intermediate, block_rows,
+                             "mlp_gate", stream);
+        if (!st.ok()) return st;
+        st = layer_gemm_bf16(layer.mlp_up_proj, mlp_prepared, hidden,
+                             executor.mlp_up.data<bf16_t>(), intermediate, block_rows, "mlp_up",
+                             stream);
+        if (!st.ok()) return st;
+    }
+
+    err = ps::kernel::launch_dflash2_swiglu_bf16(
+        executor.mlp_gate.data<bf16_t>(), intermediate, executor.mlp_up.data<bf16_t>(),
+        intermediate, executor.mlp_swiglu.data<bf16_t>(), intermediate, block_rows,
+        intermediate, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 mlp swiglu launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    st = dflash2_linear(executor, layer.mlp_down_proj, executor.mlp_swiglu.data<bf16_t>(),
+                        intermediate, executor.mlp_down.data<bf16_t>(), hidden, block_rows,
+                        "mlp_down", stream);
+    if (!st.ok()) return st;
+
+    st = dflash2_grouped_conv_finish(executor, executor.mlp_down.data<bf16_t>(), layer, false,
+                                     block_rows, executor.mlp_finished.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+
+    err = ps::kernel::launch_residual_add_bf16(
+        executor.attention_residual.data<bf16_t>(), hidden,
+        executor.mlp_finished.data<bf16_t>(), hidden, output, hidden, block_rows, hidden,
+        stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 mlp residual launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+}  // namespace
+
+Status dflash2_context_append(
+    DFlash2Executor& executor,
+    DFlash2ContextState& state,
+    const bf16_t* target_feature,
+    uint32_t rows,
+    uint32_t position_start,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (!state.initialized) {
+        return Status::invalid_state("dflash2 context state not initialized", __FILE__,
+                                     __LINE__);
+    }
+    if (target_feature == nullptr) {
+        return Status::invalid_argument("dflash2 context feature is null", __FILE__, __LINE__);
+    }
+    if (executor.config == nullptr || executor.weights == nullptr) {
+        return Status::invalid_state("dflash2 executor has no weights", __FILE__, __LINE__);
+    }
+    if (state.num_layers != executor.config->num_hidden_layers ||
+        state.kv_features != executor.config->attention_kv_rows() ||
+        state.capacity != executor.config->sliding_window) {
+        return Status::invalid_argument("dflash2 context state contract mismatch", __FILE__,
+                                        __LINE__);
+    }
+    if (position_start != state.next_position) {
+        return Status::invalid_argument("dflash2 context append is not contiguous", __FILE__,
+                                        __LINE__);
+    }
+    if (rows == 0u) {
+        return Status::make_ok();
+    }
+
+    const DFlash2Config& config = *executor.config;
+    const uint32_t capacity = state.capacity;
+    const uint32_t skip = rows > capacity ? rows - capacity : 0u;
+    const uint32_t effective_rows = rows > capacity ? capacity : rows;
+    if (effective_rows > executor.max_context_rows) {
+        return Status::invalid_argument("dflash2 context append exceeds max_context_rows",
+                                        __FILE__, __LINE__);
+    }
+
+    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+    const uint32_t kv_features = state.kv_features;
+    const uint32_t head_dim = static_cast<uint32_t>(config.head_dim);
+    const bf16_t* feature = target_feature + static_cast<std::size_t>(skip) * hidden;
+    const uint32_t effective_position = position_start + skip;
+    const std::size_t layer_stride =
+        static_cast<std::size_t>(capacity) * kv_features;
+    bf16_t* k_ring = state.k_ring.data<bf16_t>();
+    bf16_t* v_ring = state.v_ring.data<bf16_t>();
+
+    if (executor.backbone_psq4) {
+        Status st = dflash2_quantize_a8(executor, feature, effective_rows, hidden, hidden,
+                                        "k_ctx_proj", stream);
+        if (!st.ok()) return st;
+    }
+    for (uint32_t li = 0; li < state.num_layers; ++li) {
+        const DFlash2LayerWeights& layer = executor.weights->layers[li];
+        Status st = Status::make_ok();
+        if (executor.backbone_psq4) {
+            st = dflash2_gemm_psq4(executor, layer.attn_k_proj,
+                                   executor.k_ctx_raw.data<bf16_t>(), kv_features,
+                                   effective_rows, "k_ctx_proj", stream);
+            if (!st.ok()) return st;
+            st = dflash2_gemm_psq4(executor, layer.attn_v_proj, executor.v_ctx.data<bf16_t>(),
+                                   kv_features, effective_rows, "v_ctx_proj", stream);
+            if (!st.ok()) return st;
+        } else {
+            st = layer_gemm_bf16(layer.attn_k_proj, feature, hidden,
+                                 executor.k_ctx_raw.data<bf16_t>(), kv_features,
+                                 effective_rows, "k_ctx_proj", stream, false);
+            if (!st.ok()) return st;
+            st = layer_gemm_bf16(layer.attn_v_proj, feature, hidden,
+                                 executor.v_ctx.data<bf16_t>(), kv_features, effective_rows,
+                                 "v_ctx_proj", stream, false);
+            if (!st.ok()) return st;
+        }
+        st = layer_rmsnorm_direct(
+            executor.k_ctx_raw.data<bf16_t>(), layer.attn_k_norm_weight,
+            executor.k_ctx_norm.data<bf16_t>(), effective_rows, kv_features, head_dim,
+            config.rms_norm_eps, "k_ctx_norm", stream);
+        if (!st.ok()) return st;
+        const hipError_t err = ps::kernel::launch_dflash2_rope_bf16(
+            executor.k_ctx_norm.data<bf16_t>(), kv_features,
+            executor.k_ctx_rope.data<bf16_t>(), kv_features, effective_rows, kv_features,
+            head_dim, effective_position, config.rope_theta, stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("dflash2 k_ctx rope launch", hipGetErrorString(err),
+                                     __FILE__, __LINE__);
+        }
+        const hipError_t append_err = ps::kernel::launch_dflash2_kv_ring_append_bf16(
+            executor.k_ctx_rope.data<bf16_t>(), executor.v_ctx.data<bf16_t>(),
+            k_ring + static_cast<std::size_t>(li) * layer_stride,
+            v_ring + static_cast<std::size_t>(li) * layer_stride, effective_rows, kv_features,
+            capacity, effective_position, stream);
+        if (append_err != hipSuccess) {
+            return Status::hip_error("dflash2 kv ring append launch",
+                                     hipGetErrorString(append_err), __FILE__, __LINE__);
+        }
+    }
+
+    const uint64_t new_length = static_cast<uint64_t>(state.length) + rows;
+    state.length = new_length > capacity ? capacity : static_cast<uint32_t>(new_length);
+    state.next_position = position_start + rows;
+    return Status::make_ok();
+}
+
+Status dflash2_forward_layer_stateless(
+    DFlash2Executor& executor,
+    uint32_t layer_index,
+    const bf16_t* hidden_in,
+    const bf16_t* target_feature,
+    uint32_t context_rows,
+    uint32_t context_position_start,
+    uint32_t block_position_start,
+    uint32_t block_rows,
+    bf16_t* output,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (hidden_in == nullptr || target_feature == nullptr || output == nullptr) {
+        return Status::invalid_argument("dflash2 layer buffers are null", __FILE__, __LINE__);
+    }
+    if (executor.weights == nullptr || executor.config == nullptr) {
+        return Status::invalid_state("dflash2 executor has no weights", __FILE__, __LINE__);
+    }
+    if (layer_index >= executor.weights->layers.size()) {
+        return Status::invalid_argument("dflash2 layer index out of range", __FILE__, __LINE__);
+    }
+    if (block_rows == 0u || block_rows > executor.max_rows) {
+        return Status::invalid_argument("dflash2 block rows out of range", __FILE__, __LINE__);
+    }
+    if (context_rows == 0u || context_rows > executor.max_context_rows) {
+        return Status::invalid_argument("dflash2 context rows out of range", __FILE__, __LINE__);
+    }
+    if (static_cast<uint64_t>(context_position_start) + context_rows !=
+        static_cast<uint64_t>(block_position_start)) {
+        return Status::invalid_argument(
+            "dflash2 requires contiguous context and block positions", __FILE__, __LINE__);
+    }
+
+    const DFlash2LayerWeights& layer = executor.weights->layers[layer_index];
+    const DFlash2Config& config = *executor.config;
+    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+    const uint32_t q_features = static_cast<uint32_t>(config.attention_q_rows());
+    const uint32_t kv_features = static_cast<uint32_t>(config.attention_kv_rows());
+    const uint32_t head_dim = static_cast<uint32_t>(config.head_dim);
+    const uint32_t q_heads = static_cast<uint32_t>(config.num_attention_heads);
+    const uint32_t kv_heads = static_cast<uint32_t>(config.num_key_value_heads);
+    const float eps = config.rms_norm_eps;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    Status st = Status::make_ok();
+    st = layer_rmsnorm_direct(
+        hidden_in, layer.input_layernorm_weight, executor.layer_input_norm.data<bf16_t>(),
+        block_rows, hidden, hidden, eps,
+        "input norm", stream);
+    if (!st.ok()) return st;
+
+    st = dflash2_grouped_conv_prepare(executor, executor.layer_input_norm.data<bf16_t>(),
+                                      layer, true, block_rows,
+                                      executor.attention_prepared.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+
+    const bf16_t* attention_prepared = executor.attention_prepared.data<bf16_t>();
+
+    if (executor.backbone_psq4) {
+        st = dflash2_quantize_a8(executor, attention_prepared, block_rows, hidden, hidden,
+                                 "q_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_q_proj, executor.q_raw.data<bf16_t>(),
+                               q_features, block_rows, "q_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_k_proj, executor.k_noise_raw.data<bf16_t>(),
+                               kv_features, block_rows, "k_noise_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_v_proj, executor.v_noise.data<bf16_t>(),
+                               kv_features, block_rows, "v_noise_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_quantize_a8(executor, target_feature, context_rows, hidden, hidden,
+                                 "k_ctx_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_k_proj, executor.k_ctx_raw.data<bf16_t>(),
+                               kv_features, context_rows, "k_ctx_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_v_proj, executor.v_ctx.data<bf16_t>(),
+                               kv_features, context_rows, "v_ctx_proj", stream);
+        if (!st.ok()) return st;
+    } else {
+        st = layer_gemm_bf16(layer.attn_q_proj, attention_prepared, hidden,
+                             executor.q_raw.data<bf16_t>(), q_features, block_rows, "q_proj",
+                             stream);
+        if (!st.ok()) return st;
+        st = layer_gemm_bf16(layer.attn_k_proj, target_feature, hidden,
+                             executor.k_ctx_raw.data<bf16_t>(), kv_features, context_rows,
+                             "k_ctx_proj", stream);
+        if (!st.ok()) return st;
+        st = layer_gemm_bf16(layer.attn_v_proj, target_feature, hidden,
+                             executor.v_ctx.data<bf16_t>(), kv_features, context_rows,
+                             "v_ctx_proj", stream);
+        if (!st.ok()) return st;
+        st = layer_gemm_bf16(layer.attn_k_proj, attention_prepared, hidden,
+                             executor.k_noise_raw.data<bf16_t>(), kv_features, block_rows,
+                             "k_noise_proj", stream);
+        if (!st.ok()) return st;
+        st = layer_gemm_bf16(layer.attn_v_proj, attention_prepared, hidden,
+                             executor.v_noise.data<bf16_t>(), kv_features, block_rows,
+                             "v_noise_proj", stream);
+        if (!st.ok()) return st;
+    }
+
+    hipError_t err = hipSuccess;
+    st = layer_rmsnorm_direct(executor.q_raw.data<bf16_t>(), layer.attn_q_norm_weight,
+                              executor.q_norm.data<bf16_t>(), block_rows, q_features,
+                              head_dim, eps, "q_norm", stream);
+    if (!st.ok()) return st;
+    st = layer_rmsnorm_direct(executor.k_ctx_raw.data<bf16_t>(), layer.attn_k_norm_weight,
+                              executor.k_ctx_norm.data<bf16_t>(), context_rows, kv_features,
+                              head_dim, eps, "k_ctx_norm", stream);
+    if (!st.ok()) return st;
+    st = layer_rmsnorm_direct(executor.k_noise_raw.data<bf16_t>(), layer.attn_k_norm_weight,
+                              executor.k_noise_norm.data<bf16_t>(), block_rows, kv_features,
+                              head_dim, eps, "k_noise_norm", stream);
+    if (!st.ok()) return st;
+
+    err = ps::kernel::launch_dflash2_rope_bf16(
+        executor.q_norm.data<bf16_t>(), q_features, executor.q_rope.data<bf16_t>(),
+        q_features, block_rows, q_features, head_dim, block_position_start,
+        config.rope_theta, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 q rope launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    err = ps::kernel::launch_dflash2_rope_bf16(
+        executor.k_ctx_norm.data<bf16_t>(), kv_features, executor.k_ctx_rope.data<bf16_t>(),
+        kv_features, context_rows, kv_features, head_dim, context_position_start,
+        config.rope_theta, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 k_ctx rope launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    err = ps::kernel::launch_dflash2_rope_bf16(
+        executor.k_noise_norm.data<bf16_t>(), kv_features,
+        executor.k_noise_rope.data<bf16_t>(), kv_features, block_rows, kv_features, head_dim,
+        block_position_start, config.rope_theta, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 k_noise rope launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+
+    err = ps::kernel::launch_dflash2_attention_bf16(
+        executor.q_rope.data<bf16_t>(), q_features, executor.k_ctx_rope.data<bf16_t>(),
+        executor.v_ctx.data<bf16_t>(), context_rows, kv_features,
+        executor.k_noise_rope.data<bf16_t>(), executor.v_noise.data<bf16_t>(), block_rows,
+        kv_features, executor.attention_context.data<bf16_t>(), q_features, q_heads, kv_heads,
+        head_dim, context_position_start, block_position_start,
+        static_cast<uint32_t>(config.sliding_window), scale, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 attention launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+
+    return layer_attention_tail(executor, layer, hidden_in, block_rows, output, stream);
+}
+
+Status dflash2_forward_backbone_stateless(
+    DFlash2Executor& executor,
+    const bf16_t* noise_embedding,
+    const bf16_t* target_feature,
+    uint32_t context_rows,
+    uint32_t context_position_start,
+    uint32_t block_position_start,
+    uint32_t block_rows,
+    bf16_t* output,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (noise_embedding == nullptr || target_feature == nullptr || output == nullptr) {
+        return Status::invalid_argument("dflash2 backbone buffers are null", __FILE__, __LINE__);
+    }
+    if (executor.weights == nullptr || executor.config == nullptr) {
+        return Status::invalid_state("dflash2 executor has no weights", __FILE__, __LINE__);
+    }
+    const uint32_t layers = static_cast<uint32_t>(executor.weights->layers.size());
+    if (layers == 0u || layers != executor.config->num_hidden_layers) {
+        return Status::invalid_state("dflash2 backbone layer count mismatch", __FILE__,
+                                     __LINE__);
+    }
+    if (block_rows == 0u || block_rows > executor.max_rows) {
+        return Status::invalid_argument("dflash2 backbone block rows out of range", __FILE__,
+                                        __LINE__);
+    }
+    if (block_rows > executor.config->block_size) {
+        return Status::invalid_argument("dflash2 backbone block rows exceed block_size",
+                                        __FILE__, __LINE__);
+    }
+    if (context_rows == 0u || context_rows > executor.max_context_rows) {
+        return Status::invalid_argument("dflash2 backbone context rows out of range", __FILE__,
+                                        __LINE__);
+    }
+    if (static_cast<uint64_t>(context_position_start) + context_rows !=
+        static_cast<uint64_t>(block_position_start)) {
+        return Status::invalid_argument(
+            "dflash2 requires contiguous context and block positions", __FILE__, __LINE__);
+    }
+
+    bf16_t* hidden_a = executor.backbone_hidden_a.data<bf16_t>();
+    bf16_t* hidden_b = executor.backbone_hidden_b.data<bf16_t>();
+    const bf16_t* src = noise_embedding;
+    for (uint32_t li = 0; li < layers; ++li) {
+        bf16_t* dst = (li % 2u == 0u) ? hidden_a : hidden_b;
+        const Status st = dflash2_forward_layer_stateless(
+            executor, li, src, target_feature, context_rows, context_position_start,
+            block_position_start, block_rows, dst, stream);
+        if (!st.ok()) return st;
+        src = dst;
+    }
+
+    const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
+    const hipError_t err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+        src, executor.weights->final_norm_weight.data<bf16_t>(), output, block_rows, hidden,
+        hidden, executor.config->rms_norm_eps, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 final norm launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    return Status::make_ok();
+}
+
+namespace {
+
+Status lm_head_validate(const DFlash2Executor& executor, uint32_t rows) {
+    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const DFlash2Config& config = *executor.config;
+    if (weight.encoding != ps::weights::MatrixEncoding::Psq8) {
+        return Status::unsupported("dflash2 target lm_head is not psq8", __FILE__, __LINE__);
+    }
+    if (weight.rows != config.vocab_size || weight.cols != config.hidden_size) {
+        return Status::invalid_argument("dflash2 target lm_head shape mismatch", __FILE__,
+                                        __LINE__);
+    }
+    if (!weight.preshuffled || weight.weight_scale_group != 32u) {
+        return Status::invalid_argument("dflash2 target lm_head layout invalid", __FILE__,
+                                        __LINE__);
+    }
+    if (rows == 0u || rows > executor.draft_rows) {
+        return Status::invalid_argument("dflash2 logits rows out of range", __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status lm_head_quantize(
+    DFlash2Executor& executor,
+    const bf16_t* hidden,
+    uint32_t rows,
+    hipStream_t stream) {
+    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
+        weight.cols, executor.draft_rows);
+    if (layout.codes_bytes() > executor.activation_codes.dim(0) ||
+        layout.scales_bytes() > executor.activation_scales.dim(0) * sizeof(float)) {
+        return Status::invalid_state("dflash2 activation workspace too small", __FILE__,
+                                     __LINE__);
+    }
+    const hipError_t err = ps::kernel::launch_activation_quantize_e4m3(
+        hidden, reinterpret_cast<uint8_t*>(executor.activation_codes.data<int8_t>()),
+        executor.activation_scales.data<float>(), rows, weight.cols, weight.k_padded,
+        weight.cols, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 lm_head activation quantize launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status lm_head_gemm(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    float* logits,
+    uint32_t logits_row_stride,
+    hipStream_t stream) {
+    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const uint32_t k_padded = weight.k_padded;
+    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
+        weight.cols, executor.draft_rows);
+    const ps::qwen35::runtime::Psq8GemmSelectorInput lin{rows, weight.rows, weight.cols,
+                                                         k_padded};
+    const auto gemm = ps::qwen35::runtime::select_psq8_gemm_config(lin);
+    if (!gemm) {
+        return Status::unsupported("dflash2 target lm_head has no psq8 gemm geometry",
+                                   __FILE__, __LINE__);
+    }
+    const hipError_t err = ps::kernel::launch_gemm_psq8_w8a8_wmma_auto(
+        *gemm, weight.codes.data<uint8_t>(), weight.scales.data<uint8_t>(),
+        executor.activation_codes.data<int8_t>(),
+        executor.activation_scales.data<float>(), logits,
+        ps::kernel::Psq8GemmOutputDType::F32, rows, weight.rows, k_padded,
+        weight.storage_scale_stride_bytes, layout.code_row_stride_bytes,
+        layout.scale_row_stride_bytes, logits_row_stride, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 target lm_head gemm launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status lm_head_logits(
+    DFlash2Executor& executor,
+    const bf16_t* hidden,
+    uint32_t rows,
+    float* logits,
+    uint32_t logits_row_stride,
+    hipStream_t stream) {
+    Status st = lm_head_validate(executor, rows);
+    if (!st.ok())
+        return st;
+    st = lm_head_quantize(executor, hidden, rows, stream);
+    if (!st.ok())
+        return st;
+    return lm_head_gemm(executor, rows, logits, logits_row_stride, stream);
+}
+
+Status int2_coarse_logits(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    hipStream_t stream) {
+    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
+        weight.cols, executor.draft_rows);
+    const uint32_t* expand_table =
+        reinterpret_cast<const uint32_t*>(executor.int2_tables.data<uint8_t>() + 256u);
+    const hipError_t err = ps::kernel::launch_dflash2_int2_coarse_head(
+        executor.int2_codes.data<uint8_t>(), weight.scales.data<uint8_t>(),
+        executor.activation_codes.data<uint8_t>(),
+        executor.activation_scales.data<float>(), expand_table,
+        executor.int2_coarse_logits.data<float>(), rows, weight.rows, weight.k_padded,
+        weight.storage_scale_stride_bytes, layout.code_row_stride_bytes,
+        layout.scale_row_stride_bytes, weight.rows, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 int2 coarse head launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status int2_coarse_topn(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    hipStream_t stream) {
+    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const hipError_t err = ps::kernel::launch_dflash2_coarse_topn(
+        executor.int2_coarse_logits.data<float>(), rows, weight.rows, weight.rows,
+        executor.int2_pool, executor.int2_pool_ids.data<int32_t>(),
+        executor.int2_pool_logits.data<float>(), executor.int2_scratch_ids.data<int32_t>(),
+        executor.int2_scratch_logits.data<float>(), executor.int2_scratch_row_stride,
+        executor.int2_partitions, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 int2 coarse topn launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status int2_rerank(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    hipStream_t stream) {
+    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
+        weight.cols, executor.draft_rows);
+    const hipError_t err = ps::kernel::launch_dflash2_psq8_candidate_rerank(
+        weight.codes.data<uint8_t>(), weight.scales.data<uint8_t>(),
+        executor.activation_codes.data<uint8_t>(),
+        executor.activation_scales.data<float>(), executor.int2_pool_ids.data<int32_t>(),
+        executor.int2_rerank_logits.data<float>(), rows, executor.int2_pool, weight.k_padded,
+        weight.storage_scale_stride_bytes, layout.code_row_stride_bytes,
+        layout.scale_row_stride_bytes, executor.int2_pool, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 psq8 candidate rerank launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status int2_small_top16(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    const float* rerank_logits,
+    int32_t* out_ids,
+    float* out_logits,
+    hipStream_t stream) {
+    ps::kernel::DFlash2TopKPlan plan;
+    plan.threads = ps::kernel::kDflash2TopKThreads;
+    const uint32_t partitions = executor.int2_pool / ps::kernel::kDflash2TopKMaxK;
+    plan.partitions = partitions == 0u ? 1u : partitions;
+    if (plan.partitions > ps::kernel::kDflash2TopKMaxPartitions)
+        plan.partitions = ps::kernel::kDflash2TopKMaxPartitions;
+    const hipError_t err = ps::kernel::launch_dflash2_topk_f32_optimized(
+        rerank_logits, rows, executor.int2_pool, executor.int2_pool,
+        ps::kernel::kDflash2TopKMaxK, out_ids, out_logits,
+        executor.topk_scratch_ids.data<int32_t>(), executor.topk_scratch_logits.data<float>(),
+        plan, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 int2 small top16 launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    const hipError_t remap = ps::kernel::launch_dflash2_int2_remap_pool_ids(
+        out_ids, executor.int2_pool_ids.data<int32_t>(), out_ids, rows,
+        ps::kernel::kDflash2TopKMaxK, executor.int2_pool, ps::kernel::kDflash2TopKMaxK,
+        stream);
+    if (remap != hipSuccess) {
+        return Status::hip_error("dflash2 int2 pool id remap launch",
+                                 hipGetErrorString(remap), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status int2_select_impl(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    int32_t* out_rerank_ids,
+    float* out_rerank_logits,
+    hipStream_t stream) {
+    Status st = int2_coarse_logits(executor, rows, stream);
+    if (!st.ok())
+        return st;
+    st = int2_coarse_topn(executor, rows, stream);
+    if (!st.ok())
+        return st;
+    st = int2_rerank(executor, rows, stream);
+    if (!st.ok())
+        return st;
+    return int2_small_top16(executor, rows, executor.int2_rerank_logits.data<float>(),
+                            out_rerank_ids, out_rerank_logits, stream);
+}
+
+}  // namespace
+
+
+Status dflash2_compute_target_logits(
+    DFlash2Executor& executor,
+    const bf16_t* hidden,
+    uint32_t rows,
+    float* logits,
+    uint32_t logits_row_stride,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (hidden == nullptr || logits == nullptr) {
+        return Status::invalid_argument("dflash2 logits buffers are null", __FILE__, __LINE__);
+    }
+    if (executor.config == nullptr || executor.target_lm_head == nullptr) {
+        return Status::invalid_state("dflash2 executor has no target lm_head", __FILE__,
+                                     __LINE__);
+    }
+    if (rows == 0u || rows > executor.draft_rows) {
+        return Status::invalid_argument("dflash2 logits rows out of range", __FILE__,
+                                        __LINE__);
+    }
+    return lm_head_logits(executor, hidden, rows, logits, logits_row_stride, stream);
+}
+
+Status dflash2_run_candidate_selector(
+    DFlash2Executor& executor,
+    const bf16_t* hidden_proj,
+    const int32_t* topk_ids,
+    const float* topk_logits,
+    uint32_t draft_rows,
+    int32_t anchor_token,
+    int32_t* output_draft_tokens,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (hidden_proj == nullptr || topk_ids == nullptr || topk_logits == nullptr ||
+        output_draft_tokens == nullptr) {
+        return Status::invalid_argument("dflash2 selector buffers are null", __FILE__,
+                                        __LINE__);
+    }
+    if (executor.weights == nullptr || executor.config == nullptr) {
+        return Status::invalid_state("dflash2 executor has no weights", __FILE__, __LINE__);
+    }
+    if (draft_rows == 0u || draft_rows > executor.draft_rows) {
+        return Status::invalid_argument("dflash2 selector draft rows out of range", __FILE__,
+                                        __LINE__);
+    }
+    ps::kernel::DFlash2CandidateSelectorArgs args;
+    args.hidden_proj = hidden_proj;
+    args.topk_ids = topk_ids;
+    args.topk_logits = topk_logits;
+    args.predecessor_codebook =
+        executor.weights->selector.predecessor_codebook.data<bf16_t>();
+    args.successor_codebook =
+        executor.weights->selector.successor_codebook.data<bf16_t>();
+    args.anchor_token = anchor_token;
+    args.output_tokens = output_draft_tokens;
+    args.draft_rows = draft_rows;
+    args.rank = executor.config->selector_rank;
+    args.top_k = executor.config->selector_top_k;
+    args.vocab_size = executor.config->vocab_size;
+    const hipError_t err =
+        ps::kernel::launch_dflash2_candidate_selector(args, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 candidate selector launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+namespace {
+
+Status full_vocab_top16(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    int32_t* out_ids,
+    float* out_logits,
+    hipStream_t stream) {
+    const uint32_t vocab = executor.target_lm_head->rows;
+    hipError_t err;
+    if (topk_reference_enabled()) {
+        err = ps::kernel::launch_dflash2_topk_f32(
+            executor.proposal_logits.data<float>(), rows, vocab, vocab,
+            ps::kernel::kDflash2TopKMaxK, out_ids, out_logits,
+            executor.topk_scratch_ids.data<int32_t>(),
+            executor.topk_scratch_logits.data<float>(), stream);
+    } else {
+        err = ps::kernel::launch_dflash2_topk_f32_optimized(
+            executor.proposal_logits.data<float>(), rows, vocab, vocab,
+            ps::kernel::kDflash2TopKMaxK, out_ids, out_logits,
+            executor.topk_scratch_ids.data<int32_t>(),
+            executor.topk_scratch_logits.data<float>(), topk_plan(), stream);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 top16 launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    return Status::make_ok();
+}
+
+double int2_ev_ms(const hipEvent_t& a, const hipEvent_t& b) {
+    float ms = 0.0f;
+    (void)hipEventElapsedTime(&ms, a, b);
+    return static_cast<double>(ms);
+}
+
+void int2_diag_accumulate(
+    DFlash2Executor& executor,
+    uint32_t draft,
+    const int32_t* full_tokens,
+    const hipEvent_t* ev) {
+    const uint32_t k = ps::kernel::kDflash2TopKMaxK;
+    const uint32_t pool = executor.int2_pool;
+    std::vector<int32_t> full_ids(static_cast<std::size_t>(draft) * k, 0);
+    std::vector<int32_t> rerank_ids(static_cast<std::size_t>(draft) * k, 0);
+    std::vector<int32_t> coarse_ids(static_cast<std::size_t>(draft) * pool, 0);
+    std::vector<int32_t> tokens_full(draft, 0);
+    std::vector<int32_t> tokens_rerank(draft, 0);
+    (void)hipMemcpy(full_ids.data(), executor.int2_diag_ids.data<int32_t>(),
+                    full_ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
+    (void)hipMemcpy(rerank_ids.data(), executor.proposal_topk_ids.data<int32_t>(),
+                    rerank_ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
+    (void)hipMemcpy(coarse_ids.data(), executor.int2_pool_ids.data<int32_t>(),
+                    coarse_ids.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
+    (void)hipMemcpy(tokens_full.data(), full_tokens, draft * sizeof(int32_t),
+                    hipMemcpyDeviceToHost);
+    (void)hipMemcpy(tokens_rerank.data(), executor.int2_diag_tokens.data<int32_t>(),
+                    draft * sizeof(int32_t), hipMemcpyDeviceToHost);
+
+    Int2DiagCounters& c = int2_diag_counters();
+    ++c.rounds;
+    for (uint32_t r = 0u; r < draft; ++r) {
+        ++c.rows;
+        const int32_t* e16 = &full_ids[static_cast<std::size_t>(r) * k];
+        const int32_t* rr = &rerank_ids[static_cast<std::size_t>(r) * k];
+        const int32_t* cn = &coarse_ids[static_cast<std::size_t>(r) * pool];
+        uint32_t hits = 0u;
+        bool top1 = false;
+        bool contain = true;
+        for (uint32_t i = 0u; i < k; ++i) {
+            bool found = false;
+            for (uint32_t j = 0u; j < pool; ++j) {
+                if (cn[j] == e16[i]) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found)
+                ++hits;
+            else
+                contain = false;
+            if (i == 0u)
+                top1 = found;
+        }
+        c.top1_hit += top1 ? 1u : 0u;
+        c.top16_hits += hits;
+        c.containment += contain ? 1u : 0u;
+        bool selector_cov = false;
+        for (uint32_t j = 0u; j < pool; ++j) {
+            if (cn[j] == tokens_full[r]) {
+                selector_cov = true;
+                break;
+            }
+        }
+        c.selector_cov += selector_cov ? 1u : 0u;
+        uint32_t set_hits = 0u;
+        bool ordered = true;
+        for (uint32_t i = 0u; i < k; ++i) {
+            if (rr[i] != e16[i])
+                ordered = false;
+            for (uint32_t j = 0u; j < k; ++j) {
+                if (rr[i] == e16[j]) {
+                    ++set_hits;
+                    break;
+                }
+            }
+        }
+        c.rerank_set_match += (set_hits == k) ? 1u : 0u;
+        c.rerank_ordered += ordered ? 1u : 0u;
+        c.rerank_top1_match += (rr[0] == e16[0]) ? 1u : 0u;
+        c.token_match += (tokens_full[r] == tokens_rerank[r]) ? 1u : 0u;
+    }
+
+    c.quant_ms += int2_ev_ms(ev[0], ev[1]);
+    c.full_ms += int2_ev_ms(ev[1], ev[2]);
+    c.coarse_ms += int2_ev_ms(ev[2], ev[3]);
+    c.topn_ms += int2_ev_ms(ev[3], ev[4]);
+    c.rerank_ms += int2_ev_ms(ev[4], ev[5]);
+    c.top16_ms += int2_ev_ms(ev[5], ev[6]);
+    c.selector_ms += int2_ev_ms(ev[6], ev[7]);
+    const double pipe = int2_ev_ms(ev[0], ev[7]);
+    c.pipeline_ms += pipe;
+
+    const double rows = static_cast<double>(c.rows);
+    std::printf(
+        "DFLASH2_INT2_DIAG rounds=%llu rows=%llu pool=%u top1=%.4f recall16=%.4f "
+        "contain=%.4f selcov=%.4f setmatch=%.4f ordered=%.4f top1match=%.4f "
+        "tokenmatch=%.4f quant_ms=%.3f coarse_ms=%.3f topn_ms=%.3f rerank_ms=%.3f "
+        "top16_ms=%.3f full_ms=%.3f selector_ms=%.3f pipe_ms=%.3f\n",
+        static_cast<unsigned long long>(c.rounds),
+        static_cast<unsigned long long>(c.rows), pool,
+        static_cast<double>(c.top1_hit) / rows,
+        static_cast<double>(c.top16_hits) / (rows * k),
+        static_cast<double>(c.containment) / rows,
+        static_cast<double>(c.selector_cov) / rows,
+        static_cast<double>(c.rerank_set_match) / rows,
+        static_cast<double>(c.rerank_ordered) / rows,
+        static_cast<double>(c.rerank_top1_match) / rows,
+        static_cast<double>(c.token_match) / rows, c.quant_ms, c.coarse_ms, c.topn_ms,
+        c.rerank_ms, c.top16_ms, c.full_ms, c.selector_ms, c.pipeline_ms);
+}
+
+void int2_timing_accumulate(uint32_t draft, const hipEvent_t* ev, bool full_head_timed) {
+    Int2DiagCounters& c = int2_diag_counters();
+    ++c.rounds;
+    c.rows += draft;
+    c.quant_ms += int2_ev_ms(ev[0], ev[1]);
+    if (full_head_timed)
+        c.full_ms += int2_ev_ms(ev[1], ev[2]);
+    c.coarse_ms += int2_ev_ms(ev[full_head_timed ? 2 : 1], ev[3]);
+    c.topn_ms += int2_ev_ms(ev[3], ev[4]);
+    c.rerank_ms += int2_ev_ms(ev[4], ev[5]);
+    c.top16_ms += int2_ev_ms(ev[5], ev[6]);
+    c.selector_ms += int2_ev_ms(ev[6], ev[7]);
+    c.pipeline_ms += int2_ev_ms(ev[0], ev[7]);
+    const double rounds = static_cast<double>(c.rounds);
+    std::printf(
+        "DFLASH2_INT2_TIMING rounds=%llu quant=%.3f full=%.3f coarse=%.3f topn=%.3f "
+        "rerank=%.3f top16=%.3f selector=%.3f pipe=%.3f\n",
+        static_cast<unsigned long long>(c.rounds), c.quant_ms / rounds, c.full_ms / rounds,
+        c.coarse_ms / rounds, c.topn_ms / rounds, c.rerank_ms / rounds, c.top16_ms / rounds,
+        c.selector_ms / rounds, c.pipeline_ms / rounds);
+}
+
+Status int2_select_path(
+    DFlash2Executor& executor,
+    const bf16_t* draft_hidden,
+    uint32_t draft,
+    int32_t anchor_token,
+    int32_t* output_draft_tokens,
+    hipStream_t stream) {
+    const bool diag = executor.int2_head_mode == 2u && int2_diag_enabled();
+    const bool timing = diag || int2_timing_enabled();
+    hipEvent_t ev[8] = {};
+    if (timing) {
+        for (auto& e : ev)
+            (void)hipEventCreate(&e);
+        (void)hipEventRecord(ev[0], stream);
+    }
+
+    Status st = lm_head_quantize(executor, draft_hidden, draft, stream);
+    if (!st.ok())
+        return st;
+    if (timing)
+        (void)hipEventRecord(ev[1], stream);
+
+    if (diag) {
+        st = lm_head_gemm(executor, draft, executor.proposal_logits.data<float>(),
+                          executor.target_lm_head->rows, stream);
+        if (!st.ok())
+            return st;
+        st = full_vocab_top16(executor, draft, executor.int2_diag_ids.data<int32_t>(),
+                              executor.int2_diag_logits.data<float>(), stream);
+        if (!st.ok())
+            return st;
+        (void)hipEventRecord(ev[2], stream);
+    }
+
+    st = int2_coarse_logits(executor, draft, stream);
+    if (!st.ok())
+        return st;
+    if (timing)
+        (void)hipEventRecord(ev[3], stream);
+
+    st = int2_coarse_topn(executor, draft, stream);
+    if (!st.ok())
+        return st;
+    if (timing)
+        (void)hipEventRecord(ev[4], stream);
+
+    st = int2_rerank(executor, draft, stream);
+    if (!st.ok())
+        return st;
+    if (timing)
+        (void)hipEventRecord(ev[5], stream);
+
+    st = int2_small_top16(executor, draft, executor.int2_rerank_logits.data<float>(),
+                          executor.proposal_topk_ids.data<int32_t>(),
+                          executor.proposal_topk_logits.data<float>(), stream);
+    if (!st.ok())
+        return st;
+    if (timing)
+        (void)hipEventRecord(ev[6], stream);
+
+
+    if (diag) {
+        st = dflash2_run_candidate_selector(
+            executor, executor.selector_hidden_proj.data<bf16_t>(),
+            executor.int2_diag_ids.data<int32_t>(),
+            executor.int2_diag_logits.data<float>(), draft, anchor_token,
+            output_draft_tokens, stream);
+        if (!st.ok())
+            return st;
+        st = dflash2_run_candidate_selector(
+            executor, executor.selector_hidden_proj.data<bf16_t>(),
+            executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(), draft, anchor_token,
+            executor.int2_diag_tokens.data<int32_t>(), stream);
+        if (!st.ok())
+            return st;
+        (void)hipEventRecord(ev[7], stream);
+        (void)hipStreamSynchronize(stream);
+        int2_diag_accumulate(executor, draft, output_draft_tokens, ev);
+        for (auto& e : ev)
+            (void)hipEventDestroy(e);
+        return Status::make_ok();
+    }
+
+    st = dflash2_run_candidate_selector(
+        executor, executor.selector_hidden_proj.data<bf16_t>(),
+        executor.proposal_topk_ids.data<int32_t>(),
+        executor.proposal_topk_logits.data<float>(), draft, anchor_token,
+        output_draft_tokens, stream);
+    if (!st.ok())
+        return st;
+    if (timing) {
+        (void)hipEventRecord(ev[7], stream);
+        (void)hipStreamSynchronize(stream);
+        int2_timing_accumulate(draft, ev, false);
+        for (auto& e : ev)
+            (void)hipEventDestroy(e);
+    }
+    return Status::make_ok();
+}
+
+}  // namespace
+
+Status dflash2_select_draft_tokens(
+    DFlash2Executor& executor,
+    const bf16_t* final_hidden,
+    uint32_t block_rows,
+    int32_t anchor_token,
+    int32_t* output_draft_tokens,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (final_hidden == nullptr || output_draft_tokens == nullptr) {
+        return Status::invalid_argument("dflash2 select buffers are null", __FILE__, __LINE__);
+    }
+    if (executor.config == nullptr || executor.weights == nullptr) {
+        return Status::invalid_state("dflash2 executor has no weights", __FILE__, __LINE__);
+    }
+    if (executor.target_lm_head == nullptr) {
+        return Status::invalid_state("dflash2 executor has no target lm_head", __FILE__,
+                                     __LINE__);
+    }
+    if (block_rows < 2u || block_rows > executor.config->block_size ||
+        block_rows - 1u > executor.draft_rows) {
+        return Status::invalid_argument("dflash2 select block rows out of range", __FILE__,
+                                        __LINE__);
+    }
+    const uint32_t draft = block_rows - 1u;
+    const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
+    const uint32_t rank = executor.config->selector_rank;
+    const uint32_t vocab = executor.config->vocab_size;
+    const uint32_t top_k = executor.config->selector_top_k;
+    const bf16_t* draft_hidden = final_hidden + hidden;
+
+    const ps::weights::MatrixWeight& projection =
+        executor.weights->selector.hidden_projection;
+    const auto gemm = select_bf16_gemm_exact(projection, draft, hidden,
+                                             projection.bf16.data<void>(), draft_hidden);
+    if (!gemm) {
+        return Status::unsupported(
+            "dflash2 selector hidden projection has no exact bf16 gemm geometry", __FILE__,
+            __LINE__);
+    }
+    hipError_t err = ps::kernel::launch_gemm_bf16(
+        *gemm, projection.bf16.data<bf16_t>(), draft_hidden,
+        executor.selector_hidden_proj.data<bf16_t>(),
+        ps::kernel::Bf16GemmOutputDType::BF16, draft, projection.rows, projection.cols,
+        hidden, rank, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 selector hidden projection launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+
+    if (executor.int2_head_mode != 0u) {
+        return int2_select_path(executor, draft_hidden, draft, anchor_token,
+                                output_draft_tokens, stream);
+    }
+
+    Status st = lm_head_logits(executor, draft_hidden, draft,
+                               executor.proposal_logits.data<float>(), vocab, stream);
+    if (!st.ok()) return st;
+
+    const bool use_reference =
+        topk_reference_enabled() || top_k != ps::kernel::kDflash2TopKMaxK;
+    if (use_reference) {
+        err = ps::kernel::launch_dflash2_topk_f32(
+            executor.proposal_logits.data<float>(), draft, vocab, vocab, top_k,
+            executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(),
+            executor.topk_scratch_ids.data<int32_t>(),
+            executor.topk_scratch_logits.data<float>(), stream);
+    } else {
+        err = ps::kernel::launch_dflash2_topk_f32_optimized(
+            executor.proposal_logits.data<float>(), draft, vocab, vocab, top_k,
+            executor.proposal_topk_ids.data<int32_t>(),
+            executor.proposal_topk_logits.data<float>(),
+            executor.topk_scratch_ids.data<int32_t>(),
+            executor.topk_scratch_logits.data<float>(), topk_plan(), stream);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 topk launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+
+    return dflash2_run_candidate_selector(
+        executor, executor.selector_hidden_proj.data<bf16_t>(),
+        executor.proposal_topk_ids.data<int32_t>(),
+        executor.proposal_topk_logits.data<float>(), draft, anchor_token,
+        output_draft_tokens, stream);
+}
+
+Status dflash2_forward_and_select_stateless(
+    DFlash2Executor& executor,
+    const bf16_t* noise_embedding,
+    const bf16_t* target_feature,
+    uint32_t context_rows,
+    uint32_t context_position_start,
+    uint32_t block_position_start,
+    uint32_t block_rows,
+    int32_t anchor_token,
+    int32_t* output_draft_tokens,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (output_draft_tokens == nullptr) {
+        return Status::invalid_argument("dflash2 select output is null", __FILE__, __LINE__);
+    }
+    Status st = dflash2_forward_backbone_stateless(
+        executor, noise_embedding, target_feature, context_rows, context_position_start,
+        block_position_start, block_rows, executor.backbone_output.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+    return dflash2_select_draft_tokens(executor, executor.backbone_output.data<bf16_t>(),
+                                       block_rows, anchor_token, output_draft_tokens,
+                                       stream);
+}
+
+namespace {
+
+Status validate_cached_context(
+    const DFlash2Executor& executor,
+    const DFlash2ContextState& context,
+    uint32_t block_position_start,
+    uint32_t block_rows) {
+    if (!executor.initialized || executor.config == nullptr || executor.weights == nullptr) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (!context.initialized) {
+        return Status::invalid_state("dflash2 context state not initialized", __FILE__,
+                                     __LINE__);
+    }
+    const DFlash2Config& config = *executor.config;
+    if (context.num_layers != config.num_hidden_layers ||
+        context.kv_features != config.attention_kv_rows() ||
+        context.capacity != config.sliding_window) {
+        return Status::invalid_argument("dflash2 context contract mismatch", __FILE__,
+                                        __LINE__);
+    }
+    if (context.length == 0u || context.length > context.capacity) {
+        return Status::invalid_argument("dflash2 context length out of range", __FILE__,
+                                        __LINE__);
+    }
+    if (block_position_start != context.next_position) {
+        return Status::invalid_argument(
+            "dflash2 cached block must start at context next_position", __FILE__, __LINE__);
+    }
+    if (block_rows == 0u || block_rows > executor.max_rows ||
+        block_rows > config.block_size) {
+        return Status::invalid_argument("dflash2 cached block rows out of range", __FILE__,
+                                        __LINE__);
+    }
+    return Status::make_ok();
+}
+
+}  // namespace
+
+Status dflash2_forward_layer_cached(
+    DFlash2Executor& executor,
+    const DFlash2ContextState& context,
+    uint32_t layer_index,
+    const bf16_t* hidden_in,
+    uint32_t block_position_start,
+    uint32_t block_rows,
+    bf16_t* output,
+    hipStream_t stream) {
+    if (hidden_in == nullptr || output == nullptr) {
+        return Status::invalid_argument("dflash2 cached layer buffers are null", __FILE__,
+                                        __LINE__);
+    }
+    Status st = validate_cached_context(executor, context, block_position_start, block_rows);
+    if (!st.ok()) return st;
+    if (layer_index >= executor.weights->layers.size()) {
+        return Status::invalid_argument("dflash2 layer index out of range", __FILE__, __LINE__);
+    }
+
+    const DFlash2Config& config = *executor.config;
+    const DFlash2LayerWeights& layer = executor.weights->layers[layer_index];
+    const uint32_t hidden = static_cast<uint32_t>(config.hidden_size);
+    const uint32_t q_features = static_cast<uint32_t>(config.attention_q_rows());
+    const uint32_t kv_features = static_cast<uint32_t>(config.attention_kv_rows());
+    const uint32_t head_dim = static_cast<uint32_t>(config.head_dim);
+    const uint32_t q_heads = static_cast<uint32_t>(config.num_attention_heads);
+    const uint32_t kv_heads = static_cast<uint32_t>(config.num_key_value_heads);
+    const float eps = config.rms_norm_eps;
+    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    const uint32_t context_rows = context.length;
+    const uint32_t context_start = context.next_position - context.length;
+    const std::size_t layer_stride =
+        static_cast<std::size_t>(context.capacity) * context.kv_features;
+    const bf16_t* k_ring = context.k_ring.data<bf16_t>() +
+                           static_cast<std::size_t>(layer_index) * layer_stride;
+    const bf16_t* v_ring = context.v_ring.data<bf16_t>() +
+                           static_cast<std::size_t>(layer_index) * layer_stride;
+
+    st = layer_rmsnorm_direct(
+        hidden_in, layer.input_layernorm_weight, executor.layer_input_norm.data<bf16_t>(),
+        block_rows, hidden, hidden, eps, "input norm", stream);
+    if (!st.ok()) return st;
+
+    st = dflash2_grouped_conv_prepare(executor, executor.layer_input_norm.data<bf16_t>(),
+                                      layer, true, block_rows,
+                                      executor.attention_prepared.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+
+    const bf16_t* attention_prepared = executor.attention_prepared.data<bf16_t>();
+    if (executor.backbone_psq4) {
+        st = dflash2_quantize_a8(executor, attention_prepared, block_rows, hidden, hidden,
+                                 "q_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_q_proj, executor.q_raw.data<bf16_t>(),
+                               q_features, block_rows, "q_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_k_proj, executor.k_noise_raw.data<bf16_t>(),
+                               kv_features, block_rows, "k_noise_proj", stream);
+        if (!st.ok()) return st;
+        st = dflash2_gemm_psq4(executor, layer.attn_v_proj, executor.v_noise.data<bf16_t>(),
+                               kv_features, block_rows, "v_noise_proj", stream);
+        if (!st.ok()) return st;
+    } else {
+        st = layer_gemm_bf16(layer.attn_q_proj, attention_prepared, hidden,
+                             executor.q_raw.data<bf16_t>(), q_features, block_rows, "q_proj",
+                             stream);
+        if (!st.ok()) return st;
+        st = layer_gemm_bf16(layer.attn_k_proj, attention_prepared, hidden,
+                             executor.k_noise_raw.data<bf16_t>(), kv_features, block_rows,
+                             "k_noise_proj", stream);
+        if (!st.ok()) return st;
+        st = layer_gemm_bf16(layer.attn_v_proj, attention_prepared, hidden,
+                             executor.v_noise.data<bf16_t>(), kv_features, block_rows,
+                             "v_noise_proj", stream);
+        if (!st.ok()) return st;
+    }
+
+    hipError_t err = hipSuccess;
+    st = layer_rmsnorm_direct(executor.q_raw.data<bf16_t>(), layer.attn_q_norm_weight,
+                              executor.q_norm.data<bf16_t>(), block_rows, q_features,
+                              head_dim, eps, "q_norm", stream);
+    if (!st.ok()) return st;
+    st = layer_rmsnorm_direct(executor.k_noise_raw.data<bf16_t>(),
+                              layer.attn_k_norm_weight,
+                              executor.k_noise_norm.data<bf16_t>(), block_rows,
+                              kv_features, head_dim, eps, "k_noise_norm", stream);
+    if (!st.ok()) return st;
+
+    err = ps::kernel::launch_dflash2_rope_bf16(
+        executor.q_norm.data<bf16_t>(), q_features, executor.q_rope.data<bf16_t>(),
+        q_features, block_rows, q_features, head_dim, block_position_start,
+        config.rope_theta, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 q rope launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    err = ps::kernel::launch_dflash2_rope_bf16(
+        executor.k_noise_norm.data<bf16_t>(), kv_features,
+        executor.k_noise_rope.data<bf16_t>(), kv_features, block_rows, kv_features,
+        head_dim, block_position_start, config.rope_theta, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 k_noise rope launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+
+    if (!attention_reference_enabled()) {
+        err = ps::kernel::launch_dflash2_attention_ring_gqa_bf16(
+            executor.q_rope.data<bf16_t>(), q_features, k_ring, v_ring, context.capacity,
+            context_rows, context_start, kv_features, executor.k_noise_rope.data<bf16_t>(),
+            executor.v_noise.data<bf16_t>(), block_rows, kv_features,
+            executor.attention_context.data<bf16_t>(), q_features, q_heads, kv_heads, head_dim,
+            block_position_start, static_cast<uint32_t>(config.sliding_window), scale, stream);
+    } else {
+        err = hipErrorNotSupported;
+    }
+    if (err == hipErrorNotSupported) {
+        err = ps::kernel::launch_dflash2_attention_ring_bf16(
+            executor.q_rope.data<bf16_t>(), q_features, k_ring, v_ring, context.capacity,
+            context_rows, context_start, kv_features, executor.k_noise_rope.data<bf16_t>(),
+            executor.v_noise.data<bf16_t>(), block_rows, kv_features,
+            executor.attention_context.data<bf16_t>(), q_features, q_heads, kv_heads, head_dim,
+            block_position_start, static_cast<uint32_t>(config.sliding_window), scale, stream);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 ring attention launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+
+    return layer_attention_tail(executor, layer, hidden_in, block_rows, output, stream);
+}
+
+Status dflash2_forward_backbone_cached(
+    DFlash2Executor& executor,
+    const DFlash2ContextState& context,
+    const bf16_t* noise_embedding,
+    uint32_t block_position_start,
+    uint32_t block_rows,
+    bf16_t* output,
+    hipStream_t stream) {
+    if (noise_embedding == nullptr || output == nullptr) {
+        return Status::invalid_argument("dflash2 cached backbone buffers are null", __FILE__,
+                                        __LINE__);
+    }
+    Status st = validate_cached_context(executor, context, block_position_start, block_rows);
+    if (!st.ok()) return st;
+    const uint32_t layers = static_cast<uint32_t>(executor.weights->layers.size());
+    if (layers == 0u || layers != executor.config->num_hidden_layers) {
+        return Status::invalid_state("dflash2 backbone layer count mismatch", __FILE__,
+                                     __LINE__);
+    }
+
+    bf16_t* hidden_a = executor.backbone_hidden_a.data<bf16_t>();
+    bf16_t* hidden_b = executor.backbone_hidden_b.data<bf16_t>();
+    const bf16_t* src = noise_embedding;
+    for (uint32_t li = 0; li < layers; ++li) {
+        bf16_t* dst = (li % 2u == 0u) ? hidden_a : hidden_b;
+        st = dflash2_forward_layer_cached(executor, context, li, src, block_position_start,
+                                          block_rows, dst, stream);
+        if (!st.ok()) return st;
+        src = dst;
+    }
+
+    const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
+    const hipError_t err = ps::kernel::launch_dflash2_rmsnorm_direct_bf16(
+        src, executor.weights->final_norm_weight.data<bf16_t>(), output, block_rows, hidden,
+        hidden, executor.config->rms_norm_eps, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 final norm launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status dflash2_forward_and_select_cached(
+    DFlash2Executor& executor,
+    const DFlash2ContextState& context,
+    const bf16_t* noise_embedding,
+    uint32_t block_position_start,
+    uint32_t block_rows,
+    int32_t anchor_token,
+    int32_t* output_draft_tokens,
+    hipStream_t stream) {
+    if (output_draft_tokens == nullptr) {
+        return Status::invalid_argument("dflash2 cached select output is null", __FILE__,
+                                        __LINE__);
+    }
+    Status st = dflash2_forward_backbone_cached(
+        executor, context, noise_embedding, block_position_start, block_rows,
+        executor.backbone_output.data<bf16_t>(), stream);
+    if (!st.ok()) return st;
+    return dflash2_select_draft_tokens(executor, executor.backbone_output.data<bf16_t>(),
+                                       block_rows, anchor_token, output_draft_tokens,
+                                       stream);
+}
+
+Status dflash2_prepare_noise_embedding(
+    DFlash2Executor& executor,
+    int32_t anchor_token,
+    uint32_t block_rows,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (executor.config == nullptr || executor.target_embed_tokens == nullptr) {
+        return Status::invalid_state("dflash2 executor has no target embed_tokens", __FILE__,
+                                     __LINE__);
+    }
+    if (executor.noise_token_ids.ndim() == 0u || executor.noise_embedding.ndim() == 0u) {
+        return Status::invalid_state("dflash2 noise buffers are not allocated", __FILE__,
+                                     __LINE__);
+    }
+    if (block_rows == 0u || block_rows > executor.config->block_size ||
+        block_rows > executor.noise_embedding.dim(0)) {
+        return Status::invalid_argument("dflash2 noise block rows out of range", __FILE__,
+                                        __LINE__);
+    }
+
+    const ps::weights::MatrixWeight& embed = *executor.target_embed_tokens;
+    const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
+    const uint32_t vocab = static_cast<uint32_t>(executor.config->vocab_size);
+    const int32_t mask_token = static_cast<int32_t>(executor.config->mask_token_id);
+
+    hipError_t err = ps::kernel::launch_dflash2_noise_token_ids(
+        anchor_token, mask_token, executor.noise_token_ids.data<int32_t>(), block_rows, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 noise token launch", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+
+    const int32_t* token_ids = executor.noise_token_ids.data<int32_t>();
+    bf16_t* output = executor.noise_embedding.data<bf16_t>();
+    if (embed.encoding == ps::weights::MatrixEncoding::Bf16) {
+        err = ps::kernel::launch_embedding_bf16(
+            embed.bf16.data<bf16_t>(), token_ids, output, block_rows, vocab, hidden, hidden,
+            nullptr, stream);
+    } else if (embed.encoding == ps::weights::MatrixEncoding::Psq8) {
+        if (embed.k_padded < hidden || (embed.k_padded & 31u) != 0u ||
+            embed.weight_scale_group != 32u) {
+            return Status::invalid_argument("dflash2 target embed_tokens psq8 layout invalid",
+                                            __FILE__, __LINE__);
+        }
+        const uint32_t code_stride = embed.codes_row_stride_bytes != 0u
+                                         ? embed.codes_row_stride_bytes
+                                         : embed.k_padded;
+        const uint32_t scale_stride = embed.storage_scale_stride_bytes != 0u
+                                          ? embed.storage_scale_stride_bytes
+                                          : embed.k_padded;
+        err = ps::kernel::launch_embedding_psq8(
+            embed.codes.data<uint8_t>(), embed.scales.data<uint8_t>(), code_stride, scale_stride,
+            token_ids, output, block_rows, vocab, hidden, embed.k_padded, hidden, nullptr,
+            stream);
+    } else {
+        return Status::unsupported("dflash2 target embed_tokens encoding is not supported",
+                                   __FILE__, __LINE__);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 noise embedding launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status dflash2_propose_cached(
+    DFlash2Executor& executor,
+    const DFlash2ContextState& context,
+    int32_t anchor_token,
+    uint32_t num_drafts,
+    int32_t* output_drafts,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (!context.initialized) {
+        return Status::invalid_state("dflash2 context state not initialized", __FILE__,
+                                     __LINE__);
+    }
+    if (output_drafts == nullptr) {
+        return Status::invalid_argument("dflash2 proposal output is null", __FILE__, __LINE__);
+    }
+    if (num_drafts == 0u || num_drafts > executor.draft_rows) {
+        return Status::invalid_argument("dflash2 proposal num_drafts out of range", __FILE__,
+                                        __LINE__);
+    }
+    const uint32_t block_rows = num_drafts + 1u;
+    Status st = dflash2_prepare_noise_embedding(executor, anchor_token, block_rows, stream);
+    if (!st.ok()) return st;
+    return dflash2_forward_and_select_cached(
+        executor, context, executor.noise_embedding.data<bf16_t>(), context.next_position,
+        block_rows, anchor_token, output_drafts, stream);
+}
+
+Status dflash2_append_target_taps(
+    DFlash2Executor& executor,
+    DFlash2ContextState& context,
+    const bf16_t* const* target_taps,
+    uint32_t tap_count,
+    uint32_t rows,
+    uint32_t position_start,
+    hipStream_t stream) {
+    if (!executor.initialized) {
+        return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
+    }
+    if (!context.initialized) {
+        return Status::invalid_state("dflash2 context state not initialized", __FILE__,
+                                     __LINE__);
+    }
+    if (target_taps == nullptr) {
+        return Status::invalid_argument("dflash2 target taps are null", __FILE__, __LINE__);
+    }
+    if (tap_count != ps::kernel::kDFlash2TargetTaps) {
+        return Status::invalid_argument("dflash2 target tap count mismatch", __FILE__, __LINE__);
+    }
+    if (rows == 0u) {
+        return Status::make_ok();
+    }
+    if (position_start != context.next_position) {
+        return Status::invalid_argument("dflash2 tap append is not contiguous", __FILE__,
+                                        __LINE__);
+    }
+    if (executor.config == nullptr) {
+        return Status::invalid_state("dflash2 executor has no config", __FILE__, __LINE__);
+    }
+    const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
+    std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> ptrs{};
+    uint32_t offset = 0u;
+    while (offset < rows) {
+        const uint32_t n = std::min(executor.max_rows, rows - offset);
+        for (uint32_t t = 0; t < tap_count; ++t) {
+            if (target_taps[t] == nullptr) {
+                return Status::invalid_argument("dflash2 target tap is null", __FILE__,
+                                                __LINE__);
+            }
+            ptrs[t] = target_taps[t] + static_cast<std::size_t>(offset) * hidden;
+        }
+        Status st = dflash2_project_target_features(executor, ptrs.data(), tap_count, n, stream);
+        if (!st.ok()) return st;
+        st = dflash2_context_append(executor, context,
+                                    executor.target_feature.data<bf16_t>(), n,
+                                    position_start + offset, stream);
+        if (!st.ok()) return st;
+        offset += n;
+    }
+    return Status::make_ok();
+}
+
+}

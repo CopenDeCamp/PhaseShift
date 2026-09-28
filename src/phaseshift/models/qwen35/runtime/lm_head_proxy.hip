@@ -1,0 +1,378 @@
+#include <phaseshift/models/qwen35/runtime/lm_head_proxy.h>
+#include <phaseshift/models/qwen35/runtime/program_executor.h>
+#include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/optimized/activation_quantize.h>
+#include <phaseshift/runtime/program/int8_activation_workspace.h>
+#include <hip/hip_runtime.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <vector>
+
+namespace ps::qwen35::runtime {
+
+namespace {
+
+__global__ void pool_argmax_remap_kernel(
+    const float* __restrict__ rerank_logits,
+    const int32_t* __restrict__ pool_ids,
+    int32_t* __restrict__ out_ids,
+    const uint32_t pool) {
+    const uint32_t row = blockIdx.x;
+    const float* logits = rerank_logits + static_cast<std::size_t>(row) * pool;
+    const int32_t* ids = pool_ids + static_cast<std::size_t>(row) * pool;
+    float best_value = -INFINITY;
+    int32_t best_pos = 0;
+    for (uint32_t c = 0; c < pool; ++c) {
+        const float v = logits[c];
+        if (v > best_value || (v == best_value && ids[c] < ids[best_pos])) {
+            best_value = v;
+            best_pos = static_cast<int32_t>(c);
+        }
+    }
+    out_ids[row] = ids[best_pos];
+}
+
+}  // namespace
+
+LmHeadCandidateProxy::~LmHeadCandidateProxy() noexcept { (void)shutdown(); }
+
+LmHeadCandidateProxy::LmHeadCandidateProxy(LmHeadCandidateProxy&& other) noexcept {
+    move_from(other);
+}
+
+LmHeadCandidateProxy& LmHeadCandidateProxy::operator=(LmHeadCandidateProxy&& other) noexcept {
+    if (this != &other) {
+        (void)shutdown();
+        move_from(other);
+    }
+    return *this;
+}
+
+void LmHeadCandidateProxy::move_from(LmHeadCandidateProxy& other) noexcept {
+    weight_codes_ = other.weight_codes_;
+    weight_scales_ = other.weight_scales_;
+    vocab_ = other.vocab_;
+    cols_ = other.cols_;
+    k_padded_ = other.k_padded_;
+    scale_stride_ = other.scale_stride_;
+    max_rows_ = other.max_rows_;
+    pool_ = other.pool_;
+    partitions_ = other.partitions_;
+    scratch_stride_ = other.scratch_stride_;
+    act_code_stride_ = other.act_code_stride_;
+    act_scale_stride_ = other.act_scale_stride_;
+    int2_codes_ = other.int2_codes_;
+    tables_ = other.tables_;
+    act_codes_ = other.act_codes_;
+    act_scales_ = other.act_scales_;
+    coarse_ = other.coarse_;
+    pool_ids_ = other.pool_ids_;
+    pool_logits_ = other.pool_logits_;
+    cand_ids_ = other.cand_ids_;
+    rerank_ = other.rerank_;
+    scratch_ids_ = other.scratch_ids_;
+    scratch_values_ = other.scratch_values_;
+    other.int2_codes_ = nullptr;
+    other.tables_ = nullptr;
+    other.act_codes_ = nullptr;
+    other.act_scales_ = nullptr;
+    other.coarse_ = nullptr;
+    other.pool_ids_ = nullptr;
+    other.pool_logits_ = nullptr;
+    other.cand_ids_ = nullptr;
+    other.rerank_ = nullptr;
+    other.scratch_ids_ = nullptr;
+    other.scratch_values_ = nullptr;
+}
+
+Status LmHeadCandidateProxy::shutdown() noexcept {
+    Status first_error = Status::make_ok();
+    auto free_ptr = [&first_error](void*& p) {
+        if (p != nullptr) {
+            const hipError_t err = hipFree(p);
+            if (first_error.ok() && err != hipSuccess) {
+                first_error = Status::hip_error("hipFree lm_head proxy buffer",
+                                                hipGetErrorString(err), __FILE__, __LINE__);
+            }
+            p = nullptr;
+        }
+    };
+    free_ptr(reinterpret_cast<void*&>(int2_codes_));
+    free_ptr(reinterpret_cast<void*&>(tables_));
+    free_ptr(reinterpret_cast<void*&>(act_codes_));
+    free_ptr(reinterpret_cast<void*&>(act_scales_));
+    free_ptr(reinterpret_cast<void*&>(coarse_));
+    free_ptr(reinterpret_cast<void*&>(pool_ids_));
+    free_ptr(reinterpret_cast<void*&>(pool_logits_));
+    free_ptr(reinterpret_cast<void*&>(cand_ids_));
+    free_ptr(reinterpret_cast<void*&>(rerank_));
+    free_ptr(reinterpret_cast<void*&>(scratch_ids_));
+    free_ptr(reinterpret_cast<void*&>(scratch_values_));
+    weight_codes_ = nullptr;
+    weight_scales_ = nullptr;
+    return first_error;
+}
+
+Status LmHeadCandidateProxy::init(const LmHeadProxyWeightView& weight, uint32_t max_rows,
+                                  uint32_t pool, hipStream_t stream) {
+    if (weight.codes == nullptr || weight.scales == nullptr || weight.vocab == 0u ||
+        weight.cols == 0u || weight.k_padded == 0u || weight.scale_stride_bytes == 0u) {
+        return Status::invalid_argument("lm_head proxy weight view invalid", __FILE__, __LINE__);
+    }
+    if (max_rows == 0u || max_rows > 64u) {
+        return Status::invalid_argument("lm_head proxy max rows out of range", __FILE__, __LINE__);
+    }
+    if (pool == 0u || pool > ps::kernel::kDflash2Int2MaxPool) {
+        return Status::invalid_argument("lm_head proxy pool out of range", __FILE__, __LINE__);
+    }
+    if ((weight.k_padded % 32u) != 0u) {
+        return Status::invalid_argument("lm_head proxy k_padded not 32-aligned", __FILE__,
+                                        __LINE__);
+    }
+    (void)shutdown();
+
+    weight_codes_ = weight.codes;
+    weight_scales_ = weight.scales;
+    vocab_ = weight.vocab;
+    cols_ = weight.cols;
+    k_padded_ = weight.k_padded;
+    scale_stride_ = weight.scale_stride_bytes;
+    max_rows_ = max_rows;
+    pool_ = pool;
+    partitions_ = ps::kernel::dflash2_int2_default_partitions(vocab_);
+    scratch_stride_ = partitions_ * ps::kernel::kDflash2Int2MaxPool;
+
+    const auto layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(cols_, max_rows_);
+    if (layout.k_padded != k_padded_) {
+        (void)shutdown();
+        return Status::invalid_argument("lm_head proxy activation layout mismatch", __FILE__,
+                                        __LINE__);
+    }
+    act_code_stride_ = layout.code_row_stride_bytes;
+    act_scale_stride_ = layout.scale_row_stride_bytes;
+
+    const std::size_t code_bytes =
+        ((static_cast<std::size_t>(vocab_) + 15u) / 16u) * k_padded_ * 4u;
+    bool ok = true;
+    auto alloc = [&ok](void** p, std::size_t bytes) {
+        ok = ok && (hipMalloc(p, bytes) == hipSuccess);
+    };
+    alloc(reinterpret_cast<void**>(&int2_codes_), code_bytes);
+    alloc(reinterpret_cast<void**>(&tables_), 1280u);
+    alloc(reinterpret_cast<void**>(&act_codes_),
+          static_cast<std::size_t>(act_code_stride_) * ((max_rows_ + 15u) / 16u) * 16u);
+    alloc(reinterpret_cast<void**>(&act_scales_),
+          static_cast<std::size_t>(act_scale_stride_) * max_rows_);
+    alloc(reinterpret_cast<void**>(&coarse_),
+          static_cast<std::size_t>(max_rows_) * vocab_ * sizeof(float));
+    alloc(reinterpret_cast<void**>(&pool_ids_),
+          static_cast<std::size_t>(max_rows_) * pool_ * sizeof(int32_t));
+    alloc(reinterpret_cast<void**>(&pool_logits_),
+          static_cast<std::size_t>(max_rows_) * pool_ * sizeof(float));
+    alloc(reinterpret_cast<void**>(&cand_ids_),
+          static_cast<std::size_t>(max_rows_) * pool_ * sizeof(int32_t));
+    alloc(reinterpret_cast<void**>(&rerank_),
+          static_cast<std::size_t>(max_rows_) * pool_ * sizeof(float));
+    alloc(reinterpret_cast<void**>(&scratch_ids_),
+          static_cast<std::size_t>(max_rows_) * scratch_stride_ * sizeof(int32_t));
+    alloc(reinterpret_cast<void**>(&scratch_values_),
+          static_cast<std::size_t>(max_rows_) * scratch_stride_ * sizeof(float));
+    if (!ok) {
+        (void)shutdown();
+        return Status::hip_error("lm_head proxy allocation failed", "hipMalloc", __FILE__,
+                                 __LINE__);
+    }
+
+    uint64_t* histogram = nullptr;
+    if (hipMalloc(reinterpret_cast<void**>(&histogram), 256u * sizeof(uint64_t)) != hipSuccess) {
+        (void)shutdown();
+        return Status::hip_error("lm_head proxy histogram allocation failed", "hipMalloc",
+                                 __FILE__, __LINE__);
+    }
+    hipError_t herr = hipMemset(histogram, 0, 256u * sizeof(uint64_t));
+    herr = herr == hipSuccess
+               ? ps::kernel::launch_dflash2_int2_code_histogram(
+                     weight_codes_, weight_scales_, vocab_, k_padded_, scale_stride_, histogram,
+                     stream)
+               : herr;
+    std::vector<uint64_t> host_hist(256u, 0ull);
+    if (herr == hipSuccess) {
+        herr = hipMemcpy(host_hist.data(), histogram, 256u * sizeof(uint64_t),
+                         hipMemcpyDeviceToHost);
+    }
+    (void)hipFree(histogram);
+    if (herr != hipSuccess) {
+        (void)shutdown();
+        return Status::hip_error("lm_head proxy histogram failed", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    }
+    const ps::kernel::Dflash2Int2Codebook codebook =
+        ps::kernel::dflash2_int2_derive_codebook(host_hist.data(), false);
+
+    std::vector<uint8_t> host_tables(1280u, 0u);
+    std::vector<uint8_t> map_table(256u, 0u);
+    ps::kernel::dflash2_int2_build_tables(
+        codebook, map_table.data(),
+        reinterpret_cast<uint32_t*>(host_tables.data() + 256u));
+    std::memcpy(host_tables.data(), map_table.data(), 256u);
+    herr = hipMemcpy(tables_, host_tables.data(), host_tables.size(), hipMemcpyHostToDevice);
+    if (herr != hipSuccess) {
+        (void)shutdown();
+        return Status::hip_error("lm_head proxy table upload failed", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    }
+    herr = ps::kernel::launch_dflash2_int2_pack(weight_codes_, tables_, int2_codes_, vocab_,
+                                                k_padded_, stream);
+    if (herr == hipSuccess) {
+        herr = hipStreamSynchronize(stream);
+    }
+    if (herr != hipSuccess) {
+        (void)shutdown();
+        return Status::hip_error("lm_head proxy int2 pack failed", hipGetErrorString(herr),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status LmHeadCandidateProxy::select(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
+                                    int32_t* out_ids, hipStream_t stream) {
+    if (!valid()) {
+        return Status::invalid_state("lm_head proxy not initialized", __FILE__, __LINE__);
+    }
+    if (normed == nullptr || out_ids == nullptr || rows == 0u || rows > max_rows_) {
+        return Status::invalid_argument("lm_head proxy select arguments invalid", __FILE__,
+                                        __LINE__);
+    }
+    hipError_t err = ps::kernel::launch_activation_quantize_e4m3(
+        normed, act_codes_, act_scales_, rows, cols_, k_padded_, row_stride, act_code_stride_,
+        act_scale_stride_, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy activation quantize failed",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    const uint32_t* expand_table = reinterpret_cast<const uint32_t*>(tables_ + 256u);
+    err = ps::kernel::launch_dflash2_int2_coarse_head(
+        int2_codes_, weight_scales_, act_codes_, act_scales_, expand_table, coarse_, rows, vocab_,
+        k_padded_, scale_stride_, act_code_stride_, act_scale_stride_, vocab_, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy int2 coarse head failed", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    err = ps::kernel::launch_dflash2_coarse_topn(
+        coarse_, rows, vocab_, vocab_, pool_, pool_ids_, pool_logits_, scratch_ids_,
+        scratch_values_, scratch_stride_, partitions_, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy coarse topn failed", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    err = ps::kernel::launch_dflash2_psq8_candidate_rerank(
+        weight_codes_, weight_scales_, act_codes_, act_scales_, pool_ids_, rerank_, rows, pool_,
+        k_padded_, scale_stride_, act_code_stride_, act_scale_stride_, pool_, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy candidate rerank failed", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    pool_argmax_remap_kernel<<<rows, 1, 0, stream>>>(rerank_, pool_ids_, out_ids, pool_);
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy argmax failed", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    return Status::make_ok();
+}
+
+uint32_t target_lm_head_proxy_mode() {
+    const char* env = std::getenv("PHASESHIFT_TARGET_LM_HEAD_PROXY");
+    if (env == nullptr || env[0] == '\0')
+        return 1u;
+    const long v = std::strtol(env, nullptr, 10);
+    if (v <= 0)
+        return 0u;
+    if (v >= 2)
+        return 2u;
+    return 1u;
+}
+
+uint32_t target_lm_head_proxy_pool() {
+    const char* env = std::getenv("PHASESHIFT_TARGET_LM_HEAD_PROXY_POOL");
+    uint32_t pool = 32u;
+    if (env != nullptr && env[0] != '\0') {
+        const long v = std::strtol(env, nullptr, 10);
+        if (v > 0)
+            pool = static_cast<uint32_t>(v);
+    }
+    if (pool > ps::kernel::kDflash2Int2MaxPool)
+        pool = ps::kernel::kDflash2Int2MaxPool;
+    return pool;
+}
+
+Result<OptimizedLaunchResult> try_launch_lm_head_proxy_fusion(
+    const ::ps::runtime::Program& program,
+    size_t dispatch_index,
+    HostExecutionContext& ctx,
+    hipStream_t stream) {
+    OptimizedLaunchResult not_applicable{};
+    if (ctx.lm_head_proxy == nullptr || !ctx.lm_head_proxy->valid())
+        return not_applicable;
+    if (ctx.role != ::ps::runtime::ExecutionRole::Verify)
+        return not_applicable;
+    if (ctx.constraint_masks != nullptr || ctx.constraint_mask_words != 0u)
+        return not_applicable;
+    if (dispatch_index + 2u >= program.dispatches.size())
+        return not_applicable;
+    const auto& actq = program.dispatches[dispatch_index];
+    const auto& linear = program.dispatches[dispatch_index + 1u];
+    const auto& sampling = program.dispatches[dispatch_index + 2u];
+    if (actq.kernel_id != ::ps::runtime::KernelId::ACTIVATION_QUANTIZE_W4A8 ||
+        linear.kernel_id != ::ps::runtime::KernelId::LINEAR_PSQ8 ||
+        sampling.kernel_id != ::ps::runtime::KernelId::SAMPLING) {
+        return not_applicable;
+    }
+    if (actq.input_count != 1u || linear.output_count != 1u || sampling.output_count != 1u)
+        return not_applicable;
+    if (linear.weight_index == ::ps::runtime::kNoWeight ||
+        linear.weight_index >= ctx.weight_count) {
+        return not_applicable;
+    }
+    const ::ps::runtime::WeightSlot weight = ctx.weights[linear.weight_index];
+    if (weight.encoding != 4u || !weight.preshuffled || weight.weight_scale_group != 32u ||
+        (weight.k_padded % 32u) != 0u) {
+        return not_applicable;
+    }
+    auto input = resolve_host_value(program, ::ps::runtime::ValueId{actq.input_slots[0]}, ctx);
+    if (!input.ok())
+        return input.status();
+    auto output = resolve_host_value(program, ::ps::runtime::ValueId{sampling.output_slots[0]},
+                                     ctx);
+    if (!output.ok())
+        return output.status();
+    const HostResolvedValue in = input.value();
+    const HostResolvedValue out = output.value();
+    if (in.ptr == nullptr || out.ptr == nullptr)
+        return not_applicable;
+    if (in.dtype != ::ps::runtime::ValueDType::BF16 ||
+        out.dtype != ::ps::runtime::ValueDType::I32) {
+        return not_applicable;
+    }
+    if (in.feature_count != weight.cols)
+        return not_applicable;
+    const uint32_t rows = ctx.actual_outputs != 0u ? ctx.actual_outputs : ctx.actual_rows;
+    if (rows == 0u || rows > ctx.lm_head_proxy->max_rows())
+        return not_applicable;
+    Status st = ctx.lm_head_proxy->select(
+        static_cast<const bf16_t*>(in.ptr), rows, in.row_stride,
+        static_cast<int32_t*>(out.ptr), stream);
+    if (!st.ok())
+        return st;
+    OptimizedLaunchResult result{};
+    result.kind = OptimizedLaunchKind::Launched;
+    result.consumed_dispatches = 3u;
+    return result;
+}
+
+}  // namespace ps::qwen35::runtime
