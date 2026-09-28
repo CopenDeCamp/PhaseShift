@@ -235,6 +235,19 @@ if(PHASESHIFT_HIP_GRAPH)
 endif()
 
 
+# RCCL multi-GPU parallel runtime. Owns communicator topology and the
+# transport primitives used by Program communication nodes.
+if(PHASESHIFT_HAVE_RCCL)
+    add_library(phaseshift_parallel STATIC
+        src/phaseshift/runtime/parallel/rccl_transport.cpp
+    )
+    target_compile_features(phaseshift_parallel PRIVATE cxx_std_20)
+    target_include_directories(phaseshift_parallel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(phaseshift_parallel PUBLIC phaseshift_core phaseshift_gpu phaseshift_rccl)
+    target_compile_options(phaseshift_parallel PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+    phaseshift_set_hip_archs(phaseshift_parallel)
+endif()
+
 # Aggregate INTERFACE target. Tests and benchmarks link against this.
 add_library(phaseshift INTERFACE)
 target_link_libraries(

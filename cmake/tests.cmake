@@ -356,10 +356,19 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
 endif()
 
 # ---------------------------------------------------------------------------
-# Parallel runtime topology.
+# RCCL parallel runtime.
+#   cpu;required   - ParallelConfig / rank mapping / communicator topology.
+#   rccl_*         - multi-GPU RCCL tests. Never part of `required`: they need
+#                    2 or 4 GPUs and are selected by their own labels.
 # ---------------------------------------------------------------------------
 phaseshift_add_test(NAME test_parallel_topology SOURCE unit/test_parallel_topology.cpp
     LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_core)
+
+if(PHASESHIFT_HAVE_RCCL)
+    phaseshift_add_test(NAME test_rccl_transport SOURCE unit/test_rccl_transport.hip
+        LABELS "gpu2;rccl;rccl_2gpu" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 1
+        LIBRARIES phaseshift_parallel phaseshift_gpu)
+endif()
 
 # ---------------------------------------------------------------------------
 # phaseshift-compute decode backend contract (CPU-only: no GPU, no model).
