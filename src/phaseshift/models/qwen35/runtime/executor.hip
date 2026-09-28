@@ -311,6 +311,8 @@ Status build_host_execution_context(
     ctx.decode_attn_partials = ws_base + attn_partial_offset;
     ctx.decode_attn_partial_bytes = static_cast<uint32_t>(runtime::kDecodeAttnPartialBytes);
     ctx.error_word = status_ptr;
+    ctx.comm_self = executor.comm_self;
+    ctx.comm_launch = executor.comm_launch;
     ctx.bucket_m = static_cast<uint32_t>(program.row_bucket);
     ctx.staging = executor.dispatch_staging;
     ctx.staging_bytes = executor.dispatch_staging_bytes;
@@ -488,6 +490,8 @@ static bool attention_plan_key_for(
     }
     runtime::HostExecutionContext ctx{};
     ctx.model_state = executor.host_model_state;
+    ctx.comm_self = executor.comm_self;
+    ctx.comm_launch = executor.comm_launch;
     ctx.workspace = executor.execution_workspace.data<uint8_t>();
     ctx.external_inputs = inputs;
     ctx.external_input_count = program.external_input_count;
@@ -1116,6 +1120,8 @@ Executor::Executor(Executor&& other) noexcept
       active_submission_id(other.active_submission_id),
       program_set(std::move(other.program_set)),
       program_set_ready(other.program_set_ready),
+      comm_self(other.comm_self),
+      comm_launch(other.comm_launch),
       execution_status(std::move(other.execution_status)),
       execution_workspace(std::move(other.execution_workspace)),
       host_weight_table(other.host_weight_table),
@@ -1865,6 +1871,8 @@ Result<Executor> create_model_executor(
         Qwen35LowerOptions lower_options;
         lower_options.hidden_taps = std::span<const uint32_t>(
             ex.config.target_hidden_taps.data(), ex.config.target_hidden_tap_count);
+        lower_options.partition = ex.config.partition;
+        lower_options.pipeline_peer_rank = ex.config.pipeline_peer_rank;
         auto lower_res =
             lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
         if (!lower_res.ok()) {

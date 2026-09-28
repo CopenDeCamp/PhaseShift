@@ -34,6 +34,8 @@ constexpr Arity arity_of(PrimitiveKind k) noexcept {
         case PrimitiveKind::OUTPUT_GATHER: return {1, 1};
         case PrimitiveKind::SAMPLING: return {1, 1};
         case PrimitiveKind::CONCAT: return {2, 1};
+        case PrimitiveKind::COMM_SEND: return {1, 0};
+        case PrimitiveKind::COMM_RECV: return {0, 1};
     }
     return {0, 0};
 }

@@ -454,6 +454,45 @@ Status record_value_trace(const ::ps::runtime::Program& program, std::size_t fir
     return Status::make_ok();
 }
 
+Status launch_communication(const ::ps::runtime::Program& program, std::size_t index,
+                            const HostExecutionContext& ctx, hipStream_t stream) {
+    if (ctx.comm_launch == nullptr)
+        return Status::invalid_state("communication node without a transport", __FILE__,
+                                     __LINE__);
+    if (index >= program.dispatch_comm.size())
+        return Status::invalid_state("communication metadata missing", __FILE__, __LINE__);
+    const uint32_t ci = program.dispatch_comm[index];
+    if (ci == ::ps::runtime::kNoComm)
+        return Status::invalid_state("communication dispatch lacks descriptor", __FILE__,
+                                     __LINE__);
+    const ::ps::runtime::CommDescriptor& descriptor = program.comms[ci];
+    const bool send = descriptor.operation == ::ps::runtime::CommOperation::Send;
+    const ::ps::runtime::ValueId carried = send ? descriptor.input : descriptor.output;
+    auto resolved = resolve_host_value(program, carried, ctx);
+    if (!resolved.ok()) return resolved.status();
+    const HostResolvedValue value = resolved.value();
+    if (value.ptr == nullptr)
+        return Status::invalid_state("communication buffer is null", __FILE__, __LINE__);
+    if (value.dtype != descriptor.dtype)
+        return Status::invalid_state("communication dtype mismatch", __FILE__, __LINE__);
+    const uint32_t rows = probe_rows(value, ctx);
+    const uint64_t elements = static_cast<uint64_t>(rows) * value.row_stride;
+    if (elements == 0)
+        return Status::invalid_argument("communication count is zero", __FILE__, __LINE__);
+#ifdef PHASESHIFT_HIP_GRAPH
+    hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
+    hipError_t capture_error = hipStreamIsCapturing(stream, &capture_status);
+    if (capture_error != hipSuccess)
+        return Status::hip_error("hipStreamIsCapturing", hipGetErrorString(capture_error),
+                                 __FILE__, __LINE__);
+    if (capture_status == hipStreamCaptureStatusActive)
+        return Status::invalid_state("communication node during graph capture", __FILE__,
+                                     __LINE__);
+#endif
+    return ctx.comm_launch(ctx.comm_self, descriptor, send ? value.ptr : nullptr,
+                           send ? nullptr : value.ptr, elements, stream);
+}
+
 }
 
 Status execute_program_range(
@@ -470,6 +509,16 @@ Status execute_program_range(
     size_t i = begin;
     while (i < end) {
         const auto& binding = program.dispatches[i];
+        if (::ps::runtime::is_comm_kernel(binding.kernel_id)) {
+            Status comm_status = launch_communication(program, i, ctx, stream);
+            if (!comm_status.ok()) return comm_status;
+            const uint32_t comm_kid = static_cast<uint32_t>(binding.kernel_id);
+            record_logical_covered(&comm_kid, 1);
+            Status trace_status = record_value_trace(program, i, 1, ctx, stream);
+            if (!trace_status.ok()) return trace_status;
+            ++i;
+            continue;
+        }
         kv_calib_dump_maybe(program, i, ctx, stream);
         OpDumpTimer op_timer(binding.kernel_id);
         const bool sem_on = semantic_timing_enabled();

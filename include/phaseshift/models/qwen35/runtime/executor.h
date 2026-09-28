@@ -1,4 +1,5 @@
 #pragma once
+#include <phaseshift/models/qwen35/model/lower_to_primitives.h>
 #include <phaseshift/models/qwen35/model/qwen35_model.h>
 #include <phaseshift/models/qwen35/runtime/scheduled_batch.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
@@ -9,6 +10,7 @@
 #include <phaseshift/models/qwen35/runtime/lm_head_proxy.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/program/program.h>
+#include <phaseshift/runtime/program/comm_launcher.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
 #include <phaseshift/runtime/execution/row_bucket.h>
 #include <phaseshift/core/memory/tensor.h>
@@ -46,6 +48,8 @@ struct ExecutorConfig {
     uint32_t target_hidden_tap_count = 0;
     uint32_t constraint_mask_words = 0;
     runtime::DecodeBackend backend = runtime::DecodeBackend::Host;
+    ModelPartition partition{};
+    uint32_t pipeline_peer_rank = 0;
 };
 
 struct DispatchStagingPool {
@@ -119,6 +123,8 @@ struct Executor {
     uint64_t active_submission_id = 0;
     ::ps::runtime::ProgramSet program_set;
     bool program_set_ready = false;
+    void* comm_self = nullptr;
+    ::ps::runtime::CommLaunchFn comm_launch = nullptr;
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
     ::ps::runtime::WeightSlot* host_weight_table = nullptr;

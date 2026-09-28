@@ -2,6 +2,7 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/program/program.h>
+#include <phaseshift/runtime/program/comm_launcher.h>
 #include <phaseshift/runtime/staging_layout.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
@@ -26,6 +27,8 @@ struct HostResolvedValue {
     ::ps::runtime::ValueDType dtype = ::ps::runtime::ValueDType::BF16;
     ::ps::runtime::ValueRowDomain row_domain = ::ps::runtime::ValueRowDomain::TOKEN_ROWS;
 };
+
+using CommLaunchFn = ::ps::runtime::CommLaunchFn;
 
 struct ValueTraceSink {
     std::function<void(uint32_t value_id, const void* device_ptr, uint32_t row_stride,
@@ -78,6 +81,8 @@ struct HostExecutionContext {
     ::ps::runtime::VerifyNumericMode numeric_mode =
         ::ps::runtime::VerifyNumericMode::Fast;
     GdnSpecHistoryDeviceView gdn_spec_history{};
+    void* comm_self = nullptr;
+    CommLaunchFn comm_launch = nullptr;
 };
 
 inline bool verify_exact_active(const HostExecutionContext& ctx) noexcept {

@@ -507,11 +507,31 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     auto geometry_status = validate_geometry(config, weights);
     if (!geometry_status.ok()) return geometry_status;
 
+    ModelPartition partition = options.partition;
+    const std::uint32_t total_layers = config.num_hidden_layers;
+    if (partition.layer_end == 0) partition.layer_end = total_layers;
+    if (partition.layer_end > total_layers)
+        return Status::invalid_argument("model partition exceeds the layer count", __FILE__,
+                                        __LINE__);
+    if (partition.layer_begin > partition.layer_end)
+        return Status::invalid_argument("model partition layer range is inverted", __FILE__,
+                                        __LINE__);
+    if (partition.owns_embedding != (partition.layer_begin == 0))
+        return Status::invalid_argument(
+            "only the first layer stage may own the embedding", __FILE__, __LINE__);
+    if (partition.owns_lm_head != (partition.layer_end == total_layers))
+        return Status::invalid_argument(
+            "only the last layer stage may own the lm head", __FILE__, __LINE__);
+
     for (std::size_t t = 0; t < options.hidden_taps.size(); ++t) {
         const std::size_t layer = options.hidden_taps[t];
         if (layer >= weights.layers.size()) {
             return Status::invalid_argument(
                 "hidden tap layer index out of range", __FILE__, __LINE__);
+        }
+        if (layer < partition.layer_begin || layer >= partition.layer_end) {
+            return Status::invalid_argument(
+                "hidden tap layer lies outside the model partition", __FILE__, __LINE__);
         }
         for (std::size_t u = 0; u < t; ++u) {
             if (static_cast<std::size_t>(options.hidden_taps[u]) == layer) {
@@ -641,9 +661,11 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     const uint32_t hidden_size = static_cast<uint32_t>(config.hidden_size);
     const RT::RowwiseShapeKey hidden_key{hidden_size};
 
-    RT::ValueId tokens = em.value(0, RT::ValueDType::I32);
-    RT::ValueId layer_input = em.value(hidden_size);
-    {
+    RT::ValueId tokens{0};
+    RT::ValueId layer_input{0};
+    if (partition.owns_embedding) {
+        tokens = em.value(0, RT::ValueDType::I32);
+        layer_input = em.value(hidden_size);
         RT::EmbeddingLookupNode n;
         n.vocab_size = weights.embed_tokens.rows;
         n.hidden_size = hidden_size;
@@ -653,9 +675,17 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         em.emit(RT::PrimitiveNode{n}, {tokens}, {layer_input});
         pg.nodes.back().debug_name = "embedding";
         pg.external_inputs.push_back(tokens);
+    } else {
+        layer_input = em.value(hidden_size);
+        RT::CommRecvNode n;
+        n.group = RT::CommGroup::Pipeline;
+        n.peer = options.pipeline_peer_rank;
+        n.dtype = RT::ValueDType::BF16;
+        em.emit(RT::PrimitiveNode{n}, {}, {layer_input});
+        pg.nodes.back().debug_name = "pp_recv";
     }
 
-    for (size_t li = 0; li < weights.layers.size(); ++li) {
+    for (size_t li = partition.layer_begin; li < partition.layer_end; ++li) {
         const auto& lw = weights.layers[li];
         const auto& lw_idx = layer_weights[li];
         const std::string layer_prefix = "L" + std::to_string(li) + ".";
@@ -929,7 +959,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         }
     }
 
-    {
+    if (partition.owns_lm_head) {
         const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;
         const uint32_t out_vocab = lmw->rows;
 
@@ -968,6 +998,13 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         pg.external_outputs.push_back(selected_logits);
         pg.external_outputs.push_back(sampled);
         pg.external_outputs.push_back(layer_input);
+    } else {
+        RT::CommSendNode n;
+        n.group = RT::CommGroup::Pipeline;
+        n.peer = options.pipeline_peer_rank;
+        n.dtype = RT::ValueDType::BF16;
+        em.emit(RT::PrimitiveNode{n}, {layer_input}, {});
+        pg.nodes.back().debug_name = "pp_send";
     }
 
     for (std::size_t t = 0; t < hidden_tap_values.size(); ++t) {

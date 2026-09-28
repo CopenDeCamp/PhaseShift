@@ -30,7 +30,9 @@ enum class KernelId : uint32_t {
     LINEAR_FP8 = 25,
     LINEAR_MXFP4 = 26,
     VERIFY_ACCEPT = 27,
-    COUNT = 28,
+    COMM_SEND = 28,
+    COMM_RECV = 29,
+    COUNT = 30,
 };
 
 constexpr uint32_t kernel_id_count() noexcept {
@@ -65,6 +67,8 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::LINEAR_MXFP4: return "LINEAR_MXFP4";
         case KernelId::CONCAT: return "CONCAT";
         case KernelId::VERIFY_ACCEPT: return "VERIFY_ACCEPT";
+        case KernelId::COMM_SEND: return "COMM_SEND";
+        case KernelId::COMM_RECV: return "COMM_RECV";
         default: return "UNKNOWN";
     }
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include <phaseshift/runtime/graph/shape_spec.h>
 #include <phaseshift/runtime/graph/value_type.h>
+#include <phaseshift/runtime/parallel/comm_types.h>
 #include <phaseshift/weights/matrix_weight.h>
 #include <phaseshift/quantization/quantization_types.h>
 #include <variant>
@@ -28,6 +29,8 @@ enum class PrimitiveKind : uint16_t {
     OUTPUT_GATHER = 16,
     SAMPLING = 17,
     CONCAT = 18,
+    COMM_SEND = 19,
+    COMM_RECV = 20,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -51,6 +54,8 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::OUTPUT_GATHER: return "OUTPUT_GATHER";
         case PrimitiveKind::SAMPLING: return "SAMPLING";
         case PrimitiveKind::CONCAT: return "CONCAT";
+        case PrimitiveKind::COMM_SEND: return "COMM_SEND";
+        case PrimitiveKind::COMM_RECV: return "COMM_RECV";
     }
     return "UNKNOWN";
 }
@@ -172,6 +177,18 @@ struct ConcatNode {
     RowwiseShapeKey input_shape_b;
 };
 
+struct CommSendNode {
+    CommGroup group = CommGroup::Pipeline;
+    uint32_t peer = 0;
+    ValueDType dtype = ValueDType::BF16;
+};
+
+struct CommRecvNode {
+    CommGroup group = CommGroup::Pipeline;
+    uint32_t peer = 0;
+    ValueDType dtype = ValueDType::BF16;
+};
+
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -191,7 +208,9 @@ using PrimitiveNode = std::variant<
     GdnRecurrenceNode,
     OutputGatherNode,
     SamplingNode,
-    ConcatNode
+    ConcatNode,
+    CommSendNode,
+    CommRecvNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -216,6 +235,8 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, OutputGatherNode>) return PrimitiveKind::OUTPUT_GATHER;
         else if constexpr (std::is_same_v<T, SamplingNode>) return PrimitiveKind::SAMPLING;
         else if constexpr (std::is_same_v<T, ConcatNode>) return PrimitiveKind::CONCAT;
+        else if constexpr (std::is_same_v<T, CommSendNode>) return PrimitiveKind::COMM_SEND;
+        else if constexpr (std::is_same_v<T, CommRecvNode>) return PrimitiveKind::COMM_RECV;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

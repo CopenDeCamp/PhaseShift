@@ -202,6 +202,14 @@ struct Ctx {
     void push(const DispatchBinding& base) {
         plan->dispatches.push_back(base);
         plan->dispatch_source_node.push_back(current_source_node);
+        plan->dispatch_comm.push_back(kNoComm);
+    }
+
+    uint32_t attach_comm(const CommDescriptor& descriptor) {
+        const uint32_t index = static_cast<uint32_t>(plan->comms.size());
+        plan->comms.push_back(descriptor);
+        plan->dispatch_comm.back() = index;
+        return index;
     }
 
     Status note_imatrix_probe(ValueId value, uint32_t tag) {
@@ -577,6 +585,40 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.push(b);
             return Status::make_ok();
         }
+        case PrimitiveKind::COMM_SEND: {
+            const auto& n = node_as<CommSendNode>(node);
+            DispatchBinding b = base_binding(KernelId::COMM_SEND);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            b.output_count = 0;
+            c.push(b);
+            CommDescriptor d;
+            d.group = n.group;
+            d.operation = CommOperation::Send;
+            d.peer = n.peer;
+            d.dtype = n.dtype;
+            d.input = node.inputs[0];
+            c.attach_comm(d);
+            return Status::make_ok();
+        }
+        case PrimitiveKind::COMM_RECV: {
+            const auto& n = node_as<CommRecvNode>(node);
+            DispatchBinding b = base_binding(KernelId::COMM_RECV);
+            b.input_count = 0;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            CommDescriptor d;
+            d.group = n.group;
+            d.operation = CommOperation::Recv;
+            d.peer = n.peer;
+            d.dtype = n.dtype;
+            d.output = node.outputs[0];
+            c.attach_comm(d);
+            return Status::make_ok();
+        }
     }
     return fail("unknown primitive kind");
 }
@@ -761,6 +803,35 @@ Status Program::validate() const {
     if (!dispatch_source_node.empty() &&
         dispatch_source_node.size() != dispatches.size())
         return fail("dispatch source metadata size mismatch");
+    if (!dispatch_comm.empty() && dispatch_comm.size() != dispatches.size())
+        return fail("dispatch communication metadata size mismatch");
+    for (std::size_t i = 0; i < dispatch_comm.size(); ++i) {
+        const uint32_t ci = dispatch_comm[i];
+        if (ci == kNoComm) {
+            if (is_comm_kernel(dispatches[i].kernel_id))
+                return fail("communication dispatch lacks descriptor");
+            continue;
+        }
+        if (ci >= comms.size()) return fail("dispatch communication index out of range");
+        if (!is_comm_kernel(dispatches[i].kernel_id))
+            return fail("communication descriptor on non-communication dispatch");
+        const CommDescriptor& d = comms[ci];
+        const bool send = dispatches[i].kernel_id == KernelId::COMM_SEND;
+        if (send != (d.operation == CommOperation::Send))
+            return fail("communication descriptor operation mismatch");
+        const ValueId carried = send ? d.input : d.output;
+        const ValueBinding* binding = find_value(carried);
+        if (binding == nullptr) return fail("communication value unbound");
+        if (binding->dtype != d.dtype) return fail("communication dtype mismatch");
+        if (send && dispatches[i].input_slots[0] != carried.id)
+            return fail("communication send input mismatch");
+        if (!send && dispatches[i].output_slots[0] != carried.id)
+            return fail("communication receive output mismatch");
+    }
+    for (const auto& d : comms) {
+        const ValueId carried = d.operation == CommOperation::Send ? d.input : d.output;
+        if (find_value(carried) == nullptr) return fail("communication value unbound");
+    }
     for (const auto& b : dispatches) {
         if (static_cast<uint32_t>(b.kernel_id) >= kernel_id_count())
             return fail("binding kernel id invalid");

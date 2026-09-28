@@ -356,13 +356,17 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
 endif()
 
 # ---------------------------------------------------------------------------
-# RCCL parallel runtime.
+# Parallel runtime.
 #   cpu;required   - ParallelConfig / rank mapping / communicator topology.
+#   gpu1;required  - pipeline stage partition and communication node contract.
 #   rccl_*         - multi-GPU RCCL tests. Never part of `required`: they need
 #                    2 or 4 GPUs and are selected by their own labels.
 # ---------------------------------------------------------------------------
 phaseshift_add_test(NAME test_parallel_topology SOURCE unit/test_parallel_topology.cpp
     LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_core)
+phaseshift_add_test(NAME test_qwen35_pp_boundary SOURCE unit/test_qwen35_pp_boundary.hip
+    LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1
+    LIBRARIES phaseshift_qwen35 phaseshift_gpu)
 
 if(PHASESHIFT_HAVE_RCCL)
     phaseshift_add_test(NAME test_rccl_transport SOURCE unit/test_rccl_transport.hip

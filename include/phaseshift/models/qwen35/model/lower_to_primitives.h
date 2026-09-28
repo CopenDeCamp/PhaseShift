@@ -17,8 +17,17 @@ struct Qwen35LoweredPrimitives {
     std::vector<ps::runtime::StaticParameterSlot> parameters;
 };
 
+struct ModelPartition {
+    uint32_t layer_begin = 0;
+    uint32_t layer_end = 0;
+    bool owns_embedding = true;
+    bool owns_lm_head = true;
+};
+
 struct Qwen35LowerOptions {
     std::span<const uint32_t> hidden_taps;
+    ModelPartition partition{};
+    uint32_t pipeline_peer_rank = 0;
 };
 
 Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(

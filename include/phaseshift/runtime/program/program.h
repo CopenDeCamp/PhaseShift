@@ -4,6 +4,7 @@
 #include <phaseshift/runtime/program/workspace_layout.h>
 #include <phaseshift/runtime/graph/primitive_graph.h>
 #include <phaseshift/runtime/graph/value_type.h>
+#include <phaseshift/runtime/parallel/comm_types.h>
 #include <phaseshift/runtime/execution/execution_types.h>
 #include <phaseshift/runtime/execution/row_bucket.h>
 #include <array>
@@ -17,6 +18,11 @@ constexpr uint32_t kMaxIoSlots = 6;
 constexpr uint32_t kNoWeight = 0xFFFFFFFFu;
 constexpr uint32_t kNoParameter = 0xFFFFFFFFu;
 constexpr uint32_t kNoWorkspace = 0xFFFFFFFFu;
+constexpr uint32_t kNoComm = 0xFFFFFFFFu;
+
+inline bool is_comm_kernel(KernelId id) noexcept {
+    return id == KernelId::COMM_SEND || id == KernelId::COMM_RECV;
+}
 
 struct WeightSlot {
     uint32_t rows = 0;
@@ -112,12 +118,23 @@ struct ImatrixProbe {
     uint32_t tag = 0;
 };
 
+struct CommDescriptor {
+    CommGroup group = CommGroup::Tensor;
+    CommOperation operation = CommOperation::Send;
+    uint32_t peer = 0;
+    ValueDType dtype = ValueDType::BF16;
+    ValueId input{};
+    ValueId output{};
+};
+
 struct Program {
     RowBucket row_bucket = RowBucket::R16;
     ExecutionClass execution_class = ExecutionClass::DECODE;
     WorkspaceLayout workspace;
     std::vector<DispatchBinding> dispatches;
     std::vector<uint32_t> dispatch_source_node;
+    std::vector<uint32_t> dispatch_comm;
+    std::vector<CommDescriptor> comms;
     std::vector<ValueBinding> values;
     std::vector<StateBinding> states;
     std::vector<ImatrixProbe> imatrix_probes;

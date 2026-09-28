@@ -2,6 +2,7 @@
 
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/graph/value_type.h>
+#include <phaseshift/runtime/parallel/comm_types.h>
 #include <phaseshift/runtime/parallel/parallel_config.h>
 
 #include <hip/hip_runtime.h>
@@ -13,18 +14,6 @@
 #include <vector>
 
 namespace ps::runtime {
-
-enum class CommGroup : uint8_t {
-    Tensor = 0,
-    Pipeline = 1,
-};
-
-enum class CommOperation : uint8_t {
-    AllReduceSum = 0,
-    Send = 1,
-    Recv = 2,
-    Broadcast = 3,
-};
 
 enum class RcclDataType : uint8_t {
     BF16 = 0,

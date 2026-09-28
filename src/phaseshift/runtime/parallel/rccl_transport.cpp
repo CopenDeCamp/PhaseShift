@@ -61,24 +61,6 @@ void discard_status(const Status&) {}
 
 }
 
-const char* comm_group_name(CommGroup group) noexcept {
-    switch (group) {
-        case CommGroup::Tensor: return "TENSOR";
-        case CommGroup::Pipeline: return "PIPELINE";
-    }
-    return "UNKNOWN";
-}
-
-const char* comm_operation_name(CommOperation operation) noexcept {
-    switch (operation) {
-        case CommOperation::AllReduceSum: return "ALLREDUCE";
-        case CommOperation::Send: return "SEND";
-        case CommOperation::Recv: return "RECV";
-        case CommOperation::Broadcast: return "BROADCAST";
-    }
-    return "UNKNOWN";
-}
-
 const char* rccl_dtype_name(RcclDataType dtype) noexcept {
     switch (dtype) {
         case RcclDataType::BF16: return "BF16";
