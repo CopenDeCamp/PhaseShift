@@ -21,6 +21,9 @@ Attention/KV:
 GDN:
   gdn-recurrence     GDN recurrence benchmark
 
+MTP:
+  mtp                MTP draft / speculative decode benchmark
+
 Auxiliary:
   elementwise        Qwen elementwise benchmark
   embedding          embedding lookup benchmark
@@ -73,6 +76,43 @@ greedy mode は `--compute-logits 1` が必要。
 （`--mode greedy --context >= 1` と MTP 重みを伴う model が必要）。
 report に `tokens_emitted` / `mtp_rounds` / `mtp_reruns` / `mtp_mean_accept`
 を追加して出力する。per-token 指標は `tokens_emitted` 基準。
+
+## mtp
+
+```text
+--model-dir PATH             (required)
+--device N                   (default 0)
+--arena-gib N                (default 8)
+--context N                  prompt tokens (default 0)
+--steps N                    target decode steps (default 32)
+--draft-k N                  verify 1 update あたりの draft 数 (default 4)
+--token-id N                 (default 1)
+--tokens-file PATH           PSKLDTOK corpus を prompt に使う
+--tokens-offset N            corpus の開始位置 (default 0)
+--chain pre|post             acceptance sim の draft hidden (default post)
+--spec                       production SpecDecoder で draft/verify/accept を実行
+--spec-only                  --spec かつ acceptance sim / verify-check を省略
+--spec-debug                 MTP logical / RoPE / KV length の遷移を出力
+--verify-mode exact|fast     verify の numeric mode (default exact)
+--replay-check               prefix replay と逐次 decode の一致を確認
+--page-tokens N              (default 16)
+```
+
+`--spec` は `spec_decoder_sync_prompt` で prompt を teacher-force してから
+`spec_decoder_step` で update を進め、production と同じ状態遷移で
+speculative decode を計測する。`--context >= 1` と `--steps >= 1` が必要。
+correctness を先に確認する場合は `--draft-k 1` で実行し、PASS を確認してから
+`--draft-k 2 / 4 / 8` へ広げる。
+
+spec OFF の greedy decode と生成 token 列が完全一致しなければ終了コード非 0。
+不一致時は divergence index・pending token・MTP logical length・
+`sequence.position`・accepted 数・draft 列・verify sample 列を出力する。
+
+report には rounds / emitted / accepted / drafts / mean accepted per update /
+emitted per update / reject0 rate / full accept rate / target forward per update /
+reruns / draft ms per update / verify ms per update / ms per token / tok/s を含む。
+
+`--chain` は acceptance sim 専用で、`--spec` 経路の draft hidden には影響しない。
 
 ## activation-quantize
 

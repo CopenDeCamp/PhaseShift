@@ -283,10 +283,12 @@ Result<SpecIterationOutput> spec_decoder_step(
     SpecDecoderTiming* tm = decoder.timing;
     ScopedTimer total_timer(tm ? &tm->total_ms : nullptr);
     if (tm != nullptr) ++tm->iterations;
+    out.mtp_length_before = decoder.mtp_state->logical_length;
     const uint32_t k_eff = clamp_draft_depth(decoder, decoder.config.num_drafts);
     if (k_eff == 0u) {
         Status status = run_single_decode(decoder, pending_token, out);
         if (!status.ok()) return status;
+        out.mtp_length_after = decoder.mtp_state->logical_length;
         record_token_history(decoder, out.emitted_tokens);
         if (decoder.config.eos_token >= 0 && out.pending_token == decoder.config.eos_token) {
             out.finished = true;
@@ -331,6 +333,7 @@ Result<SpecIterationOutput> spec_decoder_step(
         Status st0 = run_single_decode(decoder, pending_token, out);
         if (!st0.ok()) return st0;
         out.num_drafts_generated = 0u;
+        out.mtp_length_after = decoder.mtp_state->logical_length;
         record_token_history(decoder, out.emitted_tokens);
         if (decoder.config.eos_token >= 0 && out.pending_token == decoder.config.eos_token) {
             out.finished = true;
@@ -386,6 +389,10 @@ Result<SpecIterationOutput> spec_decoder_step(
         result.num_mtp_drafts = mtp_actual_k;
         out.num_accepted_drafts = result.num_accepted_drafts;
         out.num_drafts_generated = actual_k;
+        out.num_mtp_drafts = mtp_actual_k;
+        out.draft_tokens.assign(verify_tokens.begin() + 1, verify_tokens.end());
+        out.verify_sampled.assign(sampled.begin(), sampled.end());
+        out.rerun = result.num_accepted_drafts < actual_k;
         if (decoder.draft_log != nullptr) {
             for (uint32_t k = 0u; k < actual_k; ++k) {
                 decoder.draft_log->emplace_back(
@@ -474,6 +481,8 @@ Result<SpecIterationOutput> spec_decoder_step(
             out.pending_token = -1;
         }
     }
+
+    out.mtp_length_after = decoder.mtp_state->logical_length;
 
     if (decoder.config.eos_token >= 0) {
         for (std::size_t i = 0u; i < out.emitted_tokens.size(); ++i) {

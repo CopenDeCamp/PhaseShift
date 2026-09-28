@@ -132,6 +132,7 @@ struct MtpDraftPolicy {
     uint32_t min_drafts = 1u;
     bool enable_discard = false;
     float discard_margin = 0.0f;
+    bool chain_post_norm = false;
 };
 
 Result<SpecDraftSet> mtp_generate_drafts(

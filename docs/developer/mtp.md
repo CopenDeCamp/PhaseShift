@@ -15,14 +15,17 @@ MTP は Qwen3.5 系 checkpoint に内蔵された 1 層の drafter である。t
 **MTP は production serve path には接続されていない。**
 
 - `create_spec_decoder` / `spec_decoder_step`（MTP 用 `SpecDecoder`）の呼び出し元は
-  tests のみである。`phaseshift-compute` / `phaseshift-cli` / `phaseshift-server` に
-  MTP の入口は無い。
+  `phaseshift-bench mtp --spec` と tests である。`phaseshift-compute` / `phaseshift-cli` /
+  `phaseshift-server` に MTP の入口は無い。
 - CLI から起動できる speculative decode は **DFlash2** である。
   `phaseshift-compute` の `--dflash2-model-dir` が指定されたときだけ
   `run_dflash2_shot` が DFlash2 経路に入り、`phaseshift-cli` はこの option を転送する。
   target-only 経路は `ContinuousBatcher` のまま変わらない。
-- `phaseshift-bench mtp`（draft 単体）と `phaseshift-bench tg --mtp`（accept 込み）は
-  `MtpExecutor` を計測のために直接使う開発用 harness であり、serve path ではない。
+- `phaseshift-bench mtp --spec` は production と同じ `SpecDecoder` contract
+  （`spec_decoder_sync_prompt` + `spec_decoder_step`）で draft / verify / accept を回す
+  開発用 harness である。`phaseshift-bench mtp`（`--spec` 無し）は teacher-forced の
+  draft 単体計測、`phaseshift-bench tg --mtp` は `MtpExecutor` を直接使う
+  accept 込みの計測で、いずれも serve path ではない。
 - 一方、`spec_decode.h` の共有 helper（`spec_greedy_accept` /
   `spec_gdn_snapshot` / `spec_gdn_restore`）は DFlash2 production path から使われる。
   これらは MTP と DFlash2 で共通の contract である。
@@ -320,6 +323,25 @@ conv / recurrent を `spec_gdn_snapshot`（D2D copy）し、partial accept で�
 8. emitted token と pending token を返す。EOS（`eos_token >= 0`）は emitted を最初の EOS
    まで truncate し `finished = true`。pending が EOS でも `finished = true`。
 
+`SpecIterationOutput` は emitted / pending のほかに 1 update の内訳と状態遷移を返す。
+
+| field | 意味 |
+| --- | --- |
+| `num_accepted_drafts` | accept した draft 数 |
+| `num_drafts_generated` | verify に渡した draft 数 |
+| `num_mtp_drafts` | `mtp_generate_drafts` が返した draft 数（n-gram tail 未加算） |
+| `mtp_length_before` | transaction 開始時、すなわち draft 開始直前の MTP `logical_length` |
+| `mtp_length_after` | commit / rollback 後の MTP `logical_length` |
+| `rerun` | partial accept で accepted prefix の再 forward を行ったとき true |
+| `draft_tokens` | verify batch の `token_ids[1..]` |
+| `verify_sampled` | verify batch の各行の sample（長さ `draft + 1`） |
+
+更新後の MTP `logical_length` は常に
+`mtp_length_before + min(num_accepted_drafts + 1, num_mtp_drafts)`
+（`num_mtp_drafts == 0` のときは `mtp_length_before`）である。
+`mtp_length_before` は `sequence->position - 1`（absolute RoPE position）と一致しないことがある
+ため、logical KV index と absolute position を等しいものとして扱ってはならない。
+
 `spec_decoder_sync_prompt(decoder, prompt_tokens, prompt_hidden, count)` は prompt を
 teacher-force して MTP KV を作る。prompt 長 `N` に対し `mtp_forward_step` を
 `max_rows` ずつ chunk しながら、`(hidden[p], token[p+1])` を position `p`（`p = 0..N-2`）で
@@ -401,10 +423,40 @@ production CLI / server には MTP の起動 option が無い（serve path は D
 
 ---
 
+## bench harness（`phaseshift-bench mtp --spec`）
+
+`phaseshift-bench mtp --spec` は production と同じ状態遷移で speculative decode を回す。
+
+1. target prompt prefill を行い、prompt token 列・各 position の target hidden
+   （`BatchExecutionOutput::token_hidden`）・target sequence / GDN / KV state を
+   正規状態として用意する。
+2. MTP state を reset してから `spec_decoder_sync_prompt()` を呼び、
+   `prompt_tokens_count - 1` 行を teacher-force して MTP KV を構築する。
+   直後に `logical_length == context - 1` を検証する。
+3. `SpecDecoderConfig` は `bonus_token_enabled = true`、`eos_token = -1`、
+   `draft_policy.dynamic = false`、
+   `verify_numeric_mode = Exact`（library の既定は `Fast`。
+   `--verify-mode fast` で `Fast` を指定できる）。
+4. 各 update は `spec_decoder_step()` のみで進める。harness 側の独自 draft /
+   verify / accept / `sequence.position` rollback は行わない。
+5. `--spec-debug` は draft 開始前の MTP `logical_length`・absolute RoPE position・
+   `sequence.position`、draft 後の `kv_length_before` / `kv_length_after`、
+   commit 後の `logical_length` 検証を出力する。
+6. spec OFF の greedy decode と生成 token 列が完全一致しなければ終了コード非 0 で
+   終了する。不一致時は divergence index・pending token・MTP `logical_length`・
+   `sequence.position`・accepted 数・draft 列・verify sample 列を表示する。
+
+`--chain pre|post` は legacy の acceptance sim 専用の option である。SpecDecoder 経路の
+次 draft hidden は常に `MtpExecutor.hidden_out`（final norm 前）であり、
+`hidden_out_normed` を使うことはない。
+
+---
+
 ## Known limitations
 
 - MTP は production serve path に未接続である。利用可能な入口は tests と
-  `phaseshift-bench mtp` / `phaseshift-bench tg --mtp` のみ。
+  `phaseshift-bench mtp` / `phaseshift-bench mtp --spec` /
+  `phaseshift-bench tg --mtp` のみ。
 - 対応する MTP 層数は **1**。checkpoint の層数が 1 以外なら load を拒否する。
 - MTP KV は **BF16 のみ**。create 時に他 dtype を拒否する。
 - `max_rows` は 16 に clamp される。`MtpExecutorConfig` に 16 超を指定しても 16 になる。
