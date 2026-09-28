@@ -603,4 +603,10 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
     phaseshift_add_test(NAME test_qwen35_ngram_tail_gate1 SOURCE unit/test_qwen35_ngram_tail_gate1.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_qwen35_ngram_tail_gate1 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
     target_include_directories(test_qwen35_ngram_tail_gate1 PRIVATE "${CMAKE_SOURCE_DIR}/src")
+
+    # NgramTail Gate 2: DFlash2 + NgramTail live speculative verify.
+    # Mode via PHASESHIFT_NGRAM_TAIL_GATE2_MODE (correctness | perf).
+    phaseshift_add_test(NAME test_dflash2_ngram_tail_gate2 SOURCE unit/test_dflash2_ngram_tail_gate2.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    target_include_directories(test_dflash2_ngram_tail_gate2 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
+    target_include_directories(test_dflash2_ngram_tail_gate2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
 endif()
