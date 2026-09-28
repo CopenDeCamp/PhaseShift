@@ -1,0 +1,210 @@
+Upstream: LocalAI
+Base: v4.10.0 (7ad0cbf259f0c7bf9920fe2438fc3630ecd6c672)
+Requires: 0001-chat-response-format-fail-closed.patch,
+  0002-responses-structured-transport.patch
+Scope: tool policy transport only
+Purpose: transport parallel_tool_calls to the external backend, carry the
+  reserved tool-policy transport marker, preserve explicit Responses strict
+  tools, and reject Chat structured response_format combined with tools.
+Unmodified: backend.proto, tool grammar body, sampling, model loading.
+Note: reserved metadata keys are always overwritten so a client cannot spoof
+  them.
+
+Apply inside a LocalAI v4.10.0 source checkout from its root, after 0001 and 0002:
+  git apply vendor/localai/patches/0001-chat-response-format-fail-closed.patch
+  git apply vendor/localai/patches/0002-responses-structured-transport.patch
+  git apply vendor/localai/patches/0003-tool-policy-transport.patch
+
+diff --git a/core/http/endpoints/openai/chat.go b/core/http/endpoints/openai/chat.go
+index b56cf8e..f422056 100644
+--- a/core/http/endpoints/openai/chat.go
++++ b/core/http/endpoints/openai/chat.go
+@@ -390,6 +390,14 @@ func ChatEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evaluator
+ 			if err != nil {
+ 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+ 			}
++			// Structured response_format and tools cannot be composed yet.
++			// Reject explicitly instead of silently dropping one of them.
++			if constrained && len(input.Tools) > 0 {
++				return echo.NewHTTPError(
++					http.StatusBadRequest,
++					"response_format structured output combined with tools is not supported",
++				)
++			}
+ 			if constrained {
+ 				input.Grammar = grammar
+ 			}
+@@ -397,6 +405,12 @@ func ChatEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evaluator
+ 
+ 		config.Grammar = input.Grammar
+ 
++		// Mark tool requests so the backend can enforce strict / parallel tool
++		// policy. Reserved keys always overwrite any client-supplied metadata.
++		if len(input.Tools) > 0 {
++			SetPhaseShiftToolPolicyMetadata(config, input.ParallelToolCalls)
++		}
++
+ 		if shouldUseFn {
+ 			xlog.Debug("Response needs to process functions")
+ 		}
+@@ -583,11 +597,17 @@ func ChatEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evaluator
+ 						}
+ 						xlog.Error("Stream ended with error", "error", res.err)
+ 
++						errType := "server_error"
++						errCode := "server_error"
++						if IsBackendClientError(res.err) {
++							errType = "invalid_request"
++							errCode = "invalid_request"
++						}
+ 						errorResp := schema.ErrorResponse{
+ 							Error: &schema.APIError{
+ 								Message: res.err.Error(),
+-								Type:    "server_error",
+-								Code:    "server_error",
++								Type:    errType,
++								Code:    errCode,
+ 							},
+ 						}
+ 						respData, marshalErr := json.Marshal(errorResp)
+@@ -858,7 +878,7 @@ func ChatEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, evaluator
+ 					},
+ 				)
+ 				if err != nil {
+-					return err
++					return MapBackendError(err)
+ 				}
+ 
+ 				// For non-tool requests: prefer C++ autoparser chat deltas over
+diff --git a/core/http/endpoints/openai/tool_policy.go b/core/http/endpoints/openai/tool_policy.go
+new file mode 100644
+index 0000000..526c515
+--- /dev/null
++++ b/core/http/endpoints/openai/tool_policy.go
+@@ -0,0 +1,51 @@
++package openai
++
++import (
++	"net/http"
++	"strconv"
++
++	"github.com/labstack/echo/v4"
++	"github.com/mudler/LocalAI/core/config"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++)
++
++const (
++	phaseShiftToolPolicyTransportKey = "phaseshift.tool_policy_transport"
++	phaseShiftParallelToolCallsKey   = "phaseshift.parallel_tool_calls"
++)
++
++// SetPhaseShiftToolPolicyMetadata stamps the reserved tool-policy transport
++// keys onto the per-request metadata. The reserved keys are always
++// overwritten so a client cannot spoof them.
++func SetPhaseShiftToolPolicyMetadata(cfg *config.ModelConfig, parallel *bool) {
++	metadata := map[string]string{}
++	for key, value := range cfg.RequestMetadata {
++		metadata[key] = value
++	}
++	metadata[phaseShiftToolPolicyTransportKey] = "1"
++	enabled := true
++	if parallel != nil {
++		enabled = *parallel
++	}
++	metadata[phaseShiftParallelToolCallsKey] = strconv.FormatBool(enabled)
++	cfg.RequestMetadata = metadata
++}
++
++// IsBackendClientError reports whether a backend error is a client error
++// (the request was rejected before generation).
++func IsBackendClientError(err error) bool {
++	return err != nil && status.Code(err) == codes.InvalidArgument
++}
++
++// MapBackendError converts a backend gRPC error into the matching HTTP error.
++// A request the backend rejected before generation is a client error (400).
++func MapBackendError(err error) error {
++	if err == nil {
++		return nil
++	}
++	if status.Code(err) == codes.InvalidArgument {
++		return echo.NewHTTPError(http.StatusBadRequest, status.Convert(err).Message())
++	}
++	return err
++}
+diff --git a/core/http/endpoints/openresponses/responses.go b/core/http/endpoints/openresponses/responses.go
+index 20b356e..97a0510 100644
+--- a/core/http/endpoints/openresponses/responses.go
++++ b/core/http/endpoints/openresponses/responses.go
+@@ -22,6 +22,8 @@ import (
+ 	reason "github.com/mudler/LocalAI/pkg/reasoning"
+ 	"github.com/mudler/LocalAI/pkg/utils"
+ 	"github.com/mudler/xlog"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
+ )
+ 
+ // ResponsesEndpoint is the Open Responses API endpoint
+@@ -189,6 +191,12 @@ func ResponsesEndpoint(cl *config.ModelConfigLoader, ml *model.ModelLoader, eval
+ 			}
+ 		}
+ 
++		// Mark tool requests so the backend can enforce strict / parallel tool
++		// policy. Reserved keys always overwrite any client-supplied metadata.
++		if len(input.Tools) > 0 {
++			openaiEndpoint.SetPhaseShiftToolPolicyMetadata(cfg, input.ParallelToolCalls)
++		}
++
+ 		// Generate grammar for function calling (similar to OpenAI chat endpoint)
+ 		if shouldUseFn && !cfg.FunctionsConfig.GrammarConfig.NoGrammar {
+ 			// Add no-action function to allow model to respond without calling a tool
+@@ -1494,7 +1502,7 @@ func handleOpenResponsesNonStream(c echo.Context, responseID string, createdAt i
+ 	choices, tokenUsage, chatDeltas, err := openaiEndpoint.ComputeChoices(openAIReq, predInput, cfg, cl, appConfig, ml, cb, nil)
+ 	if err != nil {
+ 		xlog.Error("Open Responses model inference failed", "error", err)
+-		return sendOpenResponsesError(c, 500, "model_error", fmt.Sprintf("model inference failed: %v", err), "")
++		return sendOpenResponsesInferenceError(c, err)
+ 	}
+ 	var resultLogprobs *schema.Logprobs
+ 	if len(choices) > 0 {
+@@ -3107,6 +3115,16 @@ func buildORResponse(responseID string, createdAt int64, completedAt *int64, sta
+ 	}
+ }
+ 
++// sendOpenResponsesInferenceError maps a backend inference failure onto the
++// Responses error surface. A request rejected before generation is a client
++// error (400); anything else is a model error (500).
++func sendOpenResponsesInferenceError(c echo.Context, err error) error {
++	if status.Code(err) == codes.InvalidArgument {
++		return sendOpenResponsesError(c, 400, "invalid_request", status.Convert(err).Message(), "")
++	}
++	return sendOpenResponsesError(c, 500, "model_error", fmt.Sprintf("model inference failed: %v", err), "")
++}
++
+ // sendOpenResponsesError sends an error response
+ func sendOpenResponsesError(c echo.Context, statusCode int, errorType, message, param string) error {
+ 	errorResp := map[string]any{
+@@ -3135,6 +3153,7 @@ func convertORToolsToOpenAIFormat(orTools []schema.ORFunctionTool) []functions.T
+ 			Function: functions.Function{
+ 				Name:        t.Name,
+ 				Description: t.Description,
++				Strict:      t.Strict,
+ 				Parameters:  t.Parameters,
+ 			},
+ 		})
+diff --git a/core/schema/openai.go b/core/schema/openai.go
+index 4475274..00cff65 100644
+--- a/core/schema/openai.go
++++ b/core/schema/openai.go
+@@ -227,6 +227,10 @@ type OpenAIRequest struct {
+ 	Tools       []functions.Tool `json:"tools,omitempty" yaml:"tools"`
+ 	ToolsChoice any              `json:"tool_choice,omitempty" yaml:"tool_choice"`
+ 
++	// ParallelToolCalls controls whether the model may emit more than one tool
++	// call per response. When absent the OpenAI default (true) applies.
++	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty" yaml:"parallel_tool_calls,omitempty"`
++
+ 	Stream bool `json:"stream,omitempty"`
+ 
+ 	// StreamOptions opts into OpenAI streaming extensions, e.g. include_usage.

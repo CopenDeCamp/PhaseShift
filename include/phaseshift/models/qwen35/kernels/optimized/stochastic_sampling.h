@@ -1,0 +1,29 @@
+#pragma once
+
+#include <phaseshift/models/qwen35/kernels/optimized/sampling_common.h>
+#include <phaseshift/runtime/batch/device_batch_context.h>
+
+#include <hip/hip_runtime.h>
+
+#include <cstdint>
+
+namespace ps::kernel {
+
+struct StochasticSamplingF32Args {
+    const float* logits = nullptr;
+    const ::ps::runtime::DeviceSamplingParams* sampling = nullptr;
+    int32_t* sampled_tokens = nullptr;
+    uint32_t outputs = 0;
+    uint32_t vocab_size = 0;
+    uint32_t logits_row_stride = 0;
+    const uint32_t* constraint_masks = nullptr;
+    uint32_t constraint_mask_words = 0;
+    uint32_t* error_word = nullptr;
+    uint32_t* attempts_out = nullptr;
+};
+
+hipError_t launch_stochastic_sampling_f32_singleblock(
+    const StochasticSamplingF32Args& args,
+    hipStream_t stream);
+
+}  // namespace ps::kernel

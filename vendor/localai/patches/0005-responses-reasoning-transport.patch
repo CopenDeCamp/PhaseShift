@@ -1,0 +1,85 @@
+Upstream: LocalAI
+Base: v4.10.0 (7ad0cbf259f0c7bf9920fe2438fc3630ecd6c672)
+Requires: 0001-chat-response-format-fail-closed.patch,
+  0002-responses-structured-transport.patch,
+  0003-tool-policy-transport.patch,
+  0004-structured-tools-composition-transport.patch
+Scope: Responses reasoning transport only
+Purpose: the Responses frontend drops reasoning.effort when it merges the
+  request into the model config, and its output side only opens a reasoning
+  item from the Go-side tag extractor. A backend that classifies reasoning
+  itself (ChatDelta.reasoning_content) therefore never reaches the client.
+  Forward reasoning.effort like the Chat Completions path, prefer ChatDelta
+  reasoning when building the non-stream reasoning item, and let ChatDelta
+  reasoning open the streaming reasoning item.
+Unmodified: backend.proto, tool grammar body, sampling, model loading,
+  reasoning extraction, response envelope.
+Note: reasoning itself is produced by the PhaseShift backend; this patch only
+  transports the request lever and the backend's own reasoning classification.
+
+Apply inside a LocalAI v4.10.0 source checkout from its root, after 0001..0004:
+  git apply vendor/localai/patches/0001-chat-response-format-fail-closed.patch
+  git apply vendor/localai/patches/0002-responses-structured-transport.patch
+  git apply vendor/localai/patches/0003-tool-policy-transport.patch
+  git apply vendor/localai/patches/0004-structured-tools-composition-transport.patch
+  git apply vendor/localai/patches/0005-responses-reasoning-transport.patch
+
+diff --git a/core/http/endpoints/openresponses/responses.go b/core/http/endpoints/openresponses/responses.go
+index 353de8b..6976db6 100644
+--- a/core/http/endpoints/openresponses/responses.go
++++ b/core/http/endpoints/openresponses/responses.go
+@@ -1526,8 +1526,20 @@ func handleOpenResponsesNonStream(c echo.Context, responseID string, createdAt i
+ 		thinkingStartToken = reason.DetectThinkingStartTokenInTemplate(template, &cfg.ReasoningConfig)
+ 	}
+ 
+-	// Extract reasoning from result before cleaning
+-	reasoningContent, cleanedResult := reason.ExtractReasoningComplete(result, thinkingStartToken, cfg.ReasoningConfig)
++	// Extract reasoning from result before cleaning. Prefer the backend's own
++	// classification (ChatDeltas) when present: a backend that streams reasoning
++	// separately leaves `result` holding only the final answer, so tag-based
++	// extraction would find nothing.
++	var reasoningContent, cleanedResult string
++	if cdReasoning := functions.ReasoningFromChatDeltas(chatDeltas); cdReasoning != "" {
++		reasoningContent = cdReasoning
++		cleanedResult = functions.ContentFromChatDeltas(chatDeltas)
++		if cleanedResult == "" {
++			cleanedResult = result
++		}
++	} else {
++		reasoningContent, cleanedResult = reason.ExtractReasoningComplete(result, thinkingStartToken, cfg.ReasoningConfig)
++	}
+ 
+ 	// Parse tool calls if using functions
+ 	var outputItems []schema.ORItemField
+@@ -2552,8 +2564,10 @@ func handleOpenResponsesStream(c echo.Context, responseID string, createdAt int6
+ 			contentDelta = goContent
+ 		}
+ 
+-		// Handle reasoning item
+-		if extractor.Reasoning() != "" {
++		// Handle reasoning item. ChatDelta reasoning must also open the item;
++		// extractor.Reasoning() only tracks the Go-side tag extractor, which stays
++		// empty when a backend classifies reasoning itself.
++		if reasoningDelta != "" || extractor.Reasoning() != "" {
+ 			// Check if we need to create reasoning item
+ 			if currentReasoningID == "" {
+ 				outputIndex++
+diff --git a/core/http/middleware/request.go b/core/http/middleware/request.go
+index 080a0b7..52d6321 100644
+--- a/core/http/middleware/request.go
++++ b/core/http/middleware/request.go
+@@ -740,6 +740,14 @@ func MergeOpenResponsesConfig(config *config.ModelConfig, input *schema.OpenResp
+ 		config.Maxtokens = input.MaxOutputTokens
+ 	}
+ 
++	// Reasoning effort (parity with the Chat Completions path). The Responses
++	// frontend otherwise drops reasoning.effort, so the backend never learns
++	// that the client asked the model to think. ApplyReasoningEffort maps the
++	// level onto the enable_thinking toggle the backend reads.
++	if input.Reasoning != nil {
++		config.ApplyReasoningEffort(input.Reasoning.Effort)
++	}
++
+ 	// Convert tools to functions - this will be handled in the endpoint handler
+ 	// We just validate that tools are present if needed
+ 
