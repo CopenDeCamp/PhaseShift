@@ -6,6 +6,7 @@
 #include <phaseshift/models/qwen35/dflash2/weights.h>
 #include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <phaseshift/models/qwen35/runtime/decode_backend.h>
+#include <phaseshift/models/qwen35/runtime/lm_head_proxy.h>
 #include <phaseshift/models/qwen35/runtime/runtime_request.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
@@ -1619,6 +1620,12 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(argv[i], "--dump-logits") == 0 && i + 1 < argc) {
             dump_logits_path = argv[++i];
+            if (ps::qwen35::runtime::target_lm_head_proxy_decode_mode() != 0u) {
+                fprintf(stderr,
+                        "--dump-logits does not support the decode lm-head proxy fast path "
+                        "(set PHASESHIFT_TARGET_LM_HEAD_PROXY=0)\n");
+                return 2;
+            }
         } else if (std::strcmp(argv[i], "--temperature") == 0 && i + 1 < argc) {
             if (!parse_float(argv[++i], sampling.temperature)) { fprintf(stderr, "bad --temperature\n"); return 2; }
         } else if (std::strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {

@@ -100,12 +100,14 @@ struct DFlash2Executor {
     gpu::Tensor int2_rerank_logits;
     gpu::Tensor int2_scratch_ids;
     gpu::Tensor int2_scratch_logits;
+    gpu::Tensor int2_radix_scratch;
     gpu::Tensor int2_coarse_logits;
     gpu::Tensor int2_diag_ids;
     gpu::Tensor int2_diag_logits;
     gpu::Tensor int2_diag_tokens;
     uint32_t int2_scratch_row_stride = 0;
     uint32_t int2_partitions = 0;
+    uint32_t int2_radix_partitions = 0;
 
     bool initialized = false;
 };

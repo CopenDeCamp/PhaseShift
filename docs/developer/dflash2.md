@@ -582,6 +582,30 @@ coarse Top-N:
 - tie は (logit desc, token id asc)。pool は `kDflash2TopKMaxK`(16) 以上
   `kDflash2Int2MaxPool`(128) 以下で、既定 32。
 
+Radix Select Top-N:
+
+- `launch_dflash2_radix_topn` は full sort ではなく
+  threshold selection → exact N candidate extraction → small N sort である。
+- float32 ordered bits の 4 pass radix（31:24 → 7:0）。各 pass は
+  `rows × partitions` の histogram kernel と `rows` の select kernel。
+  prefix を満たす element だけを histogram し、上位 bucket から累積して
+  N 番目を含む bucket を確定する。4 pass 後に N 番目の exact float32 threshold が得られる。
+- `count_gt`（threshold より大）と `count_eq`（threshold と同値）を出し
+  `need = N - count_gt`。`count_eq > need` の場合にのみ、threshold と同一 float の
+  element を対象に token ID の radix selection（vocab 幅の 1 走査 bitmap）を行い、
+  同値が起きない通常ケースでは ID 側の追加走査を発生させない。
+- candidate は出力 buffer へ compact されて件数が正確に N になり、
+  `next_pow2(N)` の bitonic で key 降順に sort して出力する。
+- ordering contract は `detail::topn_key()` と完全互換（score 降順、同値は token id 昇順、
+  `+0/-0` 同値、NaN と `-INFINITY` の扱い、tail の `(id=0, -INFINITY)` 満たしを含む）。
+- scratch は init 時に
+  `dflash2_radix_topn_scratch_bytes(rows, partitions, vocab)` で決め、実行時に
+  `hipMalloc` しない。
+- 選択は `dflash2_radix_topn_preferred(pool)` が決める:
+  `PHASESHIFT_DFLASH2_RADIX_TOPN=0` で常に従来実装、`=1` で常に radix、
+  未指定では `pool >= kDflash2RadixTopnCrossoverPool`（= 64）で radix。
+  従来実装 `launch_dflash2_coarse_topn` は oracle / fallback として残す。
+
 PSQ8 exact rerank:
 
 - `launch_dflash2_psq8_candidate_rerank` は PSQ8 W8A8 kernel の weight row を
@@ -870,6 +894,7 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 | `PHASESHIFT_DFLASH2_INT2_CODEBOOK` | lloyd | `symmetric` で対称 codebook |
 | `PHASESHIFT_DFLASH2_INT2_DIAG` | off | INT2 診断出力 |
 | `PHASESHIFT_DFLASH2_INT2_TIMING` | off | INT2 区間 timing 出力 |
+| `PHASESHIFT_DFLASH2_RADIX_TOPN` | auto | 0 で従来 topn、1 で radix topn、未指定は pool crossover |
 
 target verify の GDN recurrence は `PHASESHIFT_GDN_RECURRENCE_MULTIROW`（既定 on、0 で
 serial 強制）で切り替わる。
@@ -955,7 +980,7 @@ DFlash mode の出力を扱える。
   - `feature_concat` / `grouped_dynamic_conv` / `rmsnorm` / `rope` /
     `swiglu` / `attention` / `kv_ring` / `noise_input`
   - `candidate_selector` / `topk` / `topk_optimized`
-  - `draft_head_int2` / `coarse_topn`
+  - `draft_head_int2` / `coarse_topn` / `radix_topn`
   - `detail/`（`coarse_head_device.h` / `coarse_topn_device.h` /
     `psq8_rerank_device.h` / `rmsnorm_device.h` / `rope_device.h` / `swiglu_device.h`）
 
@@ -988,8 +1013,10 @@ DFlash mode の出力を扱える。
   `test_dflash2_candidate_selector` / `test_dflash2_kv_ring` /
   `test_dflash2_attention_ring` / `test_dflash2_psq4_shapes` /
   `test_dflash2_int2_pack` / `test_dflash2_int2_coarse_head` /
-  `test_dflash2_coarse_topn` / `test_dflash2_psq8_rerank` /
+  `test_dflash2_coarse_topn` / `test_dflash2_radix_topn` /
+  `test_dflash2_psq8_rerank` /
   `test_gdn_spec_history` / `test_gdn_recurrence_decode1`
+- perf（label `gpu1;perf`、正しさテストと分離）: `test_dflash2_radix_topn_perf`
 - optional / external: `test_dflash2_weight_real` / `test_dflash2_gate*_real` /
   `test_dflash2_gate*_perf` / `test_dflash2_gate8_live` / `test_dflash2_gate9_e2e` /
   `test_dflash2_gate10_cli` / `test_dflash2_gate11*`
