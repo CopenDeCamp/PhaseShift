@@ -370,6 +370,9 @@ phaseshift_add_test(NAME test_qwen35_pp_boundary SOURCE unit/test_qwen35_pp_boun
 phaseshift_add_test(NAME test_qwen35_synthetic_e2e SOURCE unit/test_qwen35_synthetic_e2e.hip
     LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 4
     LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_io phaseshift_gpu)
+phaseshift_add_test(NAME test_qwen35_tp_column_linear SOURCE unit/test_qwen35_tp_column_linear.hip
+    LABELS "gpu2;multi_gpu" TIMEOUT 300 GPU_COUNT 2 GPU_COST_GB 2
+    LIBRARIES phaseshift_weights phaseshift_qwen35_kernels phaseshift_gpu)
 
 if(PHASESHIFT_HAVE_RCCL)
     phaseshift_add_test(NAME test_rccl_transport SOURCE unit/test_rccl_transport.hip
@@ -381,6 +384,9 @@ if(PHASESHIFT_HAVE_RCCL)
     phaseshift_add_test(NAME test_qwen35_pp2_e2e SOURCE unit/test_qwen35_pp2_e2e.hip
         LABELS "gpu2;rccl;rccl_2gpu" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 4
         LIBRARIES phaseshift_parallel phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_io phaseshift_gpu)
+    phaseshift_add_test(NAME test_qwen35_tp_row_linear SOURCE unit/test_qwen35_tp_row_linear.hip
+        LABELS "gpu2;rccl;rccl_2gpu" TIMEOUT 300 GPU_COUNT 2 GPU_COST_GB 2
+        LIBRARIES phaseshift_parallel phaseshift_weights phaseshift_qwen35_kernels phaseshift_gpu)
 endif()
 
 # ---------------------------------------------------------------------------

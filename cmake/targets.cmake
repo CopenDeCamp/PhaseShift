@@ -48,6 +48,7 @@ target_compile_options(phaseshift_io PRIVATE -Wall -Wextra -Wpedantic -Werror=re
 # layers, never on models/.
 add_library(phaseshift_weights STATIC
     src/phaseshift/weights/weight_loader.cpp
+    src/phaseshift/weights/matrix_shard.cpp
 )
 target_compile_features(phaseshift_weights PRIVATE cxx_std_20)
 target_include_directories(phaseshift_weights PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
