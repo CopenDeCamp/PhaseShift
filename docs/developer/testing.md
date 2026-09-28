@@ -77,6 +77,30 @@ group と test 一覧は `tests/server/run_server_regression.py` の `GROUPS` �
 `prefix-cache` / `reasoning` / `reasoning-tools` / `concurrency-cancel` / `capability` /
 `agent`。
 
+## GPU 割り当て
+
+`GPU_COUNT > 0` の test は `phaseshift-gpu-test-runner` にラップされる。
+runner は次のことを行う。
+
+- 使用 GPU の予約と VRAM budget の管理（`PHASESHIFT_TEST_GPU_BUDGET_GB`）
+- `HIP_VISIBLE_DEVICES` を test binary へ伝える
+- `--timeout` に対する hard deadline（超過で SIGKILL、state を taint）
+
+予約状態は `<build>/gpu-test-state/` に置かれる。**この state は build dir 単位**
+であり、別の worktree や別のリポジトリで走っているプロセスの GPU 使用は反映されない。
+結果として、他者が大量の VRAM を使っていても runner はそれを空きと判断し、
+同じ GPU を選ぶことがある。
+
+同じ GPU を避けたい場合は、候補 GPU を明示する。`PHASESHIFT_TEST_GPUS` は
+`candidate_gpus()` の最優先で読まれる。
+
+```bash
+PHASESHIFT_TEST_GPUS=2,3 ctest --test-dir build -R test_rccl
+```
+
+指定した GPU が足りない場合、runner は `SKIP: insufficient GPUs` を返して
+exit 77 になる。
+
 ## 実行層
 
 3 層を混同しない。
