@@ -20,6 +20,7 @@
 - [gdn/optimization_history.md](gdn/optimization_history.md) — GDN recurrence / conv / chunked scan / WMMA 数値挙動
 - [attention/optimization_history.md](attention/optimization_history.md) — paged attention decode / prefill、KV split/reduce
 - [runtime/execution_overhead.md](runtime/execution_overhead.md) — prefill・decode コスト内訳、kernel gap、HIP Graph / keep-alive
+- [runtime/rccl_parallel_gate.md](runtime/rccl_parallel_gate.md) — RCCL multi-GPU Gate（R0 環境、R1/R2、PP stage 分割）の検証記録
 - [kernel/optimization_history.md](kernel/optimization_history.md) — RoPE 等の単独 kernel
 - [mtp/optimization_history.md](mtp/optimization_history.md) — MTP の correctness / acceptance / Gate 検証
 - [dflash2/optimization_history.md](dflash2/optimization_history.md) — DFlash2 / speculative verify / INT2 coarse head

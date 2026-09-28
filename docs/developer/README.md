@@ -13,6 +13,7 @@ PoC・Gate・採否判断は `docs/rnd/`、現在の性能値は `docs/perf/`、
 
 - [architecture.md](architecture.md) — layer 構成と依存ルール、Server を含む責務境界
 - [runtime.md](runtime.md) — execution path と state ownership
+- [parallel_runtime.md](parallel_runtime.md) — RCCL multi-GPU の構成・communicator・communication node
 - [qwen35.md](qwen35.md) — Qwen3.5 runtime family の配線（source path / KernelId / execution order）
 - [qwen4exp.md](qwen4exp.md) — Qwen3.8-Flash-Next (qwen4_exp) の architecture contract
 - [sampling.md](sampling.md) — target LM sampling（temperature / top-k / top-p / seed）
