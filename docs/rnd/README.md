@@ -30,6 +30,7 @@
 - [dflash2/spec_decode_loops_adoption.md](dflash2/spec_decode_loops_adoption.md) — draft loop 設計を PhaseShift へどう適用したか
 - [dflash2/external_facts_adoption.md](dflash2/external_facts_adoption.md) — 外部 DFlash2 実装 fact を PhaseShift でどう検証・採用したか
 - [mtp/mtp.md](mtp/mtp.md) — MTP（内蔵 drafter）の Gate 記録（正本）
+- [spec_decode/ngram_tail_gate1.md](spec_decode/ngram_tail_gate1.md) — NgramTail Gate 1（committed-history tail extension の候補品質検証と Gate 2 推奨）
 
 ## Qwen4Exp (Qwen3.8-Flash-Next)
 
