@@ -1,5 +1,6 @@
 #include <phaseshift/models/qwen35/runtime/spec_decoder.h>
 
+#include <phaseshift/models/qwen35/runtime/ngram_tail.h>
 #include <phaseshift/models/qwen35/runtime/scheduled_batch.h>
 
 #include <algorithm>
@@ -191,10 +192,7 @@ void append_ngram_tail(
     SpecDecoder& decoder, int32_t pending_token, SpecDraftSet& drafts, uint32_t k_max) {
     const uint32_t n = decoder.config.ngram_n;
     if (n == 0u || drafts.steps.size() >= k_max) return;
-    std::vector<int32_t>& hist = decoder.token_history;
-    if (hist.size() + 1u + drafts.steps.size() < static_cast<std::size_t>(n) + 1u) return;
-    const std::size_t window = decoder.config.ngram_window;
-    const std::size_t start = (hist.size() > window) ? hist.size() - window : 0u;
+    const std::vector<int32_t>& hist = decoder.token_history;
 
     std::vector<int32_t> seq;
     seq.reserve(hist.size() + 1u + drafts.steps.size());
@@ -203,31 +201,20 @@ void append_ngram_tail(
     for (const SpecDraftStep& s : drafts.steps)
         seq.push_back(static_cast<int32_t>(s.draft_token));
 
-    const std::size_t L = seq.size();
-    std::size_t pos = 0u;
-    bool found = false;
-    for (std::size_t j = L - n; j-- > start;) {
-        bool eq = true;
-        for (uint32_t t = 0u; t < n; ++t) {
-            if (seq[j + t] != seq[L - n + t]) {
-                eq = false;
-                break;
-            }
-        }
-        if (eq) {
-            pos = j;
-            found = true;
-            break;
-        }
-    }
-    if (!found) return;
+    NgramTailConfig cfg;
+    cfg.n = decoder.config.ngram_n;
+    cfg.max_tail = decoder.config.ngram_max_tail;
+    cfg.window = decoder.config.ngram_window;
+    auto proposal = propose_ngram_tail(seq, cfg);
+    if (!proposal.ok()) return;
+    const NgramTailProposal& value = proposal.value();
+    if (!value.hit) return;
 
-    uint32_t tail = decoder.config.ngram_max_tail;
-    for (std::size_t j = pos + n; j < L && tail > 0u && drafts.steps.size() < k_max; ++j) {
+    for (int32_t token : value.tokens) {
+        if (drafts.steps.size() >= k_max) break;
         SpecDraftStep s{};
-        s.draft_token = static_cast<uint32_t>(seq[j]);
+        s.draft_token = static_cast<uint32_t>(token);
         drafts.steps.push_back(s);
-        --tail;
     }
 }
 

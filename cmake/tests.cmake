@@ -135,6 +135,7 @@ phaseshift_add_test(NAME test_qwen35_mtp_state SOURCE unit/test_qwen35_mtp_state
 target_include_directories(test_qwen35_mtp_state PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_lm_head_proxy_path SOURCE unit/test_lm_head_proxy_path.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+phaseshift_add_test(NAME test_ngram_tail SOURCE unit/test_ngram_tail.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_decode_backend_contract SOURCE unit/test_decode_backend_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_qwen35_spec_transaction SOURCE unit/test_qwen35_spec_transaction.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
 target_include_directories(test_qwen35_spec_transaction PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -309,6 +310,7 @@ add_custom_target(
         test_qwen35_mtp_state
         test_qwen35_spec_verify
         test_lm_head_proxy_path
+        test_ngram_tail
         test_decode_backend_contract
         test_qwen35_spec_transaction
         test_architecture_boundaries
