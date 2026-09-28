@@ -1,6 +1,7 @@
 #pragma once
 #include <phaseshift/core/memory/types.h>
 #include <phaseshift/core/status.h>
+#include <phaseshift/runtime/execution/execution_types.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,9 @@ public:
                 hipStream_t stream);
     Status select(const bf16_t* normed, uint32_t rows, uint32_t row_stride, int32_t* out_ids,
                   hipStream_t stream);
+    Status select_shadow(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
+                         hipStream_t stream);
+    Status compare_shadow(const int32_t* full_ids, uint32_t rows, hipStream_t stream);
     Status shutdown() noexcept;
 
     bool valid() const noexcept { return int2_codes_ != nullptr; }
@@ -36,6 +40,8 @@ public:
 
 private:
     void move_from(LmHeadCandidateProxy& other) noexcept;
+    Status run_select(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
+                      int32_t* out_ids, hipStream_t stream);
 
     const uint8_t* weight_codes_ = nullptr;
     const uint8_t* weight_scales_ = nullptr;
@@ -64,9 +70,33 @@ private:
     int32_t* scratch_ids_ = nullptr;
     float* scratch_values_ = nullptr;
     uint32_t* radix_scratch_ = nullptr;
+    int32_t* shadow_ids_ = nullptr;
+    uint64_t* shadow_counters_ = nullptr;
 };
 
 uint32_t target_lm_head_proxy_mode();
+uint32_t target_lm_head_proxy_decode_mode();
 uint32_t target_lm_head_proxy_pool();
+
+enum class LmHeadProxyPath : uint8_t {
+    None = 0,
+    Fast = 1,
+    Shadow = 2,
+};
+
+inline LmHeadProxyPath lm_head_proxy_path(::ps::runtime::ExecutionRole role,
+                                          uint32_t stochastic_outputs, bool constrained,
+                                          uint32_t mode) {
+    const bool verify_path = role == ::ps::runtime::ExecutionRole::Verify;
+    const bool decode_path = role == ::ps::runtime::ExecutionRole::Decode &&
+                             stochastic_outputs == 0u;
+    if (!verify_path && !decode_path)
+        return LmHeadProxyPath::None;
+    if (constrained || mode == 0u)
+        return LmHeadProxyPath::None;
+    if (verify_path)
+        return mode == 2u ? LmHeadProxyPath::None : LmHeadProxyPath::Fast;
+    return mode == 2u ? LmHeadProxyPath::Shadow : LmHeadProxyPath::Fast;
+}
 
 }  // namespace ps::qwen35::runtime

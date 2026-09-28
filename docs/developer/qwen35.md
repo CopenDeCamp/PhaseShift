@@ -294,6 +294,35 @@ Auto モードでは `execute_program` が `lm_head_proxy`、単体 launcher の
 
 `try_launch_lm_head_proxy_fusion` を試す。`Launched` でなければ単体 launcher を試す。
 
+適用可否は `lm_head_proxy_path(role, stochastic_outputs, constrained, mode)` が決める
+（`include/phaseshift/models/qwen35/runtime/lm_head_proxy.h`）。
+
+| role / mode | 既定 | mode=0 | mode=1 | mode=2 |
+| --- | --- | --- | --- | --- |
+| Verify | Fast | off | Fast | off |
+| Decode（greedy） | off | off | Fast | Shadow |
+| Decode（stochastic） / Prefill | off | off | off | off |
+
+- `mode` は `PHASESHIFT_TARGET_LM_HEAD_PROXY`。**未指定時は Verify のみ Fast、
+ Decode は off**（既存挙動を維持する）。`=0` で proxy 完全停止、`=1` で Fast、
+ `=2` で Decode だけ Shadow。
+- constraint（`constraint_masks` / `constraint_mask_words`）がある経路は常に off。
+- pool は `PHASESHIFT_TARGET_LM_HEAD_PROXY_POOL`（既定 32、`kDflash2Int2MaxPool` まで）。
+- Top-N は `dflash2_radix_topn_preferred(pool)` で legacy / radix を選ぶ。
+
+適用時も前提は同じで、weight は PSQ8 / preshuffled / `weight_scale_group == 32` /
+`k_padded % 32 == 0`、pattern は `ACTIVATION_QUANTIZE_W4A8` → `LINEAR_PSQ8` →
+`SAMPLING` の 3 連続 dispatch。
+
+- **Fast**: `LmHeadCandidateProxy::select()`（activation quantize → INT2 coarse →
+  Top-N → PSQ8 candidate rerank → pool argmax）が sampling 出力へ token を書き、
+  3 dispatch を消費する。full vocab logits は計算しない。
+- **Shadow**: `select_shadow()` が proxy 自有の buffer へ書き、3 dispatch は
+  通常どおり実行される（`consumed_dispatches` を消費しない）。比較は
+  `execute_program_range` の末尾で `compare_shadow()` が行い、
+  device counter（decisions / mismatches）へ加算する。
+  Host への退避と `TARGET_LM_HEAD_PROXY_SHADOW` 行の出力は shutdown 時のみ。
+
 ### 7.2 単体 launcher の dispatch 順序
 
 `try_launch_optimized` は以下のように分岐する（先着順）。

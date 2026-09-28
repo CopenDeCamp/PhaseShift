@@ -70,6 +70,9 @@ struct HostExecutionContext {
     const uint32_t* constraint_masks = nullptr;
     uint32_t constraint_mask_words = 0;
     LmHeadCandidateProxy* lm_head_proxy = nullptr;
+    bool lm_head_shadow_pending = false;
+    const int32_t* lm_head_shadow_full = nullptr;
+    uint32_t lm_head_shadow_rows = 0;
     DispatchStagingPool* staging_pool = nullptr;
     const ProgramStagingMeta* program_meta = nullptr;
     ::ps::quantization::imatrix::ImatrixCollector* imatrix_collector = nullptr;

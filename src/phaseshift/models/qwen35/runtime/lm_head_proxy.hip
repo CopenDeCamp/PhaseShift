@@ -37,6 +37,79 @@ __global__ void pool_argmax_remap_kernel(
     out_ids[row] = ids[best_pos];
 }
 
+__global__ void shadow_compare_kernel(
+    const int32_t* __restrict__ full_ids,
+    const int32_t* __restrict__ proxy_ids,
+    uint32_t rows,
+    uint64_t* __restrict__ counters) {
+    __shared__ uint32_t dec[64];
+    __shared__ uint32_t mis[64];
+    const uint32_t tid = threadIdx.x;
+    uint32_t d = 0u;
+    uint32_t m = 0u;
+    for (uint32_t r = tid; r < rows; r += blockDim.x) {
+        ++d;
+        if (full_ids[r] != proxy_ids[r])
+            ++m;
+    }
+    dec[tid] = d;
+    mis[tid] = m;
+    __syncthreads();
+    if (tid == 0u) {
+        uint32_t td = 0u;
+        uint32_t tm = 0u;
+        for (uint32_t t = 0u; t < blockDim.x; ++t) {
+            td += dec[t];
+            tm += mis[t];
+        }
+        counters[0] += td;
+        counters[1] += tm;
+    }
+}
+
+bool proxy_timing_enabled() {
+    const char* env = std::getenv("PHASESHIFT_TARGET_LM_HEAD_PROXY_TIMING");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+struct ProxyTimers {
+    double quant_ms = 0.0;
+    double coarse_ms = 0.0;
+    double topn_ms = 0.0;
+    double rerank_ms = 0.0;
+    double argmax_ms = 0.0;
+    double total_ms = 0.0;
+    uint64_t rounds = 0u;
+};
+
+ProxyTimers& proxy_timers() {
+    static ProxyTimers t;
+    return t;
+}
+
+float proxy_event_ms(const hipEvent_t& a, const hipEvent_t& b) {
+    float ms = 0.0f;
+    (void)hipEventElapsedTime(&ms, a, b);
+    return ms;
+}
+
+void proxy_timing_report(const hipEvent_t* ev) {
+    ProxyTimers& t = proxy_timers();
+    t.quant_ms += proxy_event_ms(ev[0], ev[1]);
+    t.coarse_ms += proxy_event_ms(ev[1], ev[2]);
+    t.topn_ms += proxy_event_ms(ev[2], ev[3]);
+    t.rerank_ms += proxy_event_ms(ev[3], ev[4]);
+    t.argmax_ms += proxy_event_ms(ev[4], ev[5]);
+    t.total_ms += proxy_event_ms(ev[0], ev[5]);
+    ++t.rounds;
+    const double rounds = static_cast<double>(t.rounds);
+    std::printf(
+        "TARGET_LM_HEAD_PROXY_TIMING rounds=%llu quant=%.3f coarse=%.3f topn=%.3f "
+        "rerank=%.3f argmax=%.3f total=%.3f\n",
+        static_cast<unsigned long long>(t.rounds), t.quant_ms / rounds, t.coarse_ms / rounds,
+        t.topn_ms / rounds, t.rerank_ms / rounds, t.argmax_ms / rounds, t.total_ms / rounds);
+}
+
 }  // namespace
 
 LmHeadCandidateProxy::~LmHeadCandidateProxy() noexcept { (void)shutdown(); }
@@ -80,6 +153,8 @@ void LmHeadCandidateProxy::move_from(LmHeadCandidateProxy& other) noexcept {
     scratch_ids_ = other.scratch_ids_;
     scratch_values_ = other.scratch_values_;
     radix_scratch_ = other.radix_scratch_;
+    shadow_ids_ = other.shadow_ids_;
+    shadow_counters_ = other.shadow_counters_;
     other.int2_codes_ = nullptr;
     other.tables_ = nullptr;
     other.act_codes_ = nullptr;
@@ -92,9 +167,24 @@ void LmHeadCandidateProxy::move_from(LmHeadCandidateProxy& other) noexcept {
     other.scratch_ids_ = nullptr;
     other.scratch_values_ = nullptr;
     other.radix_scratch_ = nullptr;
+    other.shadow_ids_ = nullptr;
+    other.shadow_counters_ = nullptr;
 }
 
 Status LmHeadCandidateProxy::shutdown() noexcept {
+    if (shadow_counters_ != nullptr) {
+        uint64_t counters[2] = {0ull, 0ull};
+        const hipError_t cerr =
+            hipMemcpy(counters, shadow_counters_, sizeof(counters), hipMemcpyDeviceToHost);
+        if (cerr == hipSuccess && counters[0] != 0ull) {
+            std::printf(
+                "TARGET_LM_HEAD_PROXY_SHADOW pool=%u decisions=%llu mismatches=%llu "
+                "mismatch_rate=%.6g\n",
+                pool_, static_cast<unsigned long long>(counters[0]),
+                static_cast<unsigned long long>(counters[1]),
+                static_cast<double>(counters[1]) / static_cast<double>(counters[0]));
+        }
+    }
     Status first_error = Status::make_ok();
     auto free_ptr = [&first_error](void*& p) {
         if (p != nullptr) {
@@ -118,6 +208,8 @@ Status LmHeadCandidateProxy::shutdown() noexcept {
     free_ptr(reinterpret_cast<void*&>(scratch_ids_));
     free_ptr(reinterpret_cast<void*&>(scratch_values_));
     free_ptr(reinterpret_cast<void*&>(radix_scratch_));
+    free_ptr(reinterpret_cast<void*&>(shadow_ids_));
+    free_ptr(reinterpret_cast<void*&>(shadow_counters_));
     weight_codes_ = nullptr;
     weight_scales_ = nullptr;
     return first_error;
@@ -191,9 +283,17 @@ Status LmHeadCandidateProxy::init(const LmHeadProxyWeightView& weight, uint32_t 
     radix_scratch_bytes_ =
         ps::kernel::dflash2_radix_topn_scratch_bytes(max_rows_, radix_partitions_, vocab_);
     alloc(reinterpret_cast<void**>(&radix_scratch_), radix_scratch_bytes_);
+    alloc(reinterpret_cast<void**>(&shadow_ids_),
+          static_cast<std::size_t>(max_rows_) * sizeof(int32_t));
+    alloc(reinterpret_cast<void**>(&shadow_counters_), 2u * sizeof(uint64_t));
     if (!ok) {
         (void)shutdown();
         return Status::hip_error("lm_head proxy allocation failed", "hipMalloc", __FILE__,
+                                 __LINE__);
+    }
+    if (hipMemset(shadow_counters_, 0, 2u * sizeof(uint64_t)) != hipSuccess) {
+        (void)shutdown();
+        return Status::hip_error("lm_head proxy shadow counter reset", "hipMemset", __FILE__,
                                  __LINE__);
     }
 
@@ -250,12 +350,41 @@ Status LmHeadCandidateProxy::init(const LmHeadProxyWeightView& weight, uint32_t 
 
 Status LmHeadCandidateProxy::select(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
                                     int32_t* out_ids, hipStream_t stream) {
+    return run_select(normed, rows, row_stride, out_ids, stream);
+}
+
+Status LmHeadCandidateProxy::select_shadow(const bf16_t* normed, uint32_t rows,
+                                           uint32_t row_stride, hipStream_t stream) {
+    return run_select(normed, rows, row_stride, shadow_ids_, stream);
+}
+
+Status LmHeadCandidateProxy::run_select(const bf16_t* normed, uint32_t rows,
+                                        uint32_t row_stride, int32_t* out_ids,
+                                        hipStream_t stream) {
     if (!valid()) {
         return Status::invalid_state("lm_head proxy not initialized", __FILE__, __LINE__);
     }
     if (normed == nullptr || out_ids == nullptr || rows == 0u || rows > max_rows_) {
         return Status::invalid_argument("lm_head proxy select arguments invalid", __FILE__,
                                         __LINE__);
+    }
+    const bool timing = proxy_timing_enabled();
+    hipEvent_t ev[6] = {};
+    struct EventGuard {
+        hipEvent_t* events;
+        bool active;
+        ~EventGuard() {
+            if (!active)
+                return;
+            for (uint32_t i = 0u; i < 6u; ++i)
+                (void)hipEventDestroy(events[i]);
+        }
+    } guard{ev, false};
+    if (timing) {
+        for (auto& e : ev)
+            (void)hipEventCreate(&e);
+        guard.active = true;
+        (void)hipEventRecord(ev[0], stream);
     }
     hipError_t err = ps::kernel::launch_activation_quantize_e4m3(
         normed, act_codes_, act_scales_, rows, cols_, k_padded_, row_stride, act_code_stride_,
@@ -264,6 +393,8 @@ Status LmHeadCandidateProxy::select(const bf16_t* normed, uint32_t rows, uint32_
         return Status::hip_error("lm_head proxy activation quantize failed",
                                  hipGetErrorString(err), __FILE__, __LINE__);
     }
+    if (timing)
+        (void)hipEventRecord(ev[1], stream);
     const uint32_t* expand_table = reinterpret_cast<const uint32_t*>(tables_ + 256u);
     err = ps::kernel::launch_dflash2_int2_coarse_head(
         int2_codes_, weight_scales_, act_codes_, act_scales_, expand_table, coarse_, rows, vocab_,
@@ -272,6 +403,8 @@ Status LmHeadCandidateProxy::select(const bf16_t* normed, uint32_t rows, uint32_
         return Status::hip_error("lm_head proxy int2 coarse head failed", hipGetErrorString(err),
                                  __FILE__, __LINE__);
     }
+    if (timing)
+        (void)hipEventRecord(ev[2], stream);
     if (ps::kernel::dflash2_radix_topn_preferred(pool_)) {
         err = ps::kernel::launch_dflash2_radix_topn(
             coarse_, rows, vocab_, vocab_, pool_, pool_ids_, pool_logits_,
@@ -285,6 +418,8 @@ Status LmHeadCandidateProxy::select(const bf16_t* normed, uint32_t rows, uint32_
         return Status::hip_error("lm_head proxy coarse topn failed", hipGetErrorString(err),
                                  __FILE__, __LINE__);
     }
+    if (timing)
+        (void)hipEventRecord(ev[3], stream);
     err = ps::kernel::launch_dflash2_psq8_candidate_rerank(
         weight_codes_, weight_scales_, act_codes_, act_scales_, pool_ids_, rerank_, rows, pool_,
         k_padded_, scale_stride_, act_code_stride_, act_scale_stride_, pool_, stream);
@@ -292,11 +427,35 @@ Status LmHeadCandidateProxy::select(const bf16_t* normed, uint32_t rows, uint32_
         return Status::hip_error("lm_head proxy candidate rerank failed", hipGetErrorString(err),
                                  __FILE__, __LINE__);
     }
+    if (timing)
+        (void)hipEventRecord(ev[4], stream);
     pool_argmax_remap_kernel<<<rows, 1, 0, stream>>>(rerank_, pool_ids_, out_ids, pool_);
     err = hipGetLastError();
     if (err != hipSuccess) {
         return Status::hip_error("lm_head proxy argmax failed", hipGetErrorString(err), __FILE__,
                                  __LINE__);
+    }
+    if (timing) {
+        (void)hipEventRecord(ev[5], stream);
+        (void)hipEventSynchronize(ev[5]);
+        proxy_timing_report(ev);
+    }
+    return Status::make_ok();
+}
+
+Status LmHeadCandidateProxy::compare_shadow(const int32_t* full_ids, uint32_t rows,
+                                            hipStream_t stream) {
+    if (shadow_counters_ == nullptr || shadow_ids_ == nullptr || full_ids == nullptr ||
+        rows == 0u || rows > max_rows_) {
+        return Status::invalid_argument("lm_head proxy shadow compare invalid", __FILE__,
+                                        __LINE__);
+    }
+    shadow_compare_kernel<<<1, 64, 0, stream>>>(full_ids, shadow_ids_, rows,
+                                                shadow_counters_);
+    const hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy shadow compare launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
     }
     return Status::make_ok();
 }
@@ -311,6 +470,13 @@ uint32_t target_lm_head_proxy_mode() {
     if (v >= 2)
         return 2u;
     return 1u;
+}
+
+uint32_t target_lm_head_proxy_decode_mode() {
+    const char* env = std::getenv("PHASESHIFT_TARGET_LM_HEAD_PROXY");
+    if (env == nullptr || env[0] == '\0')
+        return 0u;
+    return target_lm_head_proxy_mode();
 }
 
 uint32_t target_lm_head_proxy_pool() {
@@ -334,9 +500,14 @@ Result<OptimizedLaunchResult> try_launch_lm_head_proxy_fusion(
     OptimizedLaunchResult not_applicable{};
     if (ctx.lm_head_proxy == nullptr || !ctx.lm_head_proxy->valid())
         return not_applicable;
-    if (ctx.role != ::ps::runtime::ExecutionRole::Verify)
-        return not_applicable;
-    if (ctx.constraint_masks != nullptr || ctx.constraint_mask_words != 0u)
+    const uint32_t mode = ctx.role == ::ps::runtime::ExecutionRole::Verify
+                              ? target_lm_head_proxy_mode()
+                              : target_lm_head_proxy_decode_mode();
+    const LmHeadProxyPath path =
+        lm_head_proxy_path(ctx.role, ctx.actual_stochastic_outputs,
+                           ctx.constraint_masks != nullptr || ctx.constraint_mask_words != 0u,
+                           mode);
+    if (path == LmHeadProxyPath::None)
         return not_applicable;
     if (dispatch_index + 2u >= program.dispatches.size())
         return not_applicable;
@@ -379,6 +550,16 @@ Result<OptimizedLaunchResult> try_launch_lm_head_proxy_fusion(
     const uint32_t rows = ctx.actual_outputs != 0u ? ctx.actual_outputs : ctx.actual_rows;
     if (rows == 0u || rows > ctx.lm_head_proxy->max_rows())
         return not_applicable;
+    if (path == LmHeadProxyPath::Shadow) {
+        Status st = ctx.lm_head_proxy->select_shadow(
+            static_cast<const bf16_t*>(in.ptr), rows, in.row_stride, stream);
+        if (!st.ok())
+            return st;
+        ctx.lm_head_shadow_pending = true;
+        ctx.lm_head_shadow_full = static_cast<const int32_t*>(out.ptr);
+        ctx.lm_head_shadow_rows = rows;
+        return not_applicable;
+    }
     Status st = ctx.lm_head_proxy->select(
         static_cast<const bf16_t*>(in.ptr), rows, in.row_stride,
         static_cast<int32_t*>(out.ptr), stream);
