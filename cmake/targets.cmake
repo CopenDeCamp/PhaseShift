@@ -240,6 +240,7 @@ endif()
 if(PHASESHIFT_HAVE_RCCL)
     add_library(phaseshift_parallel STATIC
         src/phaseshift/runtime/parallel/rccl_transport.cpp
+        src/phaseshift/runtime/parallel/comm_bridge.cpp
     )
     target_compile_features(phaseshift_parallel PRIVATE cxx_std_20)
     target_include_directories(phaseshift_parallel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
