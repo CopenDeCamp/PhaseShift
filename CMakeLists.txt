@@ -15,6 +15,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Build options and platform detection.
 include(cmake/options.cmake)
 
+# RCCL discovery (parallel runtime).
+include(cmake/rccl.cmake)
+
 # Production / library targets.
 include(cmake/targets.cmake)
 
