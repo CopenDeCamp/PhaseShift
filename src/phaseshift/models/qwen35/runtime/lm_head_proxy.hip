@@ -63,6 +63,8 @@ void LmHeadCandidateProxy::move_from(LmHeadCandidateProxy& other) noexcept {
     max_rows_ = other.max_rows_;
     pool_ = other.pool_;
     partitions_ = other.partitions_;
+    radix_partitions_ = other.radix_partitions_;
+    radix_scratch_bytes_ = other.radix_scratch_bytes_;
     scratch_stride_ = other.scratch_stride_;
     act_code_stride_ = other.act_code_stride_;
     act_scale_stride_ = other.act_scale_stride_;
@@ -77,6 +79,7 @@ void LmHeadCandidateProxy::move_from(LmHeadCandidateProxy& other) noexcept {
     rerank_ = other.rerank_;
     scratch_ids_ = other.scratch_ids_;
     scratch_values_ = other.scratch_values_;
+    radix_scratch_ = other.radix_scratch_;
     other.int2_codes_ = nullptr;
     other.tables_ = nullptr;
     other.act_codes_ = nullptr;
@@ -88,6 +91,7 @@ void LmHeadCandidateProxy::move_from(LmHeadCandidateProxy& other) noexcept {
     other.rerank_ = nullptr;
     other.scratch_ids_ = nullptr;
     other.scratch_values_ = nullptr;
+    other.radix_scratch_ = nullptr;
 }
 
 Status LmHeadCandidateProxy::shutdown() noexcept {
@@ -113,6 +117,7 @@ Status LmHeadCandidateProxy::shutdown() noexcept {
     free_ptr(reinterpret_cast<void*&>(rerank_));
     free_ptr(reinterpret_cast<void*&>(scratch_ids_));
     free_ptr(reinterpret_cast<void*&>(scratch_values_));
+    free_ptr(reinterpret_cast<void*&>(radix_scratch_));
     weight_codes_ = nullptr;
     weight_scales_ = nullptr;
     return first_error;
@@ -182,6 +187,10 @@ Status LmHeadCandidateProxy::init(const LmHeadProxyWeightView& weight, uint32_t 
           static_cast<std::size_t>(max_rows_) * scratch_stride_ * sizeof(int32_t));
     alloc(reinterpret_cast<void**>(&scratch_values_),
           static_cast<std::size_t>(max_rows_) * scratch_stride_ * sizeof(float));
+    radix_partitions_ = ps::kernel::dflash2_radix_default_partitions(vocab_);
+    radix_scratch_bytes_ =
+        ps::kernel::dflash2_radix_topn_scratch_bytes(max_rows_, radix_partitions_, vocab_);
+    alloc(reinterpret_cast<void**>(&radix_scratch_), radix_scratch_bytes_);
     if (!ok) {
         (void)shutdown();
         return Status::hip_error("lm_head proxy allocation failed", "hipMalloc", __FILE__,
@@ -263,9 +272,15 @@ Status LmHeadCandidateProxy::select(const bf16_t* normed, uint32_t rows, uint32_
         return Status::hip_error("lm_head proxy int2 coarse head failed", hipGetErrorString(err),
                                  __FILE__, __LINE__);
     }
-    err = ps::kernel::launch_dflash2_coarse_topn(
-        coarse_, rows, vocab_, vocab_, pool_, pool_ids_, pool_logits_, scratch_ids_,
-        scratch_values_, scratch_stride_, partitions_, stream);
+    if (ps::kernel::dflash2_radix_topn_preferred(pool_)) {
+        err = ps::kernel::launch_dflash2_radix_topn(
+            coarse_, rows, vocab_, vocab_, pool_, pool_ids_, pool_logits_,
+            radix_partitions_, radix_scratch_, radix_scratch_bytes_, stream);
+    } else {
+        err = ps::kernel::launch_dflash2_coarse_topn(
+            coarse_, rows, vocab_, vocab_, pool_, pool_ids_, pool_logits_, scratch_ids_,
+            scratch_values_, scratch_stride_, partitions_, stream);
+    }
     if (err != hipSuccess) {
         return Status::hip_error("lm_head proxy coarse topn failed", hipGetErrorString(err),
                                  __FILE__, __LINE__);

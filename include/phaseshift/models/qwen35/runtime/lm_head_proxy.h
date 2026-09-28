@@ -2,6 +2,7 @@
 #include <phaseshift/core/memory/types.h>
 #include <phaseshift/core/status.h>
 #include <hip/hip_runtime.h>
+#include <cstddef>
 #include <cstdint>
 
 namespace ps::qwen35::runtime {
@@ -45,6 +46,8 @@ private:
     uint32_t max_rows_ = 0;
     uint32_t pool_ = 0;
     uint32_t partitions_ = 0;
+    uint32_t radix_partitions_ = 0;
+    std::size_t radix_scratch_bytes_ = 0;
     uint32_t scratch_stride_ = 0;
     uint32_t act_code_stride_ = 0;
     uint32_t act_scale_stride_ = 0;
@@ -60,6 +63,7 @@ private:
     float* rerank_ = nullptr;
     int32_t* scratch_ids_ = nullptr;
     float* scratch_values_ = nullptr;
+    uint32_t* radix_scratch_ = nullptr;
 };
 
 uint32_t target_lm_head_proxy_mode();

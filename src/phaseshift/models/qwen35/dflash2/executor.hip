@@ -581,6 +581,12 @@ Result<DFlash2Executor> create_dflash2_executor(
         st = allocate_contiguous_tensor<float>(
             arena, {draft, ex.int2_scratch_row_stride}, ex.int2_scratch_logits);
         if (!st.ok()) return st;
+        ex.int2_radix_partitions = ps::kernel::dflash2_radix_default_partitions(vocab);
+        const std::size_t radix_bytes =
+            ps::kernel::dflash2_radix_topn_scratch_bytes(draft, ex.int2_radix_partitions, vocab);
+        st = allocate_contiguous_tensor<uint32_t>(
+            arena, {radix_bytes / sizeof(uint32_t)}, ex.int2_radix_scratch);
+        if (!st.ok()) return st;
 
         hipEvent_t int2_ev0 = nullptr;
         hipEvent_t int2_ev1 = nullptr;
@@ -1479,6 +1485,19 @@ Status int2_coarse_topn(
     uint32_t rows,
     hipStream_t stream) {
     const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    if (ps::kernel::dflash2_radix_topn_preferred(executor.int2_pool)) {
+        const hipError_t err = ps::kernel::launch_dflash2_radix_topn(
+            executor.int2_coarse_logits.data<float>(), rows, weight.rows, weight.rows,
+            executor.int2_pool, executor.int2_pool_ids.data<int32_t>(),
+            executor.int2_pool_logits.data<float>(), executor.int2_radix_partitions,
+            executor.int2_radix_scratch.data<uint32_t>(),
+            executor.int2_radix_scratch.dim(0) * sizeof(uint32_t), stream);
+        if (err != hipSuccess) {
+            return Status::hip_error("dflash2 int2 radix topn launch",
+                                     hipGetErrorString(err), __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
     const hipError_t err = ps::kernel::launch_dflash2_coarse_topn(
         executor.int2_coarse_logits.data<float>(), rows, weight.rows, weight.rows,
         executor.int2_pool, executor.int2_pool_ids.data<int32_t>(),
