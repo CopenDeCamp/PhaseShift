@@ -6,6 +6,7 @@
 #include <phaseshift/models/qwen35/dflash2/executor.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
+#include <phaseshift/models/qwen35/runtime/ngram_tail.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/runtime/execution/execution_types.h>
@@ -15,14 +16,21 @@
 #include <cstdint>
 
 #include <array>
+#include <vector>
 
 namespace ps::qwen35::runtime {
+
+constexpr uint32_t kDFlash2SpecMaxVerifyRows = 64u;
+constexpr uint32_t kDFlash2SpecMaxVerifyDrafts = kDFlash2SpecMaxVerifyRows - 1u;
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
     int32_t eos_token = -1;
     ::ps::runtime::VerifyNumericMode verify_numeric_mode =
         ::ps::runtime::VerifyNumericMode::Exact;
+    uint32_t ngram_n = 0u;
+    uint32_t ngram_max_tail = 0u;
+    uint32_t ngram_window = 2048u;
 };
 
 struct DFlash2SpecTiming;
@@ -49,6 +57,8 @@ struct DFlash2SpecDecoder {
     int32_t* verify_token_ids_device = nullptr;
     int32_t* decision_staging_device = nullptr;
     bool device_token_bridge = false;
+    bool host_proposal_visibility = false;
+    std::vector<int32_t> token_history;
     hipEvent_t draft_start_event = nullptr;
     hipEvent_t draft_stop_event = nullptr;
     hipEvent_t verify_start_event = nullptr;
@@ -100,21 +110,34 @@ struct DFlash2SpecTiming {
     double rerun_ms = 0.0;
     double dflash_commit_ms = 0.0;
     double round_ms = 0.0;
+    double ngram_seed_wait_ms = 0.0;
+    double ngram_lookup_ms = 0.0;
+    double ngram_tail_h2d_ms = 0.0;
     uint32_t rounds = 0u;
     uint32_t full_accepts = 0u;
     uint32_t reruns = 0u;
     uint32_t partial_accepts = 0u;
     uint32_t accepted_drafts = 0u;
     uint32_t generated_tokens = 0u;
+    uint32_t ngram_hit_rounds = 0u;
+    uint32_t ngram_proposed_tokens = 0u;
+    uint32_t ngram_accepted_tokens = 0u;
+    uint32_t dflash_prefix_full_accepts = 0u;
+    uint32_t tail_reached_rounds = 0u;
+    uint32_t tail_blocked_rounds = 0u;
+    uint64_t verify_rows_total = 0u;
     uint64_t gdn_history_bytes = 0u;
 };
 
 struct DFlash2SpecIterationOutput {
-    std::array<int32_t, dflash2::kMaxBlockSize> emitted{};
+    std::array<int32_t, kDFlash2SpecMaxVerifyRows> emitted{};
     uint32_t emitted_count = 0u;
     int32_t pending_token = -1;
     uint32_t num_drafts = 0u;
+    uint32_t num_dflash_drafts = 0u;
+    uint32_t num_tail_drafts = 0u;
     uint32_t num_accepted = 0u;
+    NgramTailMatch ngram{};
     bool rerun = false;
     bool finished = false;
 };

@@ -1,5 +1,6 @@
 #include <phaseshift/models/qwen35/runtime/ngram_tail.h>
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -174,6 +175,160 @@ void test_n_zero() {
     }
 }
 
+ps::Result<NgramTailProposal> run_suffix(
+    const std::vector<int32_t>& committed,
+    const std::vector<int32_t>& suffix,
+    const NgramTailConfig& cfg) {
+    return propose_ngram_tail(std::span<const int32_t>(committed),
+                              std::span<const int32_t>(suffix), cfg);
+}
+
+void expect_no_leak_suffix(
+    const std::vector<int32_t>& committed,
+    const NgramTailProposal& p) {
+    check(p.current_position == committed.size(), "suffix leak: current_position");
+    check(p.candidate_start < p.current_position, "suffix leak: candidate_start");
+    check(p.candidate_end <= p.current_position, "suffix leak: candidate_end");
+    check(p.candidate_start + p.seed_length == p.candidate_end, "suffix leak: seed length");
+    check(p.candidate_end + p.tokens.size() <= p.current_position,
+          "suffix leak: continuation stays in committed history");
+    bool verbatim = true;
+    for (std::size_t i = 0u; i < p.tokens.size(); ++i) {
+        if (p.candidate_end + i >= committed.size() ||
+            committed[p.candidate_end + i] != p.tokens[i]) {
+            verbatim = false;
+            break;
+        }
+    }
+    check(verbatim, "suffix leak: continuation copied from committed history only");
+}
+
+void test_virtual_suffix_hit() {
+    const std::vector<int32_t> committed{1, 2, 3, 4, 5, 101, 102, 103, 1, 2, 3};
+    const std::vector<int32_t> suffix{4, 5};
+    auto r = run_suffix(committed, suffix, make_config(5u, 16u, 2048u));
+    check(r.ok(), "testA: ok");
+    if (!r.ok()) return;
+    const NgramTailProposal& p = r.value();
+    check(p.hit, "testA: hit");
+    check(p.match_position == 0u, "testA: match_position");
+    check(p.candidate_end == 5u, "testA: candidate_end");
+    check(p.seed_length == 5u, "testA: seed_length");
+    const std::vector<int32_t> expected{101, 102, 103, 1, 2, 3};
+    check(p.tokens == expected, "testA: continuation");
+    expect_no_leak_suffix(committed, p);
+}
+
+void test_suffix_not_continuation_source() {
+    const std::vector<int32_t> committed{1, 2, 3, 4, 5, 6, 7};
+    const std::vector<int32_t> suffix{1, 2, 3, 4, 5};
+    auto r = run_suffix(committed, suffix, make_config(5u, 16u, 2048u));
+    check(r.ok(), "testB: ok");
+    if (!r.ok()) return;
+    const NgramTailProposal& p = r.value();
+    check(p.hit, "testB: hit");
+    const std::vector<int32_t> expected{6, 7};
+    check(p.tokens == expected, "testB: suffix is never the continuation source");
+    check(p.candidate_end == 5u, "testB: candidate_end");
+    expect_no_leak_suffix(committed, p);
+}
+
+void test_committed_end_boundary() {
+    const std::vector<int32_t> committed{1, 2, 3, 4, 5, 9, 8, 7, 6, 1, 2, 3};
+    const std::vector<int32_t> suffix{4, 5};
+    auto r = run_suffix(committed, suffix, make_config(5u, 32u, 2048u));
+    check(r.ok(), "testC: ok");
+    if (!r.ok()) return;
+    const NgramTailProposal& p = r.value();
+    check(p.hit, "testC: hit");
+    check(p.candidate_end + p.tokens.size() == committed.size(),
+          "testC: continuation ends exactly at committed end");
+    const std::vector<int32_t> expected{9, 8, 7, 6, 1, 2, 3};
+    check(p.tokens == expected, "testC: tokens");
+    expect_no_leak_suffix(committed, p);
+}
+
+void test_empty_suffix_matches_standalone() {
+    const std::vector<std::vector<int32_t>> histories{
+        {1, 2, 3, 4, 5, 9, 8, 7, 1, 2, 3, 4, 5},
+        {7, 7, 7, 3, 7, 7, 7},
+        {1, 2, 3},
+        {5, 4, 3, 2, 1, 5, 4, 3, 2, 1, 9, 5, 4, 3},
+    };
+    const std::vector<NgramTailConfig> configs{
+        make_config(5u, 16u, 2048u),
+        make_config(3u, 8u, 64u),
+        make_config(8u, 32u, 2048u),
+        make_config(1u, 4u, 16u),
+    };
+    for (const auto& history : histories) {
+        for (const NgramTailConfig& cfg : configs) {
+            auto standalone = run(history, cfg);
+            auto suffixed = run_suffix(history, {}, cfg);
+            check(standalone.ok() && suffixed.ok(), "testD: ok");
+            if (!standalone.ok() || !suffixed.ok()) continue;
+            const NgramTailProposal& a = standalone.value();
+            const NgramTailProposal& b = suffixed.value();
+            check(a.hit == b.hit, "testD: hit");
+            check(a.match_position == b.match_position, "testD: match_position");
+            check(a.candidate_start == b.candidate_start, "testD: candidate_start");
+            check(a.candidate_end == b.candidate_end, "testD: candidate_end");
+            check(a.current_position == b.current_position, "testD: current_position");
+            check(a.tokens == b.tokens, "testD: tokens");
+        }
+    }
+}
+
+void test_most_recent_wins_with_suffix() {
+    const std::vector<int32_t> committed{
+        1, 2, 3, 4, 5, 91, 1, 2, 3, 4, 5, 92, 1, 2, 3};
+    const std::vector<int32_t> suffix{4, 5};
+    auto r = run_suffix(committed, suffix, make_config(5u, 16u, 2048u));
+    check(r.ok(), "testE: ok");
+    if (!r.ok()) return;
+    const NgramTailProposal& p = r.value();
+    check(p.hit, "testE: hit");
+    check(p.match_position == 6u, "testE: most recent occurrence");
+    const std::vector<int32_t> expected{92, 1, 2, 3};
+    check(p.tokens == expected, "testE: tokens");
+    expect_no_leak_suffix(committed, p);
+}
+
+void test_tail_max_with_suffix() {
+    const std::vector<int32_t> committed{
+        1, 2, 3, 4, 5, 91, 1, 2, 3, 4, 5, 92, 1, 2, 3};
+    const std::vector<int32_t> suffix{4, 5};
+    auto r = run_suffix(committed, suffix, make_config(5u, 2u, 2048u));
+    check(r.ok(), "testF: ok");
+    if (!r.ok()) return;
+    check(r.value().tokens.size() == 2u, "testF: capped at max_tail");
+    const std::vector<int32_t> expected{92, 1};
+    check(r.value().tokens == expected, "testF: tokens");
+    expect_no_leak_suffix(committed, r.value());
+}
+
+void test_into_matches_vector_api() {
+    const std::vector<int32_t> committed{1, 2, 3, 4, 5, 101, 102, 103, 1, 2, 3};
+    const std::vector<int32_t> suffix{4, 5};
+    const NgramTailConfig cfg = make_config(5u, 16u, 2048u);
+    std::array<int32_t, 32> buffer{};
+    ps::qwen35::runtime::NgramTailMatch match;
+    ps::Status status = ps::qwen35::runtime::propose_ngram_tail_into(
+        committed, suffix, cfg, buffer, match);
+    check(status.ok(), "testG: into ok");
+    if (!status.ok()) return;
+    auto r = run_suffix(committed, suffix, cfg);
+    check(r.ok(), "testG: vector ok");
+    if (!r.ok()) return;
+    check(r.value().hit == match.hit, "testG: hit");
+    check(r.value().tokens.size() == match.count, "testG: count");
+    bool same = true;
+    for (uint32_t i = 0u; i < match.count; ++i) {
+        if (buffer[i] != r.value().tokens[i]) same = false;
+    }
+    check(same, "testG: tokens");
+}
+
 }  // namespace
 
 int main() {
@@ -185,6 +340,13 @@ int main() {
     test_no_future_leakage();
     test_n_larger_than_history();
     test_n_zero();
+    test_virtual_suffix_hit();
+    test_suffix_not_continuation_source();
+    test_committed_end_boundary();
+    test_empty_suffix_matches_standalone();
+    test_most_recent_wins_with_suffix();
+    test_tail_max_with_suffix();
+    test_into_matches_vector_api();
     std::printf("test_ngram_tail: passed=%d failed=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

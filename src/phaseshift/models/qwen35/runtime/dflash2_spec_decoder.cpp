@@ -129,6 +129,17 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
         return Status::invalid_argument(
             "create_dflash2_spec_decoder: num_drafts out of range", __FILE__, __LINE__);
     }
+    const bool ngram_enabled = config.ngram_n > 0u && config.ngram_max_tail > 0u;
+    if (ngram_enabled && config.ngram_window == 0u) {
+        return Status::invalid_argument(
+            "create_dflash2_spec_decoder: ngram_window must be positive", __FILE__, __LINE__);
+    }
+    if (static_cast<uint64_t>(config.num_drafts) + config.ngram_max_tail >
+        kDFlash2SpecMaxVerifyDrafts) {
+        return Status::invalid_argument(
+            "create_dflash2_spec_decoder: ngram tail exceeds verify capacity", __FILE__,
+            __LINE__);
+    }
 
     DFlash2SpecDecoder decoder;
     decoder.target = &target;
@@ -141,15 +152,17 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     decoder.hidden_size = static_cast<uint32_t>(dcfg.hidden_size);
     decoder.device_token_bridge =
         env_flag_enabled("PHASESHIFT_DFLASH2_DEVICE_TOKEN_BRIDGE", true);
+    decoder.host_proposal_visibility =
+        env_flag_enabled("PHASESHIFT_DFLASH2_HOST_PROPOSAL_D2H", false);
 
     {
         auto verify_alloc = arena.allocate_aligned(
-            dflash2::kMaxBlockSize * sizeof(int32_t), 256u);
+            kDFlash2SpecMaxVerifyRows * sizeof(int32_t), 256u);
         if (!verify_alloc.ok()) return verify_alloc.status();
         decoder.verify_token_ids_device =
             static_cast<int32_t*>(verify_alloc.release().data());
         auto decision_alloc = arena.allocate_aligned(
-            2u * dflash2::kMaxBlockSize * sizeof(int32_t), 256u);
+            2u * kDFlash2SpecMaxVerifyRows * sizeof(int32_t), 256u);
         if (!decision_alloc.ok()) return decision_alloc.status();
         decoder.decision_staging_device =
             static_cast<int32_t*>(decision_alloc.release().data());
@@ -190,19 +203,26 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
             decoder.gdn_rec_snapshot = rec_alloc.release().data();
         }
     } else {
-        auto history_result =
-            create_gdn_spec_history(arena, gdn_pool, config.num_drafts);
-        if (!history_result.ok()) return history_result.status();
-        decoder.gdn_history = history_result.release();
-        decoder.gdn_history_enabled = true;
+        uint32_t history_rows = config.num_drafts;
+        if (ngram_enabled) {
+            history_rows = std::min<uint32_t>(
+                kDFlash2SpecMaxVerifyDrafts, config.num_drafts + config.ngram_max_tail);
+        }
+        const GdnStatePoolDeviceView pool_view = gdn_pool.device_view();
+        const std::size_t per_row_bytes =
+            static_cast<std::size_t>(pool_view.conv_slot_stride) * sizeof(bf16_t) +
+            static_cast<std::size_t>(pool_view.recurrent_slot_stride) * sizeof(float);
         const std::size_t history_bytes =
-            static_cast<std::size_t>(config.num_drafts) *
-            (decoder.gdn_history.conv_state_bytes + decoder.gdn_history.recurrent_state_bytes);
+            static_cast<std::size_t>(history_rows) * per_row_bytes;
         if (history_bytes > (3ull * 1024ull * 1024ull * 1024ull) / 2ull) {
             return Status::insufficient_memory(
                 "create_dflash2_spec_decoder: GDN history exceeds the 1.5 GiB guard",
                 __FILE__, __LINE__);
         }
+        auto history_result = create_gdn_spec_history(arena, gdn_pool, history_rows);
+        if (!history_result.ok()) return history_result.status();
+        decoder.gdn_history = history_result.release();
+        decoder.gdn_history_enabled = true;
     }
 
     decoder.initialized = true;
@@ -227,6 +247,8 @@ Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept {
     decoder.verify_token_ids_device = nullptr;
     decoder.decision_staging_device = nullptr;
     decoder.device_token_bridge = false;
+    decoder.host_proposal_visibility = false;
+    decoder.token_history.clear();
     decoder.gdn_conv_snapshot = nullptr;
     decoder.gdn_rec_snapshot = nullptr;
     decoder.gdn_conv_bytes = 0u;
@@ -302,6 +324,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
         }
         offset += n;
     }
+    decoder.token_history.assign(prompt_tokens, prompt_tokens + prompt_count);
+    decoder.token_history.push_back(out.pending_token);
     return out;
 }
 
@@ -322,6 +346,18 @@ struct ScopedTimer {
 
 uint32_t ceil_div_u32(uint32_t value, uint32_t divisor) {
     return (value + divisor - 1u) / divisor;
+}
+
+void commit_history_tokens(DFlash2SpecDecoder& decoder, const int32_t* tokens,
+                           uint32_t count) {
+    for (uint32_t i = 0u; i < count; ++i) {
+        decoder.token_history.push_back(tokens[i]);
+    }
+    constexpr std::size_t kHistoryCap = 8192u;
+    if (decoder.token_history.size() > kHistoryCap) {
+        decoder.token_history.erase(decoder.token_history.begin(),
+                                    decoder.token_history.end() - kHistoryCap / 2u);
+    }
 }
 
 ScheduledBatch make_verify_batch(
@@ -402,6 +438,7 @@ Status run_single_target(
     out.emitted_count = 1u;
     out.pending_token = sampled;
     if (tm != nullptr) ++tm->generated_tokens;
+    commit_history_tokens(decoder, out.emitted.data(), 1u);
     return Status::make_ok();
 }
 
@@ -434,15 +471,15 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         static_cast<uint32_t>(decoder.sequence->block_table.size()), true};
     const uint32_t position = snapshot.position;
     const uint32_t room = decoder.sequence->max_seq_len - position;
-    uint32_t k = decoder.config.num_drafts;
-    if (remaining_tokens <= 1u || room < 2u) {
-        k = 0u;
-    } else {
-        k = std::min(k, remaining_tokens - 1u);
-        k = std::min(k, room - 1u);
+    uint32_t room_max = 0u;
+    if (remaining_tokens > 1u && room >= 2u) {
+        room_max = std::min(remaining_tokens - 1u, room - 1u);
     }
+    const uint32_t dflash_k = std::min(decoder.config.num_drafts, room_max);
+    const bool ngram_enabled =
+        decoder.config.ngram_n > 0u && decoder.config.ngram_max_tail > 0u;
 
-    if (k == 0u) {
+    if (dflash_k == 0u) {
         Status st = run_single_target(decoder, pending_token, out);
         if (!st.ok()) return st;
         if (decoder.config.eos_token >= 0) {
@@ -451,14 +488,23 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         return out;
     }
 
+    NgramTailConfig ngram_cfg;
+    ngram_cfg.n = decoder.config.ngram_n;
+    ngram_cfg.max_tail = decoder.config.ngram_max_tail;
+    ngram_cfg.window = decoder.config.ngram_window;
+
     const bool bridge = decoder.device_token_bridge &&
                         decoder.verify_token_ids_device != nullptr &&
                         decoder.decision_staging_device != nullptr;
     const bool want_timing = tm != nullptr;
     int32_t* proposal_device = decoder.draft->proposal_tokens.data<int32_t>();
-    std::array<int32_t, dflash2::kMaxBlockSize> drafts{};
-    std::array<int32_t, dflash2::kMaxBlockSize> sampled{};
-    std::array<int32_t, 2u * dflash2::kMaxBlockSize> decision_host{};
+    std::array<int32_t, kDFlash2SpecMaxVerifyDrafts> drafts{};
+    std::array<int32_t, kDFlash2SpecMaxVerifyDrafts> tail_tokens{};
+    std::array<int32_t, kDFlash2SpecMaxVerifyRows> sampled{};
+    std::array<int32_t, kDFlash2SpecMaxVerifyRows> verify_host{};
+    std::array<int32_t, 2u * kDFlash2SpecMaxVerifyRows> decision_host{};
+    NgramTailMatch ngram_match;
+    uint32_t tail_k = 0u;
     bool draft_events_recorded = false;
     bool verify_events_recorded = false;
 
@@ -483,14 +529,14 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             draft_events_recorded = true;
         }
         Status st = dflash2::dflash2_propose_cached(
-            *decoder.draft, *decoder.context, pending_token, k, proposal_device,
+            *decoder.draft, *decoder.context, pending_token, dflash_k, proposal_device,
             decoder.stream);
         if (!st.ok()) return st;
         if (bridge) {
             const hipError_t relay_err = hipMemcpyAsync(
                 decoder.verify_token_ids_device + 1, proposal_device,
-                static_cast<std::size_t>(k) * sizeof(int32_t), hipMemcpyDeviceToDevice,
-                decoder.stream);
+                static_cast<std::size_t>(dflash_k) * sizeof(int32_t),
+                hipMemcpyDeviceToDevice, decoder.stream);
             if (relay_err != hipSuccess) {
                 return Status::hip_error("dflash2 draft relay",
                                          hipGetErrorString(relay_err), __FILE__, __LINE__);
@@ -506,10 +552,13 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         }
     }
 
-    if (!bridge) {
+    const bool need_host_seed = ngram_enabled || decoder.host_proposal_visibility;
+    if (!bridge || need_host_seed) {
         ScopedTimer t(want_timing ? &tm->draft_d2h_ms : nullptr);
         {
-            ScopedTimer tw(want_timing ? &tm->proposal_wait_ms : nullptr);
+            ScopedTimer tw(want_timing ? (bridge ? &tm->ngram_seed_wait_ms
+                                                 : &tm->proposal_wait_ms)
+                                       : nullptr);
             if (hipStreamSynchronize(decoder.stream) != hipSuccess) {
                 return Status::hip_error(
                     "dflash2 draft sync", hipGetErrorString(hipGetLastError()), __FILE__,
@@ -520,13 +569,57 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             ScopedTimer tc(want_timing ? &tm->proposal_copy_ms : nullptr);
             const hipError_t err = hipMemcpy(
                 drafts.data(), proposal_device,
-                static_cast<std::size_t>(k) * sizeof(int32_t), hipMemcpyDeviceToHost);
+                static_cast<std::size_t>(dflash_k) * sizeof(int32_t),
+                hipMemcpyDeviceToHost);
             if (err != hipSuccess) {
                 return Status::hip_error("dflash2 draft copy", hipGetErrorString(err),
                                          __FILE__, __LINE__);
             }
         }
     }
+
+    if (ngram_enabled) {
+        {
+            ScopedTimer t(want_timing ? &tm->ngram_lookup_ms : nullptr);
+            Status st = propose_ngram_tail_into(
+                std::span<const int32_t>(decoder.token_history),
+                std::span<const int32_t>(drafts.data(), dflash_k), ngram_cfg,
+                std::span<int32_t>(tail_tokens.data(), tail_tokens.size()), ngram_match);
+            if (!st.ok()) return st;
+        }
+        const uint32_t max_total = std::min(room_max, kDFlash2SpecMaxVerifyDrafts);
+        uint32_t proposed = ngram_match.count;
+        if (dflash_k + proposed > max_total) {
+            proposed = max_total - dflash_k;
+        }
+        if (proposed == 0u) {
+            ngram_match = NgramTailMatch{};
+            tail_k = 0u;
+        } else {
+            ngram_match.count = proposed;
+            tail_k = proposed;
+            for (uint32_t i = 0u; i < tail_k; ++i) {
+                drafts[dflash_k + i] = tail_tokens[i];
+            }
+            if (bridge) {
+                ScopedTimer t(want_timing ? &tm->ngram_tail_h2d_ms : nullptr);
+                const hipError_t err = hipMemcpyAsync(
+                    decoder.verify_token_ids_device + 1u + dflash_k, tail_tokens.data(),
+                    static_cast<std::size_t>(tail_k) * sizeof(int32_t),
+                    hipMemcpyHostToDevice, decoder.stream);
+                if (err != hipSuccess) {
+                    return Status::hip_error("dflash2 ngram tail upload",
+                                             hipGetErrorString(err), __FILE__, __LINE__);
+                }
+            }
+        }
+    }
+
+    out.ngram = ngram_match;
+    out.num_dflash_drafts = dflash_k;
+    out.num_tail_drafts = tail_k;
+    const uint32_t total_k = dflash_k + tail_k;
+    out.num_drafts = total_k;
 
     if (decoder.gdn_rerun_reference) {
         ScopedTimer t(tm != nullptr ? &tm->gdn_snapshot_ms : nullptr);
@@ -543,20 +636,19 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         ScheduledBatch batch;
         if (bridge) {
             batch = make_verify_batch(
-                *decoder.sequence, requests, decoder.verify_token_ids_device, k + 1u,
-                position, k + 1u, true, decoder.config.verify_numeric_mode,
+                *decoder.sequence, requests, decoder.verify_token_ids_device, total_k + 1u,
+                position, total_k + 1u, true, decoder.config.verify_numeric_mode,
                 TokenIdsLocation::Device);
         } else {
-            std::array<int32_t, dflash2::kMaxBlockSize> verify_tokens{};
-            verify_tokens[0] = pending_token;
-            for (uint32_t i = 0; i < k; ++i) verify_tokens[i + 1u] = drafts[i];
+            verify_host[0] = pending_token;
+            for (uint32_t i = 0; i < total_k; ++i) verify_host[i + 1u] = drafts[i];
             batch = make_verify_batch(
-                *decoder.sequence, requests, verify_tokens.data(), k + 1u, position, k + 1u,
-                true, decoder.config.verify_numeric_mode);
+                *decoder.sequence, requests, verify_host.data(), total_k + 1u, position,
+                total_k + 1u, true, decoder.config.verify_numeric_mode);
         }
         ExecuteBatchOptions options;
         if (decoder.gdn_history_enabled) {
-            options.gdn_spec_history = gdn_spec_history_view(decoder.gdn_history, k);
+            options.gdn_spec_history = gdn_spec_history_view(decoder.gdn_history, total_k);
         }
         if (want_timing) {
             const hipError_t start_err =
@@ -582,15 +674,15 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             const int32_t* sampled_device = pending.output.sampled_tokens.data<int32_t>();
             hipError_t d_err = hipMemcpyAsync(
                 decoder.decision_staging_device, proposal_device,
-                static_cast<std::size_t>(k) * sizeof(int32_t), hipMemcpyDeviceToDevice,
-                decoder.stream);
+                static_cast<std::size_t>(dflash_k) * sizeof(int32_t),
+                hipMemcpyDeviceToDevice, decoder.stream);
             if (d_err != hipSuccess) {
                 return Status::hip_error("dflash2 decision draft relay",
                                          hipGetErrorString(d_err), __FILE__, __LINE__);
             }
             d_err = hipMemcpyAsync(
-                decoder.decision_staging_device + dflash2::kMaxBlockSize, sampled_device,
-                static_cast<std::size_t>(k + 1u) * sizeof(int32_t),
+                decoder.decision_staging_device + kDFlash2SpecMaxVerifyRows,
+                sampled_device, static_cast<std::size_t>(total_k + 1u) * sizeof(int32_t),
                 hipMemcpyDeviceToDevice, decoder.stream);
             if (d_err != hipSuccess) {
                 return Status::hip_error("dflash2 decision sample relay",
@@ -614,9 +706,9 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                                              hipGetErrorString(err), __FILE__, __LINE__);
                 }
             }
-            for (uint32_t i = 0; i < k; ++i) drafts[i] = decision_host[i];
-            for (uint32_t i = 0; i <= k; ++i) {
-                sampled[i] = decision_host[dflash2::kMaxBlockSize + i];
+            for (uint32_t i = 0; i < dflash_k; ++i) drafts[i] = decision_host[i];
+            for (uint32_t i = 0; i <= total_k; ++i) {
+                sampled[i] = decision_host[kDFlash2SpecMaxVerifyRows + i];
             }
             auto completed =
                 complete_batch(*decoder.target, std::move(pending), decoder.stream);
@@ -634,7 +726,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                 ScopedTimer tc(want_timing ? &tm->decision_copy_ms : nullptr);
                 const hipError_t err = hipMemcpy(
                     sampled.data(), output.sampled_tokens.data<int32_t>(),
-                    static_cast<std::size_t>(k + 1u) * sizeof(int32_t),
+                    static_cast<std::size_t>(total_k + 1u) * sizeof(int32_t),
                     hipMemcpyDeviceToHost);
                 if (err != hipSuccess) {
                     return Status::hip_error("dflash2 verify sample copy",
@@ -660,10 +752,9 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     }
 
     SpecVerifyResult result;
-    Status accept = spec_greedy_accept(drafts.data(), k, sampled.data(), true, result);
+    Status accept = spec_greedy_accept(drafts.data(), total_k, sampled.data(), true, result);
     if (!accept.ok()) return accept;
     const uint32_t accepted = result.num_accepted_drafts;
-    out.num_drafts = k;
     out.num_accepted = accepted;
     out.emitted_count = std::min(static_cast<uint32_t>(result.emitted_tokens.size()),
                                  remaining_tokens);
@@ -684,13 +775,13 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                                      __LINE__);
     }
 
-    if (accepted == k) {
+    if (accepted == total_k) {
         ScopedTimer t(tm != nullptr ? &tm->dflash_commit_ms : nullptr);
         std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps{};
         collect_target_taps(*decoder.target, taps);
         Status st = dflash2::dflash2_append_target_taps(
             *decoder.draft, *decoder.context, taps.data(), ps::kernel::kDFlash2TargetTaps,
-            k + 1u, position, decoder.stream);
+            total_k + 1u, position, decoder.stream);
         if (!st.ok()) return st;
         const uint32_t required = ceil_div_u32(decoder.sequence->position, page_tokens);
         st = rollback_sequence_append(*decoder.sequence, required, decoder.stream);
@@ -728,7 +819,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         }
         decoder.sequence->position = position;
 
-        std::array<int32_t, dflash2::kMaxBlockSize> prefix{};
+        std::array<int32_t, kDFlash2SpecMaxVerifyRows> prefix{};
         prefix[0] = pending_token;
         for (uint32_t i = 0; i < accepted; ++i) prefix[i + 1u] = drafts[i];
         const uint32_t n = accepted + 1u;
@@ -760,6 +851,19 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     if (tm != nullptr) {
         tm->accepted_drafts += accepted;
         tm->generated_tokens += out.emitted_count;
+        tm->verify_rows_total += total_k + 1u;
+        if (accepted >= dflash_k) ++tm->dflash_prefix_full_accepts;
+        if (ngram_enabled && tail_k > 0u) {
+            ++tm->ngram_hit_rounds;
+            tm->ngram_proposed_tokens += tail_k;
+            const uint32_t tail_accepted = accepted > dflash_k ? accepted - dflash_k : 0u;
+            tm->ngram_accepted_tokens += tail_accepted;
+            if (accepted >= dflash_k) {
+                ++tm->tail_reached_rounds;
+            } else {
+                ++tm->tail_blocked_rounds;
+            }
+        }
         tm->gdn_history_bytes = decoder.gdn_history_enabled
                                     ? static_cast<uint64_t>(decoder.gdn_history.rows) *
                                           static_cast<uint64_t>(
@@ -778,6 +882,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         }
         if (out.pending_token == decoder.config.eos_token) out.finished = true;
     }
+    commit_history_tokens(decoder, out.emitted.data(), out.emitted_count);
     return out;
 }
 
