@@ -356,6 +356,12 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
 endif()
 
 # ---------------------------------------------------------------------------
+# Parallel runtime topology.
+# ---------------------------------------------------------------------------
+phaseshift_add_test(NAME test_parallel_topology SOURCE unit/test_parallel_topology.cpp
+    LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_core)
+
+# ---------------------------------------------------------------------------
 # phaseshift-compute decode backend contract (CPU-only: no GPU, no model).
 # --decode-backend must be decided before any model load: GPU-MCU is rejected
 # with an explicit error, host keeps reaching the ordinary startup path.
