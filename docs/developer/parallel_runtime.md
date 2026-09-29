@@ -270,6 +270,35 @@ optimized path（`kv_append_dispatch.hip` / `paged_attention_dispatch.hip`）は
 まだ offset を受け取っていないため、tensor parallel の実行は
 `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` を前提にしている。
 
+## GDN の tensor parallel
+
+`GdnStatePoolLayout::from_text_config(tc, tensor_parallel)` が
+local な head 幾何で state pool を作る。`create_model_executor` の幾何検証も
+同じ引数で計算するため、両者が一致しなければ起動時に失敗する。
+
+conv / recurrence state を local 幾何にした場合、GDN kernel は
+`gdn.conv_dim` / `gdn.num_v_heads` をそのまま pool の幾何として使うので、
+head offset を持たずに動く。attention が full-size KV pool を使うのと
+対照的である（これは Gate §29 が許容する local head allocation の方針）。
+
+shard 対象は次。
+
+- `in_proj_qkv` / `in_proj_z` / `in_proj_b` / `in_proj_a` → column（head 分割）
+- `out_proj` → row（`COMM_ALL_REDUCE` を後に置く）
+- `conv1d.weight` / `norm.weight` / `dt_bias` / `A_log` → dim0 の head 分割
+  （`shard_head_tensor`。row-major なので view で切れる）
+- `conv1d.weight` の dim0 は `[q | k | v]` のブロック構造だが、
+  各ブロック内で head が連結しているため half split でも
+  rank の local な `[q | k | v]` と pool の対応が保たれる
+
+## tensor parallel の対象を layer 種別で切り分ける
+
+`Qwen35LowerOptions` / `ExecutorConfig` の `tp_full_attention` と
+`tp_linear_attention` で、standard attention と GDN を独立に有効化する。
+`false` の層は config の head 数のまま扱われ、AllReduce も置かれない。
+
+MLP の tensor parallel はまだ有効化していない。
+
 ## Program の collective
 
 `KernelId::COMM_ALL_REDUCE` は `CommOperation::AllReduceSum` の
@@ -291,6 +320,7 @@ send / recv と同じく physical kernel ではなく
 | `test_qwen35_tp_column_linear` | `gpu2;multi_gpu` | Column Parallel LINEAR の一致比較 |
 | `test_qwen35_tp_row_linear` | `gpu2;rccl;rccl_2gpu` | Row Parallel LINEAR の AllReduce と精度 |
 | `test_qwen35_tp2_attention` | `gpu2;rccl;rccl_2gpu` | standard attention の TP 化と 1GPU との比較 |
+| `test_qwen35_tp3_gdn` | `gpu2;rccl;rccl_2gpu` | GDN の TP 化と 1GPU との比較 |
 
 synthetic model は `tests/support/synthetic_qwen35_model.h` が
 `config.json` と `model.safetensors` を書き出し、通常の

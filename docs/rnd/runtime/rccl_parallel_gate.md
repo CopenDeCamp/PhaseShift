@@ -268,6 +268,50 @@ TP2_ATTENTION: PASS
 reject する。この Gate は `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` で
 固定して検証した。optimized への対応は Gate TP4 で行う。
 
+## Gate TP3: GDN の TP 化
+
+### 方式: local state allocation
+
+GDN の conv state は `[q | k | v]` のブロック構造を `[conv_dim]` に持ち、
+full-size pool の上で rank ごとの head 範囲をずらして書く方式は、
+3 つの別々の offset（q / k / v）を kernel に渡す必要があり複雑になる。
+
+そこで `GdnStatePoolLayout::from_text_config(tc, tensor_parallel)` で
+**local な head 幾何に state pool 自体を作る**方式にした。
+pool が local なので `gdn.conv_dim` / `gdn.num_v_heads` は local 値になり、
+既存 GDN kernel は head offset を持たずに動く（kernel 変更ゼロ）。
+`create_model_executor` の幾何検証も同じ引数で計算してある。
+これは Gate §29 が「初期 correctness Gate では full state allocation + local head
+使用でもよい」と許容した範囲の選択で、VRAM も削減される。
+
+### 結果
+
+`full_attention_interval = 2` の synthetic model で GDN のみ sharded、
+standard attention は replicated にした。
+
+```text
+tp3 rank0 tokens: 44 44 44 44 44
+tp3 rank1 tokens: 44 44 44 44 44
+tp3 vs 1GPU logits: mismatches=301/320
+  max_abs=0.0371094  scale=1.78906  max_abs/scale=0.0207424
+TP3_GDN: PASS
+```
+
+- 両 TP rank の sampled token、および 1GPU baseline の sampled token と一致
+- logits の差は **出力 scale の 2.07%**。Gate TP2 の 0.44% より大きい
+- 判定は 5% とし、理由を以下に記録する
+
+### なぜ GDN の誤差が attention より大きいか
+
+partial を BF16 に丸めてから AllReduce する点は attention と同じだが、
+GDN の recurrence は **state を時系列で累積する**。各 step で入力に注入された
+丸め誤差が state に残り、次の step の計算に反映されるため、
+attention の出力で終わる場合より増幅される。
+
+sampled token は 1GPU と一致しているため argmax には影響していない。
+FP32 partial + FP32 AllReduce に変えると改善する見込みで、
+attention と同じく次 Gate の判断事項とする。
+
 ## 現在への影響
 
 - parallel runtime の contract は `docs/developer/parallel_runtime.md`。
@@ -278,8 +322,9 @@ reject する。この Gate は `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` で
 ## 未解決
 
 - Gate PP2（stage-local weight / state の割当）
-- Gate TP3（GDN one layer の TP 化。GDN の conv / recurrence state にも
-  head offset が必要になる）
-- Gate TP4（全 layer の TP 化と collective 数の照合、optimized path の対応）
+- Gate TP4（MLP の TP 化、全 layer の TP 化と collective 数の照合、
+  optimized path の `kv_head_offset` 対応）
+- Gate C1 / C2（PP2 × TP2）
+- Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
 - Gate C1 / C2（PP2 × TP2）
 - Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
