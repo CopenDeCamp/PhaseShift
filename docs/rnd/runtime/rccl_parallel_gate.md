@@ -157,6 +157,65 @@ stage1 の受信値を value trace で採取する）のうち、後者は works
 つまり上記はいずれも原因ではなく、最終的には harness の token 供給に
 帰着した。
 
+## Gate TP1: synthetic Column / Row Parallel LINEAR
+
+`MatrixShardSpec{axis, rank, world_size}` を導入し、BF16 weight を
+output feature 方向（Column）と input feature 方向（Row）に分割する。
+
+- Column: 元 tensor の row view をそのまま使う。追加コピーはない。
+- Row: **view では切らない。** `launch_gemm_bf16_baseline` は weight / input を
+  連続 row-major として読むため、stride を持つ view を渡すと行がずれる。
+  連続な local matrix へ `hipMemcpy2DAsync` でコピーする。
+  packed quantized weight で同じことが起きる（Gate §34）のと同一の問題。
+
+### Column Parallel（`test_qwen35_tp_column_linear`）
+
+2 GPU で各 rank が `out/2` 行の GEMM を走らせ、concat して1GPU の full GEMM と比較。
+
+```text
+column parallel: vs 1GPU gpu-gemm mismatches=0/448 max_abs=0 max_rel=0
+1GPU gpu-gemm vs CPU reference: mismatches=0/448 max_abs=0 max_rel=0
+```
+
+**bit exact**。collective がないため一致は保証される。
+
+### Row Parallel（`test_qwen35_tp_row_linear`）
+
+各 rank が `X[:, rank*K/2]` と `W[:, rank*K/2]` で partial GEMM を作り、
+RCCL `all_reduce_sum`（BF16）で合算して1GPU と比較。
+
+```text
+row parallel: vs 1GPU gpu-gemm mismatches=165/448
+  max_abs=0.0078125  scale=1.89062  max_abs/scale=0.00413223
+  max_rel=0.0971429  max_rel_active=0.0548523
+1GPU gpu-gemm vs CPU reference: mismatches=0/448 max_abs=0 max_rel=0
+```
+
+- 1GPU の GEMM は CPU reference（FP32 accumulate → BF16 cast）と bit exact。
+- TP の側は partial を BF16 に丸めてから AllReduce するため、
+  **差は最大でも出力 scale の 0.41%**（BF16 の1 ULP は相対 2^-8 = 0.39%）。
+  これは Gate §35 が予告した「partial を BF16 へ丸めてから AllReduce すると
+  bit exact にならない」ことの実測値である。
+- `max_rel` は0近傍の要素で 9.7%、`max_rel_active`（scale の1%以上の要素）でも
+  5.5% になる。これは cancellation が起きる要素で、
+  **絶対誤差は scale 依存ではなく一定量**残るためで、相対指標は使えない。
+  判定は `max_abs / scale <= 1%` で行う。
+
+### 残課題
+
+Row Parallel を bit exact にするには Gate §35 の推奨どおり
+`FP32 partial output → ncclFloat32 SUM → BF16 cast` が必要。
+現状の `launch_gemm_bf16_baseline` は BF16 出力固定のため、
+FP32 partial を出す launcher が要る。次 Gate で判断する。
+
+
+
+- PP2 の E2E 一致確認（harness 修正後の再実行）
+- Gate PP2（stage-local weight / state の割当）
+- Gate TP1-TP4（Column/Row Parallel LINEAR、Attention、GDN、全 layer）
+- Gate C1 / C2（PP2 × TP2）
+- Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
+
 ## 現在への影響
 
 - parallel runtime の contract は `docs/developer/parallel_runtime.md`。
@@ -166,8 +225,9 @@ stage1 の受信値を value trace で採取する）のうち、後者は works
 
 ## 未解決
 
-- PP2 の E2E 一致確認（harness 修正後の再実行）
 - Gate PP2（stage-local weight / state の割当）
-- Gate TP1-TP4（Column/Row Parallel LINEAR、Attention、GDN、全 layer）
+- Gate TP2（Standard Attention one layer の TP 化）
+- Gate TP3（GDN one layer の TP 化）
+- Gate TP4（全 layer の TP 化と collective 数の照合）
 - Gate C1 / C2（PP2 × TP2）
 - Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
