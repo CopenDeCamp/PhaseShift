@@ -378,6 +378,7 @@ Status validate_gdn_shapes(
 Status validate_geometry(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
+    const ModelPartition& raw_partition,
     std::uint32_t tp_full_attention,
     std::uint32_t tp_linear_attention,
     std::uint32_t tp_mlp) {
@@ -399,19 +400,24 @@ Status validate_geometry(
             "Qwen3.5 layer type count mismatch", __FILE__, __LINE__);
     }
 
-    auto embed_status = validate_matrix(
-        weights.embed_tokens, RT::MatrixwiseShapeKey{weights.embed_tokens.rows, hidden_size},
-        "invalid embedding weight");
-    if (!embed_status.ok()) return embed_status;
-    if (!weights.lm_head_tied) {
+    const ModelPartition partition =
+        resolve_model_partition(raw_partition, config.num_hidden_layers);
+    if (partition.owns_embedding) {
+        auto embed_status = validate_matrix(
+            weights.embed_tokens,
+            RT::MatrixwiseShapeKey{weights.embed_tokens.rows, hidden_size},
+            "invalid embedding weight");
+        if (!embed_status.ok()) return embed_status;
+    }
+    if (partition.owns_lm_head && !weights.lm_head_tied) {
         auto lm_status = validate_matrix(
             weights.lm_head, RT::MatrixwiseShapeKey{weights.lm_head.rows, hidden_size},
             "invalid lm head weight");
         if (!lm_status.ok()) return lm_status;
     }
 
-    for (std::size_t layer_index = 0;
-         layer_index < config.num_hidden_layers;
+    for (std::size_t layer_index = partition.layer_begin;
+         layer_index < partition.layer_end;
          ++layer_index) {
 
         const auto& layer_weights = weights.layers[layer_index];
@@ -557,7 +563,8 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     const uint32_t tp_mlp =
         options.tensor_parallel_size > 1 && options.tp_mlp ? options.tensor_parallel_size
                                                            : 1u;
-    auto geometry_status = validate_geometry(config, weights, tp_attn, tp_gdn, tp_mlp);
+    auto geometry_status =
+        validate_geometry(config, weights, options.partition, tp_attn, tp_gdn, tp_mlp);
     if (!geometry_status.ok()) return geometry_status;
 
     ModelPartition partition = options.partition;
@@ -607,13 +614,17 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         return static_cast<uint32_t>(weight_pointers.size() - 1);
     };
 
-    const uint32_t embed_index = add_weight(weights.embed_tokens);
+    const bool needs_embed_weight = partition.owns_embedding ||
+                                    (weights.lm_head_tied && partition.owns_lm_head);
+    const uint32_t embed_index =
+        needs_embed_weight ? add_weight(weights.embed_tokens) : 0u;
     std::vector<LayerWeightIndices> layer_weights(weights.layers.size());
     {
         size_t cursor = 1;
         for (size_t li = 0; li < weights.layers.size(); ++li) {
             const auto& lw = weights.layers[li];
             auto& idx = layer_weights[li];
+            if (li < partition.layer_begin || li >= partition.layer_end) continue;
             if (lw.is_gdn) {
                 idx.gdn_qkv = static_cast<uint32_t>(cursor++);
                 (void)add_weight(lw.attn_in_proj_qkv);
@@ -645,7 +656,8 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     }
     const bool lm_tied = weights.lm_head_tied;
     const uint32_t lm_index =
-        lm_tied ? embed_index : add_weight(weights.lm_head);
+        lm_tied ? embed_index
+                : (partition.owns_lm_head ? add_weight(weights.lm_head) : 0u);
 
     uint32_t key_heads = static_cast<uint32_t>(config.linear_num_key_heads);
     uint32_t value_heads = static_cast<uint32_t>(config.linear_num_value_heads);

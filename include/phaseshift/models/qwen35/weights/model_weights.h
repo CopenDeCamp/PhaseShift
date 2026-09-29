@@ -1,6 +1,7 @@
 #pragma once
 #include <phaseshift/core/memory/tensor.h>
 #include <phaseshift/core/status.h>
+#include <phaseshift/models/qwen35/model/model_partition.h>
 #include <phaseshift/weights/matrix_weight.h>
 #include <phaseshift/weights/weight_loader.h>
 #include <hip/hip_runtime.h>
@@ -76,6 +77,7 @@ struct Qwen35LoadOptions {
     bool verify_quantized_payload_crc = false;
     ps::weights::WeightLoadOptions weights;
     Qwen35TensorShard tensor_shard;
+    ModelPartition partition{};
 };
 
 Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(

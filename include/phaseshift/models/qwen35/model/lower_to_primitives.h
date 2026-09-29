@@ -1,5 +1,6 @@
 #pragma once
 #include <phaseshift/core/status.h>
+#include <phaseshift/models/qwen35/model/model_partition.h>
 #include <phaseshift/models/qwen35/model/qwen35_config.h>
 #include <phaseshift/models/qwen35/weights/model_weights.h>
 #include <phaseshift/runtime/program/program.h>
@@ -15,13 +16,6 @@ struct Qwen35LoweredPrimitives {
     ps::runtime::PrimitiveGraph graph;
     std::vector<ps::runtime::WeightSlot> weights;
     std::vector<ps::runtime::StaticParameterSlot> parameters;
-};
-
-struct ModelPartition {
-    uint32_t layer_begin = 0;
-    uint32_t layer_end = 0;
-    bool owns_embedding = true;
-    bool owns_lm_head = true;
 };
 
 struct Qwen35LowerOptions {

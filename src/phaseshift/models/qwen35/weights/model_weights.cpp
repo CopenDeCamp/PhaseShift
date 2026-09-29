@@ -347,10 +347,15 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
     Qwen35ModelWeights weights;
     weights.layers.resize(config.num_hidden_layers);
 
+    const ModelPartition partition = resolve_model_partition(options.partition,
+                                                        config.num_hidden_layers);
+
     ps::weights::WeightLoadOptions embed_load;
     embed_load.preshuffle = false;
 
-    {
+    const bool need_embed = partition.owns_embedding ||
+                            (config.tie_word_embeddings && partition.owns_lm_head);
+    if (need_embed) {
         auto m = ps::weights::load_bf16_matrix(
             collection, "model.language_model.embed_tokens.weight", arena, stream, embed_load);
         if (!m.ok()) return m.status();
@@ -361,21 +366,23 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
         weights.lm_head = weights.embed_tokens;
         weights.lm_head_tied = true;
     } else {
-        auto m = ps::weights::load_bf16_matrix(
-            collection, "model.language_model.lm_head.weight", arena, stream, embed_load);
-        if (!m.ok()) return m.status();
-        weights.lm_head = m.release();
         weights.lm_head_tied = false;
+        if (partition.owns_lm_head) {
+            auto m = ps::weights::load_bf16_matrix(
+                collection, "model.language_model.lm_head.weight", arena, stream, embed_load);
+            if (!m.ok()) return m.status();
+            weights.lm_head = m.release();
+        }
     }
 
-    {
+    if (partition.owns_lm_head) {
         auto t = ps::weights::load_bf16_tensor(
             collection, "model.language_model.norm.weight", arena, stream);
         if (!t.ok()) return t.status();
         weights.final_norm_weight = t.release();
     }
 
-    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+    for (std::size_t l = partition.layer_begin; l < partition.layer_end; ++l) {
         Status st = load_layer_bf16(arena, stream, collection, l, options, weights.layers[l]);
         if (!st.ok()) return st;
     }
@@ -568,7 +575,12 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
     Qwen35ModelWeights weights;
     weights.layers.resize(config.num_hidden_layers);
 
-    {
+    const ModelPartition partition = resolve_model_partition(options.partition,
+                                                        config.num_hidden_layers);
+
+    const bool need_embed = partition.owns_embedding ||
+                            (config.tie_word_embeddings && partition.owns_lm_head);
+    if (need_embed) {
         auto m = ps::weights::load_quantized_matrix(reader, "model.language_model.embed_tokens.weight", arena, stream, options.weights);
         if (!m.ok()) return m.status();
         weights.embed_tokens = m.release();
@@ -578,22 +590,24 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
         weights.lm_head = weights.embed_tokens;
         weights.lm_head_tied = true;
     } else {
-        Result<MatrixWeight> m = ps::weights::load_quantized_matrix(reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
-        if (!m.ok()) {
-            m = ps::weights::load_quantized_matrix(reader, "lm_head.weight", arena, stream, options.weights);
-            if (!m.ok()) return m.status();
-        }
-        weights.lm_head = m.release();
         weights.lm_head_tied = false;
+        if (partition.owns_lm_head) {
+            Result<MatrixWeight> m = ps::weights::load_quantized_matrix(reader, "model.language_model.lm_head.weight", arena, stream, options.weights);
+            if (!m.ok()) {
+                m = ps::weights::load_quantized_matrix(reader, "lm_head.weight", arena, stream, options.weights);
+                if (!m.ok()) return m.status();
+            }
+            weights.lm_head = m.release();
+        }
     }
 
-    {
+    if (partition.owns_lm_head) {
         auto t = ps::weights::load_quantized_small(reader, "model.language_model.norm.weight", arena, stream);
         if (!t.ok()) return t.status();
         weights.final_norm_weight = t.release();
     }
 
-    for (std::size_t l = 0; l < config.num_hidden_layers; ++l) {
+    for (std::size_t l = partition.layer_begin; l < partition.layer_end; ++l) {
         Status st = load_layer_quantized(arena, stream, reader, l,
                                          layer_types[l] == 0, options.weights, weights.layers[l]);
         if (!st.ok()) return st;

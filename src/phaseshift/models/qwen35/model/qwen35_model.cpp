@@ -9,39 +9,21 @@ namespace {
 
 Status validate_qwen35_weights(
     const Qwen35ModelWeights& weights,
-    const Qwen35TextConfig& config)
+    const Qwen35TextConfig& config,
+    const ModelPartition& partition)
 {
-    if (weights.embed_tokens.rows == 0 || weights.embed_tokens.cols == 0) {
+    const bool need_embed = partition.owns_embedding ||
+                            (config.tie_word_embeddings && partition.owns_lm_head);
+    if (need_embed && (weights.embed_tokens.rows == 0 || weights.embed_tokens.cols == 0)) {
         return Status::invalid_argument(
             "Qwen35Model: embed_tokens dimensions must be > 0",
             __FILE__, __LINE__);
     }
-    if (weights.lm_head.rows == 0 || weights.lm_head.cols == 0) {
-        return Status::invalid_argument(
-            "Qwen35Model: lm_head dimensions must be > 0",
-            __FILE__, __LINE__);
-    }
-    if (weights.final_norm_weight.ndim() != 1) {
-        return Status::invalid_argument(
-            "Qwen35Model: final_norm_weight must be 1D",
-            __FILE__, __LINE__);
-    }
-
-    const std::size_t hidden_size = weights.embed_tokens.cols;
-    if (weights.final_norm_weight.dim(0) != hidden_size) {
-        return Status::invalid_argument(
-            "Qwen35Model: final_norm hidden size mismatch",
-            __FILE__, __LINE__);
-    }
-
-    if (weights.embed_tokens.rows != config.vocab_size) {
+    const std::size_t hidden_size =
+        need_embed ? weights.embed_tokens.cols : config.hidden_size;
+    if (need_embed && weights.embed_tokens.rows != config.vocab_size) {
         return Status::invalid_argument(
             "Qwen35Model: embed_tokens vocab size mismatch",
-            __FILE__, __LINE__);
-    }
-    if (weights.lm_head.rows != config.vocab_size) {
-        return Status::invalid_argument(
-            "Qwen35Model: lm_head vocab size mismatch",
             __FILE__, __LINE__);
     }
     if (hidden_size != config.hidden_size) {
@@ -49,13 +31,35 @@ Status validate_qwen35_weights(
             "Qwen35Model: hidden size mismatch",
             __FILE__, __LINE__);
     }
+    if (partition.owns_lm_head) {
+        if (weights.lm_head.rows == 0 || weights.lm_head.cols == 0) {
+            return Status::invalid_argument(
+                "Qwen35Model: lm_head dimensions must be > 0",
+                __FILE__, __LINE__);
+        }
+        if (weights.final_norm_weight.ndim() != 1) {
+            return Status::invalid_argument(
+                "Qwen35Model: final_norm_weight must be 1D",
+                __FILE__, __LINE__);
+        }
+        if (weights.final_norm_weight.dim(0) != hidden_size) {
+            return Status::invalid_argument(
+                "Qwen35Model: final_norm hidden size mismatch",
+                __FILE__, __LINE__);
+        }
+        if (weights.lm_head.rows != config.vocab_size) {
+            return Status::invalid_argument(
+                "Qwen35Model: lm_head vocab size mismatch",
+                __FILE__, __LINE__);
+        }
+    }
     if (weights.layers.size() != config.num_hidden_layers) {
         return Status::invalid_argument(
             "Qwen35Model: layer count mismatch",
             __FILE__, __LINE__);
     }
 
-    for (std::size_t layer = 0; layer < weights.layers.size(); ++layer) {
+    for (std::size_t layer = partition.layer_begin; layer < partition.layer_end; ++layer) {
         const bool expected_gdn =
             (config.full_attention_interval == 0)
             ? (layer % 4 < 3)
@@ -92,7 +96,9 @@ Result<Qwen35Model> Qwen35Model::load_from_safetensors(
     }
     Qwen35ModelWeights weights = weights_result.release();
 
-    auto validation = validate_qwen35_weights(weights, text_config);
+    const ModelPartition partition =
+        resolve_model_partition(options.partition, text_config.num_hidden_layers);
+    auto validation = validate_qwen35_weights(weights, text_config, partition);
     if (!validation.ok()) {
         return validation;
     }
