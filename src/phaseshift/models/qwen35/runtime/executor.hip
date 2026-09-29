@@ -1536,6 +1536,17 @@ void PendingBatch::destroy() noexcept {
     output = BatchExecutionOutput{};
 }
 
+namespace {
+void executor_stage_debug(const char* what) {
+    const char* env = std::getenv("PHASESHIFT_EXECUTOR_DEBUG");
+    if (env != nullptr && env[0] != '\0' && env[0] != '0') {
+        int dev = -1;
+        (void)hipGetDevice(&dev);
+        std::fprintf(stderr, "EXECDBG dev=%d %s\n", dev, what);
+    }
+}
+}  // namespace
+
 Result<Executor> create_model_executor(
     const Qwen35Model& model,
     SequenceSlotPool& sequence_pool,
@@ -1646,6 +1657,7 @@ Result<Executor> create_model_executor(
             config.tp_linear_attention ? config.tensor_parallel_size : 1u;
         const ModelPartition stage_partition =
             resolve_model_partition(config.partition, tc.num_hidden_layers);
+        executor_stage_debug("kv_validate");
         const auto expected_gdn =
             GdnStatePoolLayout::from_text_config(tc, gdn_tp, stage_partition.layer_begin,
                                                  stage_partition.layer_end);
@@ -1888,12 +1900,14 @@ Result<Executor> create_model_executor(
         lower_options.tp_full_attention = ex.config.tp_full_attention;
         lower_options.tp_linear_attention = ex.config.tp_linear_attention;
         lower_options.tp_mlp = ex.config.tp_mlp;
+        executor_stage_debug("lower_begin");
         auto lower_res =
             lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
         if (!lower_res.ok()) {
             ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
             return lower_res.status();
         }
+        executor_stage_debug("lower_done");
         auto lowered = lower_res.release();
         std::vector<::ps::runtime::WeightSlot> weight_slots =
             std::move(lowered.weights);
@@ -1915,6 +1929,7 @@ Result<Executor> create_model_executor(
             ::ps::runtime::StaticParameterTableView pview;
             pview.slots = param_slots.data();
             pview.count = param_slots.size();
+            executor_stage_debug("program_set");
             auto set_res = ::ps::runtime::build_program_set(
                 lowered_graph, weight_view, pview,
                 ::ps::runtime::ExecutionClass::DECODE, opts);
@@ -1923,6 +1938,7 @@ Result<Executor> create_model_executor(
                 return set_res.status();
             }
             built_set = set_res.release();
+            executor_stage_debug("program_set_done");
 
             std::size_t max_workspace_bytes = 0;
             uint64_t max_staging_bytes = 0;
@@ -1968,6 +1984,7 @@ Result<Executor> create_model_executor(
                 }
             }
 
+            executor_stage_debug("weight_table_upload");
             auto wtable_res = runtime::upload_host_weight_table(
                 weight_view, &ex.host_weight_table, upload_stream);
             if (!wtable_res.ok()) {
@@ -1991,6 +2008,7 @@ Result<Executor> create_model_executor(
             {
                 constexpr size_t kMetaBucketCount =
                     ::ps::runtime::ProgramSet::kRowBucketCount;
+                executor_stage_debug("meta_upload");
                 ex.program_staging_meta.resize(kMetaBucketCount);
                 bool meta_upload_ok = true;
                 for (size_t b = 0; b < kMetaBucketCount && meta_upload_ok; ++b) {
@@ -2074,6 +2092,7 @@ Result<Executor> create_model_executor(
                 }
             }
 
+            executor_stage_debug("dispatch_staging");
             if (max_staging_bytes > 0) {
                 hipError_t serr2 = hipMalloc(&ex.dispatch_staging, max_staging_bytes);
                 if (serr2 != hipSuccess) {

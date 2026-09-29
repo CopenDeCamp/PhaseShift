@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <limits>
 
 namespace ps::qwen35 {
@@ -543,6 +545,17 @@ struct Emitter {
 
 }
 
+namespace {
+void lower_stage_debug(const char* what) {
+    const char* env = std::getenv("PHASESHIFT_EXECUTOR_DEBUG");
+    if (env != nullptr && env[0] != '\0' && env[0] != '0') {
+        int dev = -1;
+        (void)hipGetDevice(&dev);
+        std::fprintf(stderr, "LOWERDBG dev=%d %s\n", dev, what);
+    }
+}
+}  // namespace
+
 Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
@@ -573,7 +586,8 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     if (partition.layer_end > total_layers)
         return Status::invalid_argument("model partition exceeds the layer count", __FILE__,
                                         __LINE__);
-    if (partition.layer_begin > partition.layer_end)
+    lower_stage_debug("partition_resolved");
+        if (partition.layer_begin > partition.layer_end)
         return Status::invalid_argument("model partition layer range is inverted", __FILE__,
                                         __LINE__);
     if (partition.owns_embedding != (partition.layer_begin == 0))
@@ -751,6 +765,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         pg.nodes.back().debug_name = "pp_recv";
     }
 
+    lower_stage_debug("graph_loop_begin");
     for (size_t li = partition.layer_begin; li < partition.layer_end; ++li) {
         const auto& lw = weights.layers[li];
         const auto& lw_idx = layer_weights[li];
@@ -1058,6 +1073,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         }
     }
 
+    lower_stage_debug("head_begin");
     if (partition.owns_lm_head) {
         const MW* lmw = lm_tied ? &weights.embed_tokens : &weights.lm_head;
         const uint32_t out_vocab = lmw->rows;
@@ -1163,6 +1179,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_mtp_to_primitives(
         return static_cast<uint32_t>(lowered.parameters.size() - 1u);
     };
 
+    lower_stage_debug("weight_table_begin");
     const uint32_t embed_index = add_weight(weights.embed_tokens);
     const uint32_t lm_index =
         weights.lm_head_tied ? embed_index : add_weight(weights.lm_head);

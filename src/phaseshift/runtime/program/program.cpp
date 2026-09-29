@@ -1,4 +1,5 @@
 #include <phaseshift/runtime/program/program.h>
+#include <hip/hip_runtime.h>
 #include <phaseshift/runtime/program/int8_activation_workspace.h>
 #include <phaseshift/core/memory/alignment.h>
 #include <phaseshift/runtime/program/fp8_activation_workspace.h>
@@ -924,7 +925,13 @@ Result<Program> build_program(
     c.plan = &plan;
     c.options = options;
 
+    const bool node_dump = graph.nodes.size() >= 700;
     for (size_t ni = 0; ni < graph.nodes.size(); ++ni) {
+        if (node_dump) {
+            const char* env = std::getenv("PHASESHIFT_EXECUTOR_DEBUG");
+            if (env != nullptr && env[0] != '\0' && env[0] != '0')
+                std::fprintf(stderr, "NODEDBG ni=%zu\n", ni);
+        }
         for (auto in : graph.nodes[ni].inputs) {
             c.note_use(in, static_cast<uint32_t>(c.plan->dispatches.size()));
         }
@@ -935,8 +942,14 @@ Result<Program> build_program(
             auto pst = c.note_imatrix_probe(graph.nodes[ni].inputs[0], graph.nodes[ni].imatrix_tag);
             if (!pst.ok()) return pst;
         }
+        if (node_dump)
+            std::fprintf(stderr, "NODEDBG emit_begin ni=%zu name=%s\n", ni,
+                         graph.nodes[ni].debug_name.c_str());
         c.current_source_node = static_cast<uint32_t>(ni);
         auto st = emit_node(c, graph.nodes[ni]);
+        if (node_dump)
+            std::fprintf(stderr, "NODEDBG emit_done ni=%zu name=%s\n", ni,
+                         graph.nodes[ni].debug_name.c_str());
         if (!st.ok()) return st;
     }
     auto st_ext = finalize_externals(c);
@@ -968,6 +981,18 @@ const Program* ProgramSet::resolve(RowBucket bucket) const {
     return nullptr;
 }
 
+namespace {
+void build_stage_debug(const char* what, std::size_t nodes, std::size_t bucket) {
+    const char* env = std::getenv("PHASESHIFT_EXECUTOR_DEBUG");
+    if (env != nullptr && env[0] != '\0' && env[0] != '0') {
+        int dev = -1;
+        (void)hipGetDevice(&dev);
+        std::fprintf(stderr, "BUILDDBG %s dev=%d nodes=%zu bucket=%zu\n", what, dev, nodes,
+                     bucket);
+    }
+}
+}  // namespace
+
 Result<ProgramSet> build_program_set(
     const PrimitiveGraph& graph,
     const WeightTableView& weights,
@@ -978,8 +1003,10 @@ Result<ProgramSet> build_program_set(
                                   RowBucket::R256, RowBucket::R512, RowBucket::R1024, RowBucket::R2048};
     ProgramSet set;
     for (size_t i = 0; i < ProgramSet::kRowBucketCount; ++i) {
+        build_stage_debug("bucket_begin", graph.nodes.size(), i);
         auto program_res = build_program(graph, weights, buckets[i], execution_class, options);
         if (!program_res.ok()) return program_res.status();
+        build_stage_debug("bucket_done", graph.nodes.size(), i);
         set.programs[i] = program_res.release();
         set.programs[i].parameter_slot_count = static_cast<uint32_t>(parameters.count);
     }
