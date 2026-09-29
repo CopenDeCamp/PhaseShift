@@ -21,7 +21,8 @@ constexpr uint32_t kNoWorkspace = 0xFFFFFFFFu;
 constexpr uint32_t kNoComm = 0xFFFFFFFFu;
 
 inline bool is_comm_kernel(KernelId id) noexcept {
-    return id == KernelId::COMM_SEND || id == KernelId::COMM_RECV;
+    return id == KernelId::COMM_SEND || id == KernelId::COMM_RECV ||
+           id == KernelId::COMM_ALL_REDUCE;
 }
 
 struct WeightSlot {

@@ -466,19 +466,43 @@ Status launch_communication(const ::ps::runtime::Program& program, std::size_t i
         return Status::invalid_state("communication dispatch lacks descriptor", __FILE__,
                                      __LINE__);
     const ::ps::runtime::CommDescriptor& descriptor = program.comms[ci];
-    const bool send = descriptor.operation == ::ps::runtime::CommOperation::Send;
-    const ::ps::runtime::ValueId carried = send ? descriptor.input : descriptor.output;
-    auto resolved = resolve_host_value(program, carried, ctx);
-    if (!resolved.ok()) return resolved.status();
-    const HostResolvedValue value = resolved.value();
-    if (value.ptr == nullptr)
-        return Status::invalid_state("communication buffer is null", __FILE__, __LINE__);
-    if (value.dtype != descriptor.dtype)
-        return Status::invalid_state("communication dtype mismatch", __FILE__, __LINE__);
-    const uint32_t rows = probe_rows(value, ctx);
-    const uint64_t elements = static_cast<uint64_t>(rows) * value.row_stride;
-    if (elements == 0)
-        return Status::invalid_argument("communication count is zero", __FILE__, __LINE__);
+    const ::ps::runtime::CommOperation operation = descriptor.operation;
+    const void* send_ptr = nullptr;
+    void* recv_ptr = nullptr;
+    uint64_t elements = 0;
+
+    auto resolve = [&](::ps::runtime::ValueId id, bool is_input) -> Status {
+        auto resolved = resolve_host_value(program, id, ctx);
+        if (!resolved.ok()) return resolved.status();
+        const HostResolvedValue value = resolved.value();
+        if (value.ptr == nullptr)
+            return Status::invalid_state("communication buffer is null", __FILE__, __LINE__);
+        if (value.dtype != descriptor.dtype)
+            return Status::invalid_state("communication dtype mismatch", __FILE__, __LINE__);
+        const uint32_t rows = probe_rows(value, ctx);
+        const uint64_t count = static_cast<uint64_t>(rows) * value.row_stride;
+        if (count == 0)
+            return Status::invalid_argument("communication count is zero", __FILE__, __LINE__);
+        if (elements == 0) {
+            elements = count;
+        } else if (elements != count) {
+            return Status::invalid_state("communication count mismatch", __FILE__, __LINE__);
+        }
+        if (is_input)
+            send_ptr = value.ptr;
+        else
+            recv_ptr = value.ptr;
+        return Status::make_ok();
+    };
+
+    if (operation != ::ps::runtime::CommOperation::Recv) {
+        Status st = resolve(descriptor.input, true);
+        if (!st.ok()) return st;
+    }
+    if (operation != ::ps::runtime::CommOperation::Send) {
+        Status st = resolve(descriptor.output, false);
+        if (!st.ok()) return st;
+    }
 #ifdef PHASESHIFT_HIP_GRAPH
     hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
     hipError_t capture_error = hipStreamIsCapturing(stream, &capture_status);
@@ -489,8 +513,7 @@ Status launch_communication(const ::ps::runtime::Program& program, std::size_t i
         return Status::invalid_state("communication node during graph capture", __FILE__,
                                      __LINE__);
 #endif
-    return ctx.comm_launch(ctx.comm_self, descriptor, send ? value.ptr : nullptr,
-                           send ? nullptr : value.ptr, elements, stream);
+    return ctx.comm_launch(ctx.comm_self, descriptor, send_ptr, recv_ptr, elements, stream);
 }
 
 }

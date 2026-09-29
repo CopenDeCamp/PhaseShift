@@ -32,7 +32,8 @@ enum class KernelId : uint32_t {
     VERIFY_ACCEPT = 27,
     COMM_SEND = 28,
     COMM_RECV = 29,
-    COUNT = 30,
+    COMM_ALL_REDUCE = 30,
+    COUNT = 31,
 };
 
 constexpr uint32_t kernel_id_count() noexcept {
@@ -69,6 +70,7 @@ inline const char* kernel_to_name(KernelId id) noexcept {
         case KernelId::VERIFY_ACCEPT: return "VERIFY_ACCEPT";
         case KernelId::COMM_SEND: return "COMM_SEND";
         case KernelId::COMM_RECV: return "COMM_RECV";
+        case KernelId::COMM_ALL_REDUCE: return "COMM_ALL_REDUCE";
         default: return "UNKNOWN";
     }
 }

@@ -31,6 +31,7 @@ enum class PrimitiveKind : uint16_t {
     CONCAT = 18,
     COMM_SEND = 19,
     COMM_RECV = 20,
+    COMM_ALL_REDUCE = 21,
 };
 
 inline const char* to_string(PrimitiveKind k) noexcept {
@@ -56,6 +57,7 @@ inline const char* to_string(PrimitiveKind k) noexcept {
         case PrimitiveKind::CONCAT: return "CONCAT";
         case PrimitiveKind::COMM_SEND: return "COMM_SEND";
         case PrimitiveKind::COMM_RECV: return "COMM_RECV";
+        case PrimitiveKind::COMM_ALL_REDUCE: return "COMM_ALL_REDUCE";
     }
     return "UNKNOWN";
 }
@@ -189,6 +191,11 @@ struct CommRecvNode {
     ValueDType dtype = ValueDType::BF16;
 };
 
+struct CommAllReduceNode {
+    CommGroup group = CommGroup::Tensor;
+    ValueDType dtype = ValueDType::BF16;
+};
+
 using PrimitiveNode = std::variant<
     EmbeddingLookupNode,
     LinearNode,
@@ -210,7 +217,8 @@ using PrimitiveNode = std::variant<
     SamplingNode,
     ConcatNode,
     CommSendNode,
-    CommRecvNode
+    CommRecvNode,
+    CommAllReduceNode
 >;
 
 inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
@@ -237,6 +245,7 @@ inline PrimitiveKind primitive_kind_of(const PrimitiveNode& n) noexcept {
         else if constexpr (std::is_same_v<T, ConcatNode>) return PrimitiveKind::CONCAT;
         else if constexpr (std::is_same_v<T, CommSendNode>) return PrimitiveKind::COMM_SEND;
         else if constexpr (std::is_same_v<T, CommRecvNode>) return PrimitiveKind::COMM_RECV;
+        else if constexpr (std::is_same_v<T, CommAllReduceNode>) return PrimitiveKind::COMM_ALL_REDUCE;
         else return PrimitiveKind::LINEAR;
     }, n);
 }

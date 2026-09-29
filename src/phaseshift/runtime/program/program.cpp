@@ -601,6 +601,26 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
             c.attach_comm(d);
             return Status::make_ok();
         }
+        case PrimitiveKind::COMM_ALL_REDUCE: {
+            const auto& n = node_as<CommAllReduceNode>(node);
+            DispatchBinding b = base_binding(KernelId::COMM_ALL_REDUCE);
+            b.input_slots[0] = node.inputs[0].id;
+            b.input_count = 1;
+            auto po = c.produce(node.outputs[0]);
+            if (!po.ok()) return po;
+            b.output_slots[0] = node.outputs[0].id;
+            b.output_count = 1;
+            c.push(b);
+            CommDescriptor d;
+            d.group = n.group;
+            d.operation = CommOperation::AllReduceSum;
+            d.peer = 0;
+            d.dtype = n.dtype;
+            d.input = node.inputs[0];
+            d.output = node.outputs[0];
+            c.attach_comm(d);
+            return Status::make_ok();
+        }
         case PrimitiveKind::COMM_RECV: {
             const auto& n = node_as<CommRecvNode>(node);
             DispatchBinding b = base_binding(KernelId::COMM_RECV);
@@ -816,21 +836,34 @@ Status Program::validate() const {
         if (!is_comm_kernel(dispatches[i].kernel_id))
             return fail("communication descriptor on non-communication dispatch");
         const CommDescriptor& d = comms[ci];
-        const bool send = dispatches[i].kernel_id == KernelId::COMM_SEND;
-        if (send != (d.operation == CommOperation::Send))
+        const KernelId kernel = dispatches[i].kernel_id;
+        CommOperation expected = CommOperation::Send;
+        if (kernel == KernelId::COMM_RECV) expected = CommOperation::Recv;
+        if (kernel == KernelId::COMM_ALL_REDUCE) expected = CommOperation::AllReduceSum;
+        if (d.operation != expected)
             return fail("communication descriptor operation mismatch");
-        const ValueId carried = send ? d.input : d.output;
-        const ValueBinding* binding = find_value(carried);
-        if (binding == nullptr) return fail("communication value unbound");
-        if (binding->dtype != d.dtype) return fail("communication dtype mismatch");
-        if (send && dispatches[i].input_slots[0] != carried.id)
-            return fail("communication send input mismatch");
-        if (!send && dispatches[i].output_slots[0] != carried.id)
-            return fail("communication receive output mismatch");
+        const bool carries_input = expected != CommOperation::Recv;
+        const bool carries_output = expected != CommOperation::Send;
+        if (carries_input) {
+            const ValueBinding* binding = find_value(d.input);
+            if (binding == nullptr) return fail("communication input value unbound");
+            if (binding->dtype != d.dtype) return fail("communication dtype mismatch");
+            if (dispatches[i].input_slots[0] != d.input.id)
+                return fail("communication input slot mismatch");
+        }
+        if (carries_output) {
+            const ValueBinding* binding = find_value(d.output);
+            if (binding == nullptr) return fail("communication output value unbound");
+            if (binding->dtype != d.dtype) return fail("communication dtype mismatch");
+            if (dispatches[i].output_slots[0] != d.output.id)
+                return fail("communication output slot mismatch");
+        }
     }
     for (const auto& d : comms) {
         const ValueId carried = d.operation == CommOperation::Send ? d.input : d.output;
         if (find_value(carried) == nullptr) return fail("communication value unbound");
+        if (d.operation == CommOperation::AllReduceSum && find_value(d.input) == nullptr)
+            return fail("communication input value unbound");
     }
     for (const auto& b : dispatches) {
         if (static_cast<uint32_t>(b.kernel_id) >= kernel_id_count())

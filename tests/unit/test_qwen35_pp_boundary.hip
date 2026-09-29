@@ -267,6 +267,62 @@ void check_program(const q35::Qwen35TextConfig& config,
     }
 }
 
+void check_all_reduce_program() {
+    rt::PrimitiveGraph g;
+    const rt::ValueId input = g.alloc_value(kH, rt::ValueDType::BF16);
+    const rt::ValueId partial = g.alloc_value(kH, rt::ValueDType::BF16);
+    const rt::ValueId reduced = g.alloc_value(kH, rt::ValueDType::BF16);
+    g.external_inputs.push_back(input);
+    {
+        rt::ScaleNode sn{rt::RowwiseShapeKey{kH}, 1.0f};
+        auto& gn = g.add_node(rt::PrimitiveNode{sn});
+        gn.inputs = {input};
+        gn.outputs = {partial};
+        gn.debug_name = "partial";
+    }
+    rt::CommAllReduceNode node;
+    node.group = rt::CommGroup::Tensor;
+    node.dtype = rt::ValueDType::BF16;
+    auto& gn = g.add_node(rt::PrimitiveNode{node});
+    gn.inputs = {partial};
+    gn.outputs = {reduced};
+    gn.debug_name = "all_reduce";
+    g.external_outputs.push_back(reduced);
+
+    ps::Status st = rt::validate_primitive_graph(g);
+    check(st.ok(), "all reduce graph validates: " + st.message());
+
+    rt::WeightTableView wview{nullptr, 0};
+    rt::StaticParameterTableView pview{nullptr, 0};
+    auto set = rt::build_program_set(g, wview, pview, rt::ExecutionClass::DECODE, {});
+    if (!set.ok()) {
+        check(false, "all reduce program builds: " + set.status().message());
+        return;
+    }
+    const rt::Program& program = *set.value().resolve(rt::RowBucket::R16);
+    check(program.dispatches.size() == 2, "all reduce program has two dispatches");
+    const std::size_t edge = program.dispatches.size() - 1;
+    check(program.dispatches[edge].kernel_id == rt::KernelId::COMM_ALL_REDUCE,
+          "all reduce kernel id");
+    check(program.dispatch_comm.size() == program.dispatches.size(),
+          "all reduce dispatch communication metadata is dense");
+    check(program.dispatch_comm[edge] != rt::kNoComm,
+          "all reduce carries a descriptor");
+    if (program.comms.size() != 1) {
+        check(false, "all reduce descriptor count");
+        return;
+    }
+    const rt::CommDescriptor& d = program.comms[0];
+    check(d.operation == rt::CommOperation::AllReduceSum, "all reduce operation");
+    check(d.group == rt::CommGroup::Tensor, "all reduce group");
+    check(d.input.id == partial.id && d.output.id == reduced.id, "all reduce endpoints");
+    check(program.dispatches[edge].input_slots[0] == partial.id, "all reduce input slot");
+    check(program.dispatches[edge].output_slots[0] == reduced.id, "all reduce output slot");
+    const rt::ValueBinding* in = program.find_value(partial);
+    check(in != nullptr && in->storage == rt::ValueStorage::WORKSPACE,
+          "all reduce input lives in the workspace");
+}
+
 void check_rejected(const q35::Qwen35TextConfig& config,
                     const q35::Qwen35ModelWeights& weights,
                     const q35::ModelPartition& partition, const char* label) {
@@ -309,6 +365,8 @@ int main() {
                   rt::KernelId::COMM_SEND, 1, "stage0");
     check_program(fx.config, fx.weights, q35::ModelPartition{2, 4, false, true}, 0,
                   rt::KernelId::COMM_RECV, 0, "stage1");
+
+    check_all_reduce_program();
 
     check_rejected(fx.config, fx.weights, q35::ModelPartition{1, 3, true, true},
                    "embedding stage not starting at layer 0");
