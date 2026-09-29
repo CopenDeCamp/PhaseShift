@@ -17,7 +17,7 @@ namespace ps::qwen35::runtime {
 
 class LmHeadCandidateProxy;
 
-constexpr uint64_t kDecodeAttnPartialBytes = 8u * 1024u * 1024u;
+constexpr uint64_t kDecodeAttnPartialBytes = 32u * 1024u * 1024u;
 
 struct HostResolvedValue {
     void* ptr = nullptr;
