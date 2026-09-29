@@ -45,6 +45,11 @@ public:
         return sequence_.load(std::memory_order_relaxed);
     }
 
+    uint64_t issued_bytes(uint32_t global_rank) const noexcept {
+        if (global_rank >= bytes_rank_count_) return 0;
+        return bytes_per_rank_[global_rank].load(std::memory_order_relaxed);
+    }
+
     Status all_reduce_sum(uint32_t global_rank, CommGroup group, const void* send,
                           void* recv, uint64_t elements, RcclDataType dtype,
                           hipStream_t stream);
@@ -78,6 +83,8 @@ private:
     ParallelConfig config_;
     std::vector<ncclComm_t> tensor_comms_;
     std::vector<ncclComm_t> pipeline_comms_;
+    std::unique_ptr<std::atomic<uint64_t>[]> bytes_per_rank_;
+    std::size_t bytes_rank_count_ = 0;
     std::atomic<uint64_t> sequence_{0};
     bool initialized_ = false;
 };

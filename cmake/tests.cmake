@@ -399,6 +399,9 @@ if(PHASESHIFT_HAVE_RCCL)
     phaseshift_add_test(NAME test_qwen35_pp2_tp2_e2e SOURCE unit/test_qwen35_pp2_tp2_e2e.hip
         LABELS "gpu4;rccl;rccl_4gpu" TIMEOUT 900 GPU_COUNT 4 GPU_COST_GB 4
         LIBRARIES phaseshift_parallel phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_io phaseshift_gpu)
+    phaseshift_add_test(NAME test_qwen35_parallel_bench SOURCE unit/test_qwen35_parallel_bench.hip
+        LABELS "gpu4;rccl;perf" TIMEOUT 900 GPU_COUNT 4 GPU_COST_GB 4
+        LIBRARIES phaseshift_parallel phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_io phaseshift_gpu)
 endif()
 
 # ---------------------------------------------------------------------------

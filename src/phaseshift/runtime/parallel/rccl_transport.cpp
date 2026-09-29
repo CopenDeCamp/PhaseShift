@@ -59,6 +59,13 @@ Status make_rccl_error(const char* expr, CommOperation operation,
 
 void discard_status(const Status&) {}
 
+void record_bytes(std::atomic<uint64_t>* counters, std::size_t count,
+                  uint32_t global_rank, uint64_t elements, RcclDataType dtype) {
+    if (counters == nullptr || global_rank >= count) return;
+    const uint64_t bytes = elements * rccl_dtype_bytes(dtype);
+    counters[global_rank].fetch_add(bytes, std::memory_order_relaxed);
+}
+
 }
 
 const char* rccl_dtype_name(RcclDataType dtype) noexcept {
@@ -104,6 +111,8 @@ Result<std::unique_ptr<RcclTransport>> RcclTransport::create(const ParallelConfi
     const std::size_t world = static_cast<std::size_t>(config.world_size());
     transport->tensor_comms_.assign(world, NCCL_COMM_NULL);
     transport->pipeline_comms_.assign(world, NCCL_COMM_NULL);
+    transport->bytes_rank_count_ = world;
+    transport->bytes_per_rank_ = std::make_unique<std::atomic<uint64_t>[]>(world);
     transport->initialized_ = true;
 
     auto fail = [&](Status cause, const char* expr) -> Status {
@@ -249,6 +258,8 @@ Status RcclTransport::all_reduce_sum(uint32_t global_rank, CommGroup group, cons
     if (r != ncclSuccess)
         return make_rccl_error("ncclAllReduce", CommOperation::AllReduceSum, config_,
                                global_rank, sequence, kNoPeer, r, __FILE__, __LINE__);
+    record_bytes(bytes_per_rank_.get(), bytes_rank_count_, global_rank, elements,
+                 dtype);
     log_comm("enqueued", CommOperation::AllReduceSum, global_rank, sequence);
     return Status::make_ok();
 }
@@ -274,6 +285,8 @@ Status RcclTransport::send(uint32_t global_rank, CommGroup group, uint32_t peer_
     if (r != ncclSuccess)
         return make_rccl_error("ncclSend", CommOperation::Send, config_, global_rank, sequence,
                                peer_rank, r, __FILE__, __LINE__);
+    record_bytes(bytes_per_rank_.get(), bytes_rank_count_, global_rank, elements,
+                 dtype);
     log_comm("enqueued", CommOperation::Send, global_rank, sequence);
     return Status::make_ok();
 }
@@ -299,6 +312,8 @@ Status RcclTransport::recv(uint32_t global_rank, CommGroup group, uint32_t peer_
     if (r != ncclSuccess)
         return make_rccl_error("ncclRecv", CommOperation::Recv, config_, global_rank, sequence,
                                peer_rank, r, __FILE__, __LINE__);
+    record_bytes(bytes_per_rank_.get(), bytes_rank_count_, global_rank, elements,
+                 dtype);
     log_comm("enqueued", CommOperation::Recv, global_rank, sequence);
     return Status::make_ok();
 }
@@ -336,6 +351,8 @@ Status RcclTransport::broadcast(uint32_t global_rank, CommGroup group, uint32_t 
     if (r != ncclSuccess)
         return make_rccl_error("ncclBroadcast", CommOperation::Broadcast, config_, global_rank,
                                sequence, root_rank, r, __FILE__, __LINE__);
+    record_bytes(bytes_per_rank_.get(), bytes_rank_count_, global_rank, elements,
+                 dtype);
     log_comm("enqueued", CommOperation::Broadcast, global_rank, sequence);
     return Status::make_ok();
 }

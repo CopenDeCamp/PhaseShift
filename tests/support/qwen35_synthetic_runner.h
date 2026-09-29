@@ -13,6 +13,7 @@
 #include <hip/hip_runtime.h>
 
 #include <barrier>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -55,6 +56,7 @@ struct SyntheticRunResult {
     std::vector<uint32_t> positions;
     std::vector<uint32_t> block_counts;
     std::size_t comm_count = 0;
+    std::vector<uint64_t> step_us;
 };
 
 class SyntheticRunner {
@@ -231,6 +233,7 @@ private:
                   const SyntheticRunOptions& options, SyntheticRunResult& result,
                   int32_t* sampled) {
         const std::size_t step_index = result.positions.size();
+        const auto step_begin = std::chrono::steady_clock::now();
         result.positions.push_back(sequence_->position);
         result.block_counts.push_back(
             static_cast<uint32_t>(sequence_->block_table.size()));
@@ -307,6 +310,10 @@ private:
                 result.tokens.push_back(token);
             }
         }
+        result.step_us.push_back(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - step_begin)
+                .count()));
         std::printf("device=%d step=%zu done\n", options.device, step_index);
         return true;
     }

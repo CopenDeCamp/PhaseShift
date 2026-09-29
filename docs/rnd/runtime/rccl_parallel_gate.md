@@ -213,8 +213,11 @@ FP32 partial を出す launcher が要る。次 Gate で判断する。
 - PP2 の E2E 一致確認（harness 修正後の再実行）
 - Gate PP2（stage-local weight / state の割当）
 - Gate TP1-TP4（Column/Row Parallel LINEAR、Attention、GDN、全 layer）
-- Gate C1 / C2（PP2 × TP2）
-- Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
+- Gate C1 / C2 の後、optimized path（`kv_append_dispatch.hip` /
+  `paged_attention_dispatch.hip` の `kv_head_offset` 対応）を外して
+  `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` 依存を解消する
+- 本番 model での Gate P0 計測（external model が要る）
+- Row / GDN の AllReduce を FP32 partial にして bit exact にするかの判断
 
 ## Gate TP2: standard attention の TP 化
 
@@ -311,6 +314,48 @@ attention の出力で終わる場合より増幅される。
 sampled token は 1GPU と一致しているため argmax には影響していない。
 FP32 partial + FP32 AllReduce に変えると改善する見込みで、
 attention と同じく次 Gate の判断事項とする。
+
+## Gate P0: 構成間の比較計測
+
+`test_qwen35_parallel_bench`（label `gpu4;rccl;perf`）で4構成を同じ条件で測った。
+
+条件はすべて synthetic model（4 層、`full_attention_interval = 2`、hidden 128、
+vocab 64）、prefill 16 tokens、decode 4 tokens、greedy、KV BF16、
+`PHASESHIFT_QWEN35_KERNEL_MODE=correctness`。3回計測し、いずれも bytes は一致した。
+
+| config | prefill (us) | decode 合計 (us) | decode p50 (us) | decode p95 (us) | bytes / rank |
+|---|---|---|---|---|---|
+| 1GPU | 21385 – 21442 | 52770 – 54656 | 13184 – 13547 | 13211 – 13636 | 0 |
+| PP2 | 25975 – 27051 | 56405 – 57080 | 14055 – 14261 | 14134 – 14310 | 5120 |
+| TP2 | 22766 – 27298 | 59559 – 59697 | 14561 – 14687 | 14623 – 14702 | 40960 |
+| PP2TP2 | 26689 – 46516 | 62512 – 62718 | 15179 – 15260 | 15282 – 15375 | 25600 |
+
+### 通信 bytes の理論値との照合
+
+`RcclTransport::issued_bytes(rank)` の実測値が理論値と一致した。
+
+- PP2: stage 境界 hidden = (prefill 16 + decode 4) 行 × 128 × 2 B = **5120 B**
+- TP2: row-parallel が layer ごとに1回、4 層 × 2 collectives... ではなく
+  sharded したのは attention / GDN / MLP の out projection で計 8 回、
+  20 行 × 128 × 2 B × 8 = **40960 B**
+- PP2TP2: PP の 5120 B + stage 内 TP の 4 collectives × 20 × 128 × 2 = 20480 B
+  → **25600 B**
+
+bytes が3回の計測で完全に同一であること、理論値と一致することが
+計測経路（`all_reduce_sum` / `send` / `recv` の elements × dtype bytes）を
+正しく通っている証拠になる。
+
+### 考察
+
+- 4 構成すべて 1GPU より遅い。decode p50 は 1GPU 13.2 ms に対し
+  PP2 14.1 ms、TP2 14.6 ms、PP2TP2 15.2 ms。
+- これは Gate §50 の予告どおりで、**tiny model かつ decode rows=1 では
+  通信と host coordinator のオーバーヘッドが計算を上回る**。
+  PP の効果は continuous batching / multiple microbatches でしか出ない。
+- PP2TP2 の prefill が 26.7 – 46.5 ms と3回中2回で大きくブレている。
+  4 GPU 同時実行時の計測ノイズで、decode 側は一貫している。
+- **この数値は synthetic model の相対比較であり、本番 performance ではない。**
+  本番 model（Qwen3.8-27B-PSQ）での計測は external model が要るため未実施。
 
 ## 現在への影響
 
