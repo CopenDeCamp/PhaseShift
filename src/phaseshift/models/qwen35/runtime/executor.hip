@@ -1644,7 +1644,11 @@ Result<Executor> create_model_executor(
     {
         const uint32_t gdn_tp =
             config.tp_linear_attention ? config.tensor_parallel_size : 1u;
-        const auto expected_gdn = GdnStatePoolLayout::from_text_config(tc, gdn_tp);
+        const ModelPartition stage_partition =
+            resolve_model_partition(config.partition, tc.num_hidden_layers);
+        const auto expected_gdn =
+            GdnStatePoolLayout::from_text_config(tc, gdn_tp, stage_partition.layer_begin,
+                                                 stage_partition.layer_end);
         const auto& actual_gdn = gdn_state_pool.layout();
         if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
             actual_gdn.conv_dim != expected_gdn.conv_dim ||
@@ -1669,8 +1673,9 @@ Result<Executor> create_model_executor(
             return Status::invalid_argument(msg.c_str(), __FILE__, __LINE__);
         }
         uint32_t expected_attn_layers = 0;
-        for (int lt : tc.layer_types) {
-            if (lt == 1) ++expected_attn_layers;
+        for (uint32_t i = stage_partition.layer_begin;
+             i < stage_partition.layer_end && i < tc.layer_types.size(); ++i) {
+            if (tc.layer_types[i] == 1) ++expected_attn_layers;
         }
         const uint32_t expected_kv_heads = static_cast<uint32_t>(tc.num_key_value_heads);
         const uint32_t expected_head_dim = static_cast<uint32_t>(tc.attention_head_dim);

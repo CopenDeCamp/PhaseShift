@@ -62,12 +62,17 @@ struct GdnStatePoolLayout {
     }
 
     static GdnStatePoolLayout from_text_config(const Qwen35TextConfig& tc,
-                                               uint32_t tensor_parallel = 1) {
+                                               uint32_t tensor_parallel = 1,
+                                               uint32_t layer_begin = 0,
+                                               uint32_t layer_end = 0) {
         uint32_t gdn_layers = 0;
-        for (uint32_t t : tc.layer_types) {
-            if (t == 0) ++gdn_layers;
+        const uint32_t total = static_cast<uint32_t>(tc.layer_types.size());
+        const uint32_t end = layer_end == 0 ? total : (layer_end < total ? layer_end : total);
+        const uint32_t begin = layer_begin < end ? layer_begin : end;
+        for (uint32_t i = begin; i < end; ++i) {
+            if (tc.layer_types[i] == 0) ++gdn_layers;
         }
-        if (gdn_layers == 0) gdn_layers = 1;
+        if (gdn_layers == 0 && begin == 0 && end == total) gdn_layers = 1;
         const uint32_t kh = tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16;
         const uint32_t vh = tc.linear_num_value_heads != 0 ? tc.linear_num_value_heads : 16;
         const uint32_t khd = tc.linear_key_head_dim != 0 ? tc.linear_key_head_dim : 128;
