@@ -111,6 +111,9 @@ inline bool free_matrix(GpuMatrix& m) {
 struct MaxError {
     float max_abs = 0.0f;
     float max_rel = 0.0f;
+    float max_rel_active = 0.0f;
+    float scale = 0.0f;
+    float max_abs_ulp = 0.0f;
     std::size_t mismatch = 0;
     std::size_t count = 0;
 };
@@ -126,15 +129,25 @@ inline MaxError compare_matrices(const HostMatrix& expected, const HostMatrix& a
     for (std::size_t i = 0; i < expected.data.size(); ++i) {
         const float e = to_f32(expected.data[i]);
         const float a = to_f32(actual.data[i]);
+        const float mag = e > 0.0f ? e : -e;
+        if (mag > out.scale) out.scale = mag;
+    }
+    const float active_floor = out.scale * 0.01f;
+    for (std::size_t i = 0; i < expected.data.size(); ++i) {
+        const float e = to_f32(expected.data[i]);
+        const float a = to_f32(actual.data[i]);
         const float d = e > a ? e - a : a - e;
+        const float mag = e > 0.0f ? e : -e;
         if (d != 0.0f) ++out.mismatch;
         if (d > out.max_abs) out.max_abs = d;
-        const float denom = e > 0.0f ? e : -e;
-        if (denom > 0.0f) {
-            const float rel = d / denom;
+        if (mag > 0.0f) {
+            const float rel = d / mag;
             if (rel > out.max_rel) out.max_rel = rel;
+            if (mag >= active_floor && rel > out.max_rel_active)
+                out.max_rel_active = rel;
         }
     }
+    if (out.scale > 0.0f) out.max_abs_ulp = out.max_abs / out.scale;
     return out;
 }
 

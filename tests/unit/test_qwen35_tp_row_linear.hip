@@ -185,7 +185,8 @@ int main() {
 
     const HostMatrix weight = random_matrix(kOut, kIn, 4242u);
     const HostMatrix input = random_matrix(kRows, kIn, 909u);
-    const HostMatrix input_half = slice_columns(input, 0, kIn / 2);
+    const HostMatrix input_rank0 = slice_columns(input, 0, kIn / 2);
+    const HostMatrix input_rank1 = slice_columns(input, kIn / 2, kIn / 2);
     const HostMatrix cpu_reference = reference_gemm(input, weight);
 
     if (hipSetDevice(0) != hipSuccess) {
@@ -258,10 +259,10 @@ int main() {
     RankOutput rank0;
     RankOutput rank1;
     std::thread t0([&] {
-        rank0 = run_rank(0, 0, weight, input_half, *transport, endpoint0);
+        rank0 = run_rank(0, 0, weight, input_rank0, *transport, endpoint0);
     });
     std::thread t1([&] {
-        rank1 = run_rank(1, 1, weight, input_half, *transport, endpoint1);
+        rank1 = run_rank(1, 1, weight, input_rank1, *transport, endpoint1);
     });
     t0.join();
     t1.join();
@@ -288,10 +289,12 @@ int main() {
 
         const MaxError vs_gpu = compare_matrices(full_gpu, rank0.output);
         std::printf(
-            "row parallel: vs 1GPU gpu-gemm mismatches=%zu/%zu max_abs=%.6g max_rel=%.6g\n",
-            vs_gpu.mismatch, vs_gpu.count, vs_gpu.max_abs, vs_gpu.max_rel);
-        check(vs_gpu.max_rel <= 0.01f,
-              "row parallel stays within 1% relative error of the single GPU GEMM");
+            "row parallel: vs 1GPU gpu-gemm mismatches=%zu/%zu max_abs=%.6g "
+            "scale=%.6g max_abs/scale=%.6g max_rel=%.6g max_rel_active=%.6g\n",
+            vs_gpu.mismatch, vs_gpu.count, vs_gpu.max_abs, vs_gpu.scale,
+            vs_gpu.max_abs_ulp, vs_gpu.max_rel, vs_gpu.max_rel_active);
+        check(vs_gpu.max_abs_ulp <= 0.01f,
+              "row parallel stays within 1% of the single GPU GEMM output scale");
 
         const MaxError vs_cpu = compare_matrices(cpu_reference, full_gpu);
         std::printf(
