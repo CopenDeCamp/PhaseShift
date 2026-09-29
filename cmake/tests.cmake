@@ -390,6 +390,9 @@ if(PHASESHIFT_HAVE_RCCL)
     phaseshift_add_test(NAME test_qwen35_tp2_attention SOURCE unit/test_qwen35_tp2_attention.hip
         LABELS "gpu2;rccl;rccl_2gpu" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 4
         LIBRARIES phaseshift_parallel phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_io phaseshift_gpu)
+    phaseshift_add_test(NAME test_qwen35_tp3_gdn SOURCE unit/test_qwen35_tp3_gdn.hip
+        LABELS "gpu2;rccl;rccl_2gpu" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 4
+        LIBRARIES phaseshift_parallel phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_io phaseshift_gpu)
 endif()
 
 # ---------------------------------------------------------------------------
