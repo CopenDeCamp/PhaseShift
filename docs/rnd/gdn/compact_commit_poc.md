@@ -72,17 +72,37 @@ compact log + conv で 40 MiB 級。full state snapshot の 2 GiB 級から大�
 - これにより full state snapshot（1.5 GiB guard）と rerun（22〜37 ms/round）の
   両方を置き換えられる可能性がある。
 
+## 本番 kernel への実装（2026-09-29）
+
+decode1 kernel（`phaseshift_qwen35_gdn_recurrence_wmma_decode1`）に compact log の
+optional spill を追加した。`GdnRecurrenceArgs` の `compact_delta` / `compact_k` /
+`compact_a` が非 null のとき、各行の `δ`（`s.delta`）、raw `k`、`a = dval` を書き出す。
+
+commit は decode1 と同一の state fragment / WMMA 順序を mirror する専用 kernel
+`phaseshift_qwen35_gdn_recurrence_wmma_commit` で行う。`S_0` に対し
+`S ← a_i·S + k_i·δ_i^T` を `compact_rows` 回適用する。
+
+検証 `tests/kernels/optimized/test_gdn_compact_log_commit.hip`（27B geometry、
+rows=16）:
+
+- sequential decode1 で各行を回して spill と参照軌跡を取得
+- 各 m で `S_0` から commit し、参照 `S_m` と比較
+- 結果: **全 m で bit-exact**
+
 ## 次の作業
 
 1. 本番 recurrence kernel に compact log の optional spill を追加する
-   （`dT` = `v_new`、raw `k`、per-row `a`）。
+   （`dT` = `v_new`、raw `k`、per-row `a`）。→ **完了**
 2. spill した log からの逐次 replay が、現行 history の full state と bit-exact かを確認。
+   → **完了**（decode1 経路）
 3. verify rows を増やして target parity を測る（`test_dflash2_ngram_tail_gate2`）。
+   decoder に compact commit 経路を env-gated で接続して A/B する。
 4. commit を次回 GDN kernel へ fusion できるか設計する（pending prefix commit）。
 
 ## 再現
 
 ```bash
-cmake --build build-gfx1201 --target test_gdn_compact_commit_poc
+cmake --build build-gfx1201 --target test_gdn_compact_commit_poc test_gdn_compact_log_commit
 HIP_VISIBLE_DEVICES=0 ./build-gfx1201/tests/test_gdn_compact_commit_poc
+HIP_VISIBLE_DEVICES=0 ./build-gfx1201/tests/test_gdn_compact_log_commit
 ```
