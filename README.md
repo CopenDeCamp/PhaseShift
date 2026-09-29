@@ -90,6 +90,12 @@ exact token match）。`PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` で build。
 - [docs/rnd/](docs/rnd/README.md) — 過去に何を試してどう判断したか
 - [docs/references/](docs/references/README.md) — 外部資料
 
+## Contributors
+
+- **jyohukuchan** — DFlash2 固定語彙 profile の pack / install tool、
+  INT2 coarse head の縮小語彙対応、host / GPU テストと利用文書の追加
+  （[docs/developer/dflash2.md](docs/developer/dflash2.md)）
+
 ## License
 
 MIT — [LICENSE](LICENSE)
