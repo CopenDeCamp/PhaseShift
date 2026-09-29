@@ -119,7 +119,7 @@ Result<uint32_t> parse_head_mode(const std::optional<std::string>& value) {
 
 Result<bool> parse_auto_mode(const std::optional<std::string>& value) {
     if (!value.has_value() || value->empty())
-        return true;
+        return false;
     if (*value == "0")
         return false;
     if (*value == "1")
@@ -150,6 +150,7 @@ Result<DraftVocabResolution> resolve_draft_vocab_profile(
         return mode_result.status();
     const uint32_t requested_mode = mode_result.release();
     const bool explicit_head = options.int2_head.has_value() && !options.int2_head->empty();
+    const bool explicit_auto = options.draft_vocab.has_value() && !options.draft_vocab->empty();
     auto auto_result = parse_auto_mode(options.draft_vocab);
     if (!auto_result.ok())
         return auto_result.status();
@@ -161,7 +162,7 @@ Result<DraftVocabResolution> resolve_draft_vocab_profile(
         return profile_error(
             "PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE conflicts with INT2_HEAD=0 or 2");
     }
-    if (has_explicit_file && !auto_enabled) {
+    if (has_explicit_file && explicit_auto && !auto_enabled) {
         return profile_error(
             "PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE conflicts with DRAFT_VOCAB=0");
     }

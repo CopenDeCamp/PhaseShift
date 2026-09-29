@@ -90,8 +90,12 @@ int main() {
         }
     };
 
-    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u), 1u, true),
-          "matched standard profile enables subset and INT2");
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u), 0u, false),
+          "unset DRAFT_VOCAB ignores standard profile");
+    DraftVocabResolveOptions auto_on;
+    auto_on.draft_vocab = "1";
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u, auto_on), 1u, true),
+          "DRAFT_VOCAB=1 enables matched standard profile");
     fs::remove(root / "dflash2-draft-vocab.u32");
     fs::remove(root / "dflash2-draft-vocab.json");
     check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u), 0u, false),
@@ -102,6 +106,10 @@ int main() {
           "HEAD=1 without profile keeps full INT2");
     write_bytes(root / "dflash2-draft-vocab.u32", payload);
     write_metadata(root / "dflash2-draft-vocab.json", payload, sha256_hex(tokenizer));
+    DraftVocabResolveOptions head1_only;
+    head1_only.int2_head = "1";
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u, head1_only), 1u, false),
+          "HEAD=1 alone keeps full INT2");
     DraftVocabResolveOptions head0;
     head0.int2_head = "0";
     check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u, head0), 0u, false),
@@ -115,6 +123,7 @@ int main() {
 
     DraftVocabResolveOptions head1;
     head1.int2_head = "1";
+    head1.draft_vocab = "1";
     check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u, head1), 1u, true),
           "HEAD=1 accepts matched profile");
     check(resolved(resolve_draft_vocab_profile(root.string(), 31u, 8u, head1), 1u, false),
@@ -131,6 +140,14 @@ int main() {
                                                draft_vocab_resolve_options_from_environment()),
                    1u, false),
           "environment DRAFT_VOCAB=0 disables automatic subset");
+    unsetenv("PHASESHIFT_DFLASH2_DRAFT_VOCAB");
+    unsetenv("PHASESHIFT_DFLASH2_INT2_HEAD");
+    setenv("PHASESHIFT_DFLASH2_DRAFT_VOCAB", "", 1);
+    setenv("PHASESHIFT_DFLASH2_INT2_HEAD", "1", 1);
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u,
+                                               draft_vocab_resolve_options_from_environment()),
+                   1u, false),
+          "empty environment DRAFT_VOCAB keeps full INT2");
     unsetenv("PHASESHIFT_DFLASH2_DRAFT_VOCAB");
     unsetenv("PHASESHIFT_DFLASH2_INT2_HEAD");
 
@@ -155,22 +172,30 @@ int main() {
           "explicit file conflicts with HEAD=2");
 
     fs::remove(root / "dflash2-draft-vocab.u32");
-    check(!resolve_draft_vocab_profile(root.string(), 32u, 8u).ok(),
-          "partial standard profile is an error");
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u), 0u, false),
+          "unset DRAFT_VOCAB ignores partial standard profile");
+    check(!resolve_draft_vocab_profile(root.string(), 32u, 8u, auto_on).ok(),
+          "DRAFT_VOCAB=1 rejects partial standard profile");
     write_bytes(root / "dflash2-draft-vocab.u32", payload);
     write_bytes(root / "dflash2-draft-vocab.json", std::vector<uint8_t>{'{', 'b', 'a', 'd'});
-    check(!resolve_draft_vocab_profile(root.string(), 32u, 8u).ok(),
-          "broken metadata is an error");
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u), 0u, false),
+          "unset DRAFT_VOCAB ignores broken metadata");
+    check(!resolve_draft_vocab_profile(root.string(), 32u, 8u, auto_on).ok(),
+          "DRAFT_VOCAB=1 rejects broken metadata");
     write_metadata(root / "dflash2-draft-vocab.json", payload, "00000000000000000000000000000000"
                    "00000000000000000000000000000000");
     check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u), 0u, false),
-          "tokenizer hash mismatch preserves legacy mode");
+          "unset DRAFT_VOCAB ignores incompatible tokenizer");
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u, auto_on), 0u, false),
+          "DRAFT_VOCAB=1 falls back on incompatible tokenizer");
     write_metadata(root / "dflash2-draft-vocab.json", payload, sha256_hex(tokenizer));
     std::vector<uint8_t> corrupt = payload;
     corrupt[0] ^= 1u;
     write_bytes(root / "dflash2-draft-vocab.u32", corrupt);
-    check(!resolve_draft_vocab_profile(root.string(), 32u, 8u).ok(),
-          "payload hash mismatch is an error");
+    check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u), 0u, false),
+          "unset DRAFT_VOCAB ignores corrupt payload");
+    check(!resolve_draft_vocab_profile(root.string(), 32u, 8u, auto_on).ok(),
+          "DRAFT_VOCAB=1 rejects corrupt payload");
 
     fs::remove_all(root, ec);
     return failures == 0 ? 0 : 1;

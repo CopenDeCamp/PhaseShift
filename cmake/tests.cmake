@@ -93,12 +93,10 @@ phaseshift_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABEL
 phaseshift_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_draft_vocab_profile SOURCE unit/test_dflash2_draft_vocab_profile.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-find_package(Python3 COMPONENTS Interpreter QUIET)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME test_prepare_draft_vocab
-        COMMAND ${Python3_EXECUTABLE} "${_PS_TESTS_ROOT}/unit/test_prepare_draft_vocab.py")
-    set_tests_properties(test_prepare_draft_vocab PROPERTIES LABELS "cpu;required" TIMEOUT 30)
-endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME test_prepare_draft_vocab
+    COMMAND ${Python3_EXECUTABLE} "${_PS_TESTS_ROOT}/unit/test_prepare_draft_vocab.py")
+set_tests_properties(test_prepare_draft_vocab PROPERTIES LABELS "cpu;required" TIMEOUT 30)
 phaseshift_add_test(NAME test_dflash2_quantization_adapter SOURCE unit/test_dflash2_quantization_adapter.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_quantizer_core)
 phaseshift_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)

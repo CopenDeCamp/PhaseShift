@@ -59,9 +59,10 @@ backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation は�
 `temperature > 0` / `grammar` / `structural_tag` / `prefix_cache_checkpoint_position`
 を含む request を fail-closed で拒否する。
 
-### 固定draft語彙の配置と既定動作
+### 固定draft語彙の配置と明示有効化
 
-対応する語彙profileをtarget modelへ配置すると、DFlash2はINT2＋固定語彙を既定で使う。
+固定語彙はopt-inであり、profileを配置しただけではDFlash2の既定動作を変えない。
+`PHASESHIFT_DFLASH2_DRAFT_VOCAB=1`を指定すると、対応する標準profileを検証してINT2＋固定語彙を使う。
 通常利用者はprofile配布物だけを用意し、SWE-chat等の生成元コーパスを取得する必要はない。
 配置にはPython 3の標準ライブラリだけを使い、推論時のPython依存は追加しない。
 
@@ -83,18 +84,21 @@ toolはmodel形状とtokenizerのtoken→ID対応を照合し、次の3ファイ
 - `DRAFT_VOCAB_NOTICE.txt`
 
 異なる既存内容を置き換える場合だけ`--overwrite`を指定する。同梱NOTICEは保持する。
-profileなしでは従来のfull PSQ8 headを使う。正常なprofileが別tokenizer/形状向けなら、
-理由をstderrへ示して従来経路を使う。片方だけのファイル、破損・不正なprofileはエラーになる。
+未指定時はprofileの有無・内容によらずfull PSQ8 headを使い、標準profileを読まない。
+明示有効化時にprofileがない、または正常だが別tokenizer/形状向けなら、理由をstderrへ示して
+従来経路を使う。明示有効化時の部分配置、破損・不正なprofileはエラーになる。
 
-比較・切戻しの指定:
+有効化と比較の指定:
 
 ```sh
+PHASESHIFT_DFLASH2_DRAFT_VOCAB=1 ./build-gfx1201/phaseshift-compute ...
+PHASESHIFT_DFLASH2_INT2_HEAD=1 ./build-gfx1201/phaseshift-compute ...
 PHASESHIFT_DFLASH2_INT2_HEAD=0 ./build-gfx1201/phaseshift-compute ...
-PHASESHIFT_DFLASH2_INT2_HEAD=1 PHASESHIFT_DFLASH2_DRAFT_VOCAB=0 \
-  ./build-gfx1201/phaseshift-compute ...
 ```
 
-前者はfull PSQ8、後者は全語彙INT2を選ぶ。通常の自動選択ではどちらの環境変数も不要。
+順に固定語彙INT2、全語彙INT2、full PSQ8を選ぶ。
+`INT2_HEAD=1`だけではprofile配置済みでも全語彙INT2を使う。
+`INT2_HEAD=0/2`は標準profileの有効化より優先する。
 明示的な独自語彙は`PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE`で指定でき、INT2経路を選ぶ。
 この明示ファイルと`INT2_HEAD=0/2`または`DRAFT_VOCAB=0`の同時指定はエラーになる。
 

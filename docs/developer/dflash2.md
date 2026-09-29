@@ -460,7 +460,7 @@ final_hidden の anchor row を除く draft row
 
 ### proposal head
 
-- full PSQ8（適合する固定語彙profileがない場合の既定）: `lm_head_logits()` が activation を e4m3 へ量子化し、PSQ8 W8A8 で
+- full PSQ8（既定）: `lm_head_logits()` が activation を e4m3 へ量子化し、PSQ8 W8A8 で
   `proposal_logits [draft_rows, vocab_size]` F32 を作る。
 - INT2 coarse + PSQ8 rerank（後述）: `int2_select_path()` が full logits を materialize
   せず、coarse Top-N と exact rerank で top-16 を作る。
@@ -528,7 +528,7 @@ token を host へ戻して次の position を決めたりしない。`draft_row
 proposer の full PSQ8 lm_head を、INT2 coarse 全語彙探索 → coarse Top-N → original PSQ8
 lm_head による candidate rerank → exact Top-16 に置き換える。target の lm_head と Verify は
 一切変更しない（DFlash proposal 専用の lossy head）。`PHASESHIFT_DFLASH2_INT2_HEAD`で
-明示選択できる。対応する固定語彙profileがある場合はINT2＋固定語彙を自動選択する。
+明示選択できる。固定語彙は`PHASESHIFT_DFLASH2_DRAFT_VOCAB=1`または明示FILEでのみ有効にする。
 
 data:
 
@@ -626,7 +626,7 @@ small Top-16 と remap:
 
 env:
 
-- `PHASESHIFT_DFLASH2_INT2_HEAD`（0 = full PSQ8、1 = INT2、2 = diag。未指定時は適合profileがあれば1、なければ0）
+- `PHASESHIFT_DFLASH2_INT2_HEAD`（0 = full PSQ8、1 = INT2、2 = diag。未指定時は0。明示した固定語彙が適合すれば1）
 - `PHASESHIFT_DFLASH2_DRAFT_RERANK`（pool。既定 32、[16, 128] に clamp）
 - `PHASESHIFT_DFLASH2_INT2_CODEBOOK`（`symmetric` で対称 codebook）
 - `PHASESHIFT_DFLASH2_INT2_DIAG` / `PHASESHIFT_DFLASH2_INT2_TIMING`（診断。既定 off）
@@ -644,10 +644,12 @@ metadataは`schema_version=phaseshift-dflash2-vocab-v1`、`profile_id`、
 件数は16の倍数、IDはtarget vocab内、件数はrerank pool以上である。
 未知schema、破損、部分配置、不正IDを黙って利用しない。
 
-未指定時に形状・payload hash・target tokenizer.jsonの実SHAが一致すれば、INT2＋固定語彙を使う。
-profileなし、または正常だが非適合なら、未指定時はfull PSQ8、明示mode 1なら全語彙INT2を維持する。
-明示mode 0/2は自動profileを使用しない。`PHASESHIFT_DFLASH2_DRAFT_VOCAB=0`は自動語彙選択を無効化する。
-明示`DRAFT_VOCAB_FILE`はraw ID列を受け付け、mode 1へ接続する。mode 0/2や語彙無効との競合は拒否する。
+固定語彙は既定off。`PHASESHIFT_DFLASH2_DRAFT_VOCAB`の未指定・空文字・0では標準profileを読まない。
+`INT2_HEAD=1`だけなら標準profileが配置済みでも全語彙INT2を使う。
+`DRAFT_VOCAB=1`を明示し、形状・payload hash・target tokenizer.jsonの実SHAが一致すれば、INT2＋固定語彙を使う。
+有効化時にprofileなし、または正常だが非適合なら、head未指定時はfull PSQ8、明示mode 1なら全語彙INT2を維持する。
+明示mode 0/2は標準profileより優先する。明示`DRAFT_VOCAB_FILE`はそれ自体がopt-inであり、
+raw ID列を受け付けmode 1へ接続する。FILEとmode 0/2または明示`DRAFT_VOCAB=0`の競合は拒否する。
 
 compact INT2 codesとscaleを元PSQ8の選択行から直接作る。codebookは全語彙PSQ8から導出し、
 coarseとTop-Nはlocal ID、rerankとCandidateSelectorはglobal IDを使う。Top-Nの直後にID mapで復元する。
@@ -927,8 +929,8 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 | `PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE` | 0 | 1 で base snapshot + full target rerun の参照 path |
 | `PHASESHIFT_DFLASH2_TOPK_REFERENCE` | 0 | 1 で reference top-k |
 | `PHASESHIFT_DFLASH2_ATTENTION_REFERENCE` | 0 | 1 で ring attention 参照実装 |
-| `PHASESHIFT_DFLASH2_INT2_HEAD` | 適合profileあり: 1、なし: 0 | 0でfull PSQ8、1でINT2、2でdiag |
-| `PHASESHIFT_DFLASH2_DRAFT_VOCAB` | 1 | 0で自動固定語彙を無効化 |
+| `PHASESHIFT_DFLASH2_INT2_HEAD` | 0 | 0でfull PSQ8、1でINT2、2でdiag。固定語彙の明示有効化時は未指定なら1 |
+| `PHASESHIFT_DFLASH2_DRAFT_VOCAB` | 0 | 1で標準固定語彙profileを検証して有効化 |
 | `PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE` | 未指定 | 独自のraw ID列を明示指定 |
 | `PHASESHIFT_DFLASH2_DRAFT_RERANK` | 32 | rerank pool（[16, 128] に clamp） |
 | `PHASESHIFT_DFLASH2_INT2_CODEBOOK` | lloyd | `symmetric` で対称 codebook |

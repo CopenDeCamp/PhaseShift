@@ -1,4 +1,4 @@
-# INT2と固定draft語彙の組合せ・既定選択
+# INT2と固定draft語彙の組合せ・opt-in採用
 
 2026-09-29、`1613544fa0f1ec96aae27298fa8ecb7bd11ce579` を基準に試作し、
 PR候補を上流 `80ef4bf` のradix selectorへ統合した。
@@ -7,8 +7,9 @@ PR候補を上流 `80ef4bf` のradix selectorへ統合した。
 
 ## 採用範囲
 
-対応する標準profileがtarget modelへ配置されている場合、INT2＋固定語彙を既定選択する。
-profileがないモデルは従来経路を使う。明示offを尊重し、壊れたprofileはエラーにする。
+固定語彙は明示opt-inに限定する。標準profileを配置するだけでは既定full PSQ8を変えない。
+`PHASESHIFT_DFLASH2_DRAFT_VOCAB=1`で有効化し、`INT2_HEAD=1`単独は全語彙INT2を選ぶ。
+有効化したprofileの破損はエラーにし、未指定時は標準profileを読まない。
 DFlash2自体の有効化、target head、Exact verifyは変更しない。
 
 選択行だけを元のPSQ8からINT2へpackする。codebookは従来と同じ全headから作り、
@@ -77,7 +78,7 @@ logits/scratchを含むarena内使用領域の寸法差は160.8916015625 MiB。
 compact coarseとfull INT2の対応行、PSQ8 rerankと別のfull-head GEMMの対応行は最大誤差0。
 短い3入力での確認であり、入力分布によって受理率や速度が悪化する可能性は残る。
 
-## 既定選択の確認
+## 初回PR headでの既定選択の確認
 
 - host resolver: 標準profile、自動/明示選択、欠落、非適合、破損、ID境界、env優先順位を確認。
 - pack/install: 異なるJSON表現の同じtoken→ID対応、異なるID対応、hash不整合、
@@ -88,7 +89,7 @@ compact coarseとfull INT2の対応行、PSQ8 rerankと別のfull-head GEMMの�
 
 これらは機能確認であり、追加の速度推定には使わない。広い入力分布での安定高速化の証明とは区別する。
 
-## 最新mainへの統合確認
+## 初回PR headのmain統合確認
 
 上流`80ef4bf`のradix Top-Nを維持し、compact語彙の寸法でscratchを確保するように統合した。
 radixと従来selectorの双方で、PSQ8 rerank前のglobal ID復元を確認した。
@@ -96,8 +97,42 @@ radixと従来selectorの双方で、PSQ8 rerank前のglobal ID復元を確認�
 - gfx1201 Release build、host resolver/installerのCTestを通過。
 - R9700でradix数値テストのCPU oracle対照432項目を通過。
 - 統合後もauto/full PSQ8/full INT2/明示combinedで32-token生成列が一致。
-- 自動radixと従来selectorの両方でcompact coarse/full INT2、rerank/full PSQ8 GEMMの対応行が誤差0。
+- pool32の既定selectorと明示した従来selectorでcompact coarse/full INT2、rerank/full PSQ8 GEMMの対応行が誤差0。
+  pool32の既定は従来selectorであり、当時の実モデル確認を強制radixの確認とは扱わない。
 - serve-stdioは自動選択で4 tokenを生成し、stdoutはJSONのみ。
 
 テストrunnerのUUID解釈で別GPUが選ばれたため、radixテストはR9700のUUIDを指定した直接実行で確認した。
 今回の生成速度の値は性能推定に使わず、先行PoCの数値とも混ぜない。
+
+## 効果と限界：現行main基準のオーナー計測
+
+[PR #2のオーナー検証](https://github.com/CopenDeCamp/PhaseShift/pull/2#issuecomment-5885750908)による結果。
+対象は初回head `6535261`、R9700/gfx1201、device 1、Release、ROCm 10.0.0（オーナー報告値）。
+greedy、drafts 7、最大256 token、arena 26 GiB、max_seq_len 4096。
+A→B→C、C→B→A、A→C→Bの順序で3 rep測定し、最大spreadは0.86%。
+この表はオーナーの測定を帰属付きで記録したもので、投稿者のROCm 7.14環境での再測定ではない。
+
+Aは現行main既定の全語彙PSQ8、Bは固定語彙98,304のINT2、Cは全語彙INT2。
+初回headではBがprofile配置時に自動選択されたが、今回の修正後は`DRAFT_VOCAB=1`を必要とする。
+Cは修正後、profile配置済みでも`INT2_HEAD=1`だけで選択できる。
+
+| 入力 | A tok/s | B tok/s | C tok/s | B−A | rounds A/B/C | 語彙外率 |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| prose | 58.33 | 60.66 | 59.30 | +3.99% | 94/94/95 | 0.8% |
+| code（fibonacci） | 154.49 | 128.06 | 158.30 | −17.11% | 36/45/36 | 5.9% |
+| math | 138.04 | 143.52 | 141.64 | +3.97% | 40/40/40 | — |
+| japanese | 81.18 | 84.40 | 83.21 | +3.97% | 68/68/68 | 0.0% |
+| symbols | 112.42 | 116.88 | 115.34 | +3.97% | 49/49/49 | — |
+| code2（LRUCache） | 107.49 | 111.86 | 110.35 | +4.07% | 21/21/21 | 0.0% |
+| rare（独文＋数値） | 80.18 | 75.59 | 83.22 | −5.72% | 69/76/68 | 10.9% |
+
+7入力の幾何平均はBがA比−0.72%、Cが+2.61%。生成列は全入力・全条件で一致した。
+arena usedはB−Aが+153.6 MiB、C−Bが+156.7 MiB。required acceptanceは128/128 PASS、skipなし。
+
+原因は固定集合のcoverage不足による受理率低下という構造的な制約である。draft処理自体は16〜34%短縮したが、
+fibonacciでは平均受理数が6.083→4.667、roundsが36→45へ増えた。
+draft時間187.0→157.0 msの短縮をverify時間1441.6→1800.5 msの増加が上回った。
+これは速度の単発外れ値として除外しない。coverageを保つ入力では約4%改善するが、入力非依存の既定化を支持しない。
+
+この結果とユーザー指示に基づき、固定語彙の自動既定適用を撤回しopt-inへ変更する。
+語彙拡大・coverage測定・受理率低下時の全語彙fallbackは別の検討課題とし、本変更には追加しない。

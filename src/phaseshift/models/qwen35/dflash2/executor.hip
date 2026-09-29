@@ -222,60 +222,6 @@ __global__ void dflash2_remap_draft_vocab_ids_kernel(
         ids[index] = -1;
 }
 
-__global__ void dflash2_gather_pack_int2_rows_kernel(
-    const uint8_t* source_codes,
-    const uint8_t* source_scales,
-    const int32_t* selected_ids,
-    const uint8_t* map_table,
-    uint8_t* reduced_codes,
-    uint8_t* reduced_scales,
-    uint32_t selected_rows,
-    uint32_t k_padded,
-    uint32_t source_code_stride,
-    uint32_t source_scale_stride,
-    uint32_t reduced_code_stride,
-    uint32_t reduced_scale_stride) {
-    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= selected_rows)
-        return;
-    const uint32_t source_row = static_cast<uint32_t>(selected_ids[row]);
-    const uint32_t blocks_k = k_padded >> 5u;
-    const uint8_t* source_row_base =
-        source_codes + static_cast<std::size_t>(source_row >> 4u) * source_code_stride +
-        static_cast<std::size_t>(source_row & 15u) * 16u;
-    uint8_t* reduced_row_base =
-        reduced_codes + static_cast<std::size_t>(row >> 4u) * reduced_code_stride +
-        static_cast<std::size_t>(row & 15u) * 4u;
-    for (uint32_t ib = 0u; ib < blocks_k; ++ib) {
-        const uint8_t* source_block = source_row_base + static_cast<std::size_t>(ib) * 512u;
-        uint8_t* reduced_block = reduced_row_base + static_cast<std::size_t>(ib) * 128u;
-        for (uint32_t half = 0u; half < 2u; ++half) {
-            for (uint32_t kg = 0u; kg < 2u; ++kg) {
-                const uint8_t* source_half = source_block + half * 256u + kg * 8u;
-                uint8_t packed0 = 0u;
-                uint8_t packed1 = 0u;
-                #pragma unroll
-                for (uint32_t q4 = 0u; q4 < 4u; ++q4) {
-                    packed0 = static_cast<uint8_t>(packed0 |
-                        (map_table[source_half[q4]] << (2u * q4)));
-                    packed1 = static_cast<uint8_t>(packed1 |
-                        (map_table[source_half[q4 + 4u]] << (2u * q4)));
-                }
-                reduced_block[half * 64u + kg * 2u] = packed0;
-                reduced_block[half * 64u + kg * 2u + 1u] = packed1;
-            }
-        }
-        const uint16_t* source_scale = reinterpret_cast<const uint16_t*>(
-            source_scales + static_cast<std::size_t>(source_row >> 4u) * source_scale_stride +
-            static_cast<std::size_t>(source_row & 15u) * 2u);
-        uint16_t* reduced_scale = reinterpret_cast<uint16_t*>(
-            reduced_scales + static_cast<std::size_t>(row >> 4u) * reduced_scale_stride +
-            static_cast<std::size_t>(row & 15u) * 2u);
-        reduced_scale[static_cast<std::size_t>(ib) * 16u] =
-            source_scale[static_cast<std::size_t>(ib) * 16u];
-    }
-}
-
 uint32_t int2_pool_env(uint32_t max_pool) {
     const char* env = std::getenv("PHASESHIFT_DFLASH2_DRAFT_RERANK");
     uint32_t pool = 32u;
@@ -558,7 +504,6 @@ Result<DFlash2Executor> create_dflash2_executor(
     ex.config = &config;
     ex.weights = &weights;
     ex.target_lm_head = exec_config.target_lm_head;
-    ex.target_embed_tokens = exec_config.target_embed_tokens;
     ex.max_rows = exec_config.max_rows;
     ex.max_context_rows = exec_config.max_context_rows != 0u ? exec_config.max_context_rows
                                                              : exec_config.max_rows;
@@ -876,13 +821,12 @@ Result<DFlash2Executor> create_dflash2_executor(
         (void)hipEventRecord(int2_ev1, nullptr);
         if (reduced_vocab) {
             const dim3 pack_blocks((vocab + 255u) / 256u);
-            dflash2_gather_pack_int2_rows_kernel<<<pack_blocks, 256u, 0, nullptr>>>(
+            herr = ps::kernel::launch_dflash2_gather_pack_int2_rows(
                 head.codes.data<uint8_t>(), head.scales.data<uint8_t>(),
                 ex.draft_vocab_ids_device.data<int32_t>(), ex.int2_tables.data<uint8_t>(),
                 ex.int2_codes.data<uint8_t>(), ex.int2_vocab_scales.data<uint8_t>(), vocab,
                 k_padded, head.codes_row_stride_bytes, head.storage_scale_stride_bytes,
-                k_padded * 4u, head.storage_scale_stride_bytes);
-            herr = hipGetLastError();
+                k_padded * 4u, head.storage_scale_stride_bytes, nullptr);
         } else {
             herr = ps::kernel::launch_dflash2_int2_pack(
                 head.codes.data<uint8_t>(), ex.int2_tables.data<uint8_t>(),
