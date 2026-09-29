@@ -191,6 +191,15 @@ layout を使わなければならず、`PagedKVPool::create` の
 などの logical batch metadata は全 rank で同一にし、
 local layer range / local state index のみ rank 固有にする。
 
+weight のロードは次の通り。
+
+- tensor parallel の rank は `Qwen35LoadOptions::tensor_shard` で
+  自分に割り当たった分だけ `GpuArena` に載せる
+- pipeline parallel の stage は現在 **両方とも full model をロードする**。
+  `ModelPartition` は lowering が組む Program の範囲だけを切り、
+  weight の読み込み範囲は切り分けていない。つまり PP2 はまだ
+  VRAM を分散していない。
+
 ## Tensor Parallel の weight shard
 
 `include/phaseshift/weights/matrix_shard.h`
@@ -300,11 +309,14 @@ shard 対象は次。
 
 ## tensor parallel の対象を layer 種別で切り分ける
 
-`Qwen35LowerOptions` / `ExecutorConfig` の `tp_full_attention` と
-`tp_linear_attention` で、standard attention と GDN を独立に有効化する。
-`false` の層は config の head 数のまま扱われ、AllReduce も置かれない。
+`Qwen35LowerOptions` / `ExecutorConfig` の `tp_full_attention`、
+`tp_linear_attention`、`tp_mlp` で、standard attention / GDN / MLP を
+独立に有効化する。`false` の層は config の head 数のまま扱われ、
+AllReduce も置かれない。
 
-MLP の tensor parallel はまだ有効化していない。
+MLP は `intermediate_size` を tp で割り、`down_proj` の後に
+`COMM_ALL_REDUCE` を置く。`intermediate_size % tp_size == 0` を
+geometry 検証で要求する。
 
 ## Program の collective
 

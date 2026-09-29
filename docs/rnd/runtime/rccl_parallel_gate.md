@@ -413,10 +413,13 @@ bytes が3回の計測で完全に同一であること、理論値と一致す�
 
 ## 未解決
 
-- Gate PP2（stage-local weight / state の割当）
-- Gate TP4（MLP の TP 化、全 layer の TP 化と collective 数の照合、
-  optimized path の `kv_head_offset` 対応）
-- Gate C1 / C2（PP2 × TP2）
-- Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
-- Gate C1 / C2（PP2 × TP2）
-- Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
+- Gate PP2（stage-local weight / state の割当）。現状は PP2 の各 stage が
+  full model をロードしており、VRAM 分散が効いていない
+- optimized path の `kv_head_offset` 対応。`kv_append_dispatch.hip` /
+  `paged_attention_dispatch.hip` が受け取らないため、tensor parallel の実行は
+  `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` 固定のまま
+- PSQ4 / PSQ8 の quantized weight shard。quant scale group の境界と
+  shard 境界の一致を pack format の実装を読んでから決める
+- 本番 model（Qwen3.8-27B-PSQ）での Gate P0 計測と VRAM/GPU の report。
+  external model が要る
+- Row / GDN の AllReduce を FP32 partial にして bit exact にするかの判断
