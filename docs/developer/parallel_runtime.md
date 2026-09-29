@@ -293,20 +293,36 @@ KV pool はまだ **full の head 数**を確保している（Gate §28 の
 - `DispatchBinding::kv_head_offset` = pool 内の開始 head
 - `local + offset <= pool kv_heads` を検証し、越えていれば `INVALID_BINDING`
 
-`exec_kv_append` と `exec_paged_attention` は pool の layout（`blocks_per_token`、
-`elems_per_token` 等）を full の `kv_heads` で計算したまま、head の開始位置だけ
-offset をずらす。入力側は local head 番号をそのまま使う。
+correctness の `exec_kv_append` / `exec_paged_attention` も、optimized の
+`kv_append.hip` / `paged_decode.hip` / `paged_prefill.hip` も、pool の layout
+（`blocks_per_token`、`elems_per_token`、scale index）は pool 全体の head 数で
+計算したまま、head の開始位置だけ offset をずらす。
+入力側と grid は local head 番号をそのまま使う。
 
-GQA の group 比は `num_q / local_kv_heads` で計算する。pool の head 数では
+GQA の group 比は `num_q / local_kv_heads` で計算する。pool の head 数で
 計算すると rank ごとに group が変わり head 対応がずれる。
 
-optimized path（`kv_append_dispatch.hip` / `paged_attention_dispatch.hip`）は
-まだ offset を受け取っていないため、tensor parallel の実行は
-`PHASESHIFT_QWEN35_KERNEL_MODE=correctness` を前提にしている。
+optimized path は args 構造体で local と pool を分けて持つ。
+
+- `KvAppendCommonArgs` / `PagedAttentionCommonArgs` は
+  `kv_heads`（local）・`pool_kv_heads`・`kv_head_offset` を持つ
+- grid 分割・GQA 比・scratch サイズ・入力 index は `kv_heads`（local）
+- `blocks_per_token`・scale index・pool への `head_off` は
+  `pool_kv_heads` と `kv_head_offset`
+
+`kv_append_dispatch.hip` / `paged_attention_dispatch.hip` は
+`DispatchBinding::kv_heads` と `kv_head_offset` を受け取り、
+`local + offset <= pool kv_heads` と
+`feature_count == local_kv_heads * head_dim` を検証してから args を組む。
+
+`PagedAttentionCommonArgs` は `PagedAttentionBf16Args` /
+`PagedAttentionSplitArgs` / `PagedAttentionSplitReduceArgs` の先頭フィールドに
+なっているため、フィールドを増やすと後続の `static_assert` の offset も
+合わせて変える。
 
 ## GDN の tensor parallel
 
-`GdnStatePoolLayout::from_text_config(tc, tensor_parallel)` が
+`GdnStatePoolLayout::from_text_config(tc, tensor_parallel, layer_begin, layer_end)` が
 local な head 幾何で state pool を作る。`create_model_executor` の幾何検証も
 同じ引数で計算するため、両者が一致しなければ起動時に失敗する。
 

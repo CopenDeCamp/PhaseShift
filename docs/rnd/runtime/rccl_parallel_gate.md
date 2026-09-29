@@ -213,9 +213,6 @@ FP32 partial を出す launcher が要る。次 Gate で判断する。
 - PP2 の E2E 一致確認（harness 修正後の再実行）
 - Gate PP2（stage-local weight / state の割当）
 - Gate TP1-TP4（Column/Row Parallel LINEAR、Attention、GDN、全 layer）
-- Gate C1 / C2 の後、optimized path（`kv_append_dispatch.hip` /
-  `paged_attention_dispatch.hip` の `kv_head_offset` 対応）を外して
-  `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` 依存を解消する
 - 本番 model での Gate P0 計測（external model が要る）
 - Row / GDN の AllReduce を FP32 partial にして bit exact にするかの判断
 
@@ -473,6 +470,48 @@ bytes が3回の計測で完全に同一であること、理論値と一致す�
 - **この数値は synthetic model の相対比較であり、本番 performance ではない。**
   本番 model（Qwen3.8-27B-PSQ）での計測は external model が要るため未実施。
 
+## optimized attention kernel の kv head offset 対応
+
+tensor parallel の実行はこれまで `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` で
+固定していた。`kv_append_dispatch.hip` / `paged_attention_dispatch.hip` が
+`features != kv_heads*head_dim` で reject するためである。
+
+optimized 側も `DispatchBinding::kv_heads`（local）と `kv_head_offset` を
+受け取るようにし、args 構造体に `pool_kv_heads` と `kv_head_offset` を追加した。
+
+使い分けは次のようにする。
+
+- grid 分割・GQA 比・scratch サイズ・入力 index → `kv_heads`（local）
+- `blocks_per_token`・scale index・pool への `head_off` → `pool_kv_heads` と offset
+
+修正箇所は次のとおり。
+
+- `paged_decode.hip`: `head_off` 3 箇所、scale layer/page base、
+  `si`、`blocks_per_token` 2 箇所、`token_block_base` 4 箇所
+- `paged_prefill.hip`: `head_off` 2 箇所、`blocks_per_token` 2 箇所、
+  `token_block_base` 2 箇所、scale layer/page base、`sa_idx` / `sb_idx`
+- `kv_append.hip`: scale index 3 箇所
+
+`PagedAttentionCommonArgs` にフィールドを増やしたため、
+`PagedAttentionBf16Args` / `PagedAttentionSplitArgs` /
+`PagedAttentionSplitReduceArgs` の `static_assert` offset を全て更新した
+（`CommonArgs` はこれらの先頭フィールドなので後続の offset がずれる）。
+
+### 結果
+
+TP 系 test 4 件から `correctness` 固定を外し、`Auto` mode で再実行した。
+
+```text
+test_qwen35_tp2_attention   PASS   max_abs/scale=0.00436681
+test_qwen35_tp3_gdn         PASS
+test_qwen35_tp4_e2e         PASS
+test_qwen35_pp2_tp2_e2e     PASS
+```
+
+`tp2_attention` の logits 誤差は correctness mode と**完全に同一値**
+（0.00436681）で、optimized kernel と correctness kernel が同じ結果を返す。
+required 129/129、rccl_2gpu 6/6、rccl_4gpu 2/2、multi_gpu 1/1 も PASS。
+
 ## 現在への影響
 
 - parallel runtime の contract は `docs/developer/parallel_runtime.md`。
@@ -482,9 +521,6 @@ bytes が3回の計測で完全に同一であること、理論値と一致す�
 
 ## 未解決
 
-- optimized path の `kv_head_offset` 対応。`kv_append_dispatch.hip` /
-  `paged_attention_dispatch.hip` が受け取らないため、tensor parallel の実行は
-  `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` 固定のまま
 - PSQ4 / PSQ8 の quantized weight shard。quant scale group の境界と
   shard 境界の一致を pack format の実装を読んでから決める
 - 本番 model（Qwen3.8-27B-PSQ）での Gate P0 計測と VRAM/GPU の report。
