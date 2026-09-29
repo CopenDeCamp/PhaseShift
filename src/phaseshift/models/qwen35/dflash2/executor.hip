@@ -820,7 +820,6 @@ Result<DFlash2Executor> create_dflash2_executor(
         }
         (void)hipEventRecord(int2_ev1, nullptr);
         if (reduced_vocab) {
-            const dim3 pack_blocks((vocab + 255u) / 256u);
             herr = ps::kernel::launch_dflash2_gather_pack_int2_rows(
                 head.codes.data<uint8_t>(), head.scales.data<uint8_t>(),
                 ex.draft_vocab_ids_device.data<int32_t>(), ex.int2_tables.data<uint8_t>(),

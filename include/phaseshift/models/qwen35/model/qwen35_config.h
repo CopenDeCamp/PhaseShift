@@ -31,12 +31,14 @@ struct Qwen35TextConfig {
     float rope_theta = 10000000.0f;
     float partial_rotary_factor = 0.25f;
 
-    bool tie_word_embeddings = true;
+    bool tie_word_embeddings = false;
 
     std::vector<int> layer_types;
 };
 
 Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir);
+
+Result<bool> read_qwen35_tie_word_embeddings(const std::string& model_dir);
 
 }
 }

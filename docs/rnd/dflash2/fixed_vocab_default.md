@@ -136,3 +136,17 @@ draft時間187.0→157.0 msの短縮をverify時間1441.6→1800.5 msの増加�
 
 この結果とユーザー指示に基づき、固定語彙の自動既定適用を撤回しopt-inへ変更する。
 語彙拡大・coverage測定・受理率低下時の全語彙fallbackは別の検討課題とし、本変更には追加しない。
+
+## opt-in修正後の確認
+
+上流`378b61b`もmergeし、CMakeのprofile / installer / config tieテスト登録を維持した。
+投稿者のR9700/gfx1201、ROCm 7.14で変更に対応するfocused検証を実施した。
+
+- host resolver / installer / 最新mainのconfig tieテスト: 3件PASS。
+- INT2 pack 524項目、coarse head 15項目、radix Top-N 432項目: PASS。
+- profile配置済みで、既定full PSQ8・HEAD1単独・標準profile opt-in・FILE・強制radix opt-inの5モードで8-token生成列一致。
+- 固定語彙の従来selector / 強制radixの双方でcoarse対応行とPSQ8 rerankの誤差0、global ID所属チェックPASS。
+- serve-stdioの既定 / opt-in双方で4-token生成列一致、stdoutがJSONのみであることを確認。
+
+これらは数値・機能確認であり、追加の性能推定には使わない。
+オーナーの128/128 required PASSは初回head `6535261`の結果であり、更新headで全requiredを再実行したとは扱わない。

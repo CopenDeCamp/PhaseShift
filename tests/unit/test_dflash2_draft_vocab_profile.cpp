@@ -112,10 +112,12 @@ int main() {
           "HEAD=1 alone keeps full INT2");
     DraftVocabResolveOptions head0;
     head0.int2_head = "0";
+    head0.draft_vocab = "1";
     check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u, head0), 0u, false),
           "HEAD=0 ignores automatic profile");
     DraftVocabResolveOptions head2;
     head2.int2_head = "2";
+    head2.draft_vocab = "1";
     check(resolved(resolve_draft_vocab_profile(root.string(), 32u, 8u, head2), 2u, false),
           "HEAD=2 ignores automatic profile");
     check(resolved(resolve_draft_vocab_profile(root.string(), 31u, 8u), 0u, false),

@@ -5,6 +5,47 @@
 namespace ps {
 namespace qwen35 {
 
+namespace {
+
+bool tie_word_embeddings_from_json(const nlohmann::json& root) {
+    if (root.contains("tie_word_embeddings") && root["tie_word_embeddings"].is_boolean()) {
+        return root["tie_word_embeddings"].get<bool>();
+    }
+    if (root.contains("text_config") && root["text_config"].is_object()) {
+        const nlohmann::json& t = root["text_config"];
+        if (t.contains("tie_word_embeddings") && t["tie_word_embeddings"].is_boolean()) {
+            return t["tie_word_embeddings"].get<bool>();
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+Result<bool> read_qwen35_tie_word_embeddings(const std::string& model_dir) {
+    const std::string path = model_dir + "/config.json";
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        return Status::invalid_argument(
+            "read_qwen35_tie_word_embeddings: cannot open config.json", __FILE__, __LINE__);
+    }
+
+    nlohmann::json root;
+    try {
+        f >> root;
+    } catch (const nlohmann::json::exception& e) {
+        return Status::invalid_argument(
+            ("read_qwen35_tie_word_embeddings: bad config.json: " + std::string(e.what())).c_str(),
+            __FILE__, __LINE__);
+    }
+    if (!root.is_object()) {
+        return Status::invalid_argument(
+            "read_qwen35_tie_word_embeddings: config.json is not an object",
+            __FILE__, __LINE__);
+    }
+    return tie_word_embeddings_from_json(root);
+}
+
 Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
     std::string path = model_dir + "/config.json";
     std::ifstream f(path);
@@ -71,9 +112,7 @@ Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
         }
     }
 
-    if (root.contains("tie_word_embeddings") && root["tie_word_embeddings"].is_boolean()) {
-        cfg.tie_word_embeddings = root["tie_word_embeddings"].get<bool>();
-    }
+    cfg.tie_word_embeddings = tie_word_embeddings_from_json(root);
 
     if (t.contains("layer_types") && t["layer_types"].is_array()) {
         cfg.layer_types.reserve(t["layer_types"].size());
