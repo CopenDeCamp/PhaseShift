@@ -34,6 +34,8 @@ struct SyntheticRunOptions {
     std::vector<uint32_t> hidden_taps;
     std::vector<int32_t>* shared_tokens = nullptr;
     std::barrier<>* step_barrier = nullptr;
+    bool read_shared_tokens = false;
+    bool publish_shared_tokens = false;
     uint32_t tensor_parallel_size = 1;
     uint32_t tensor_parallel_rank = 0;
     bool tp_full_attention = true;
@@ -200,15 +202,14 @@ private:
         if (!ok) return;
 
         for (uint32_t step = 0; step < options.decode_steps; ++step) {
-            int32_t token = 0;
-            if (options.shared_tokens != nullptr) {
-                if (step >= options.shared_tokens->size()) {
+            int32_t token = sampled;
+            if (options.read_shared_tokens) {
+                if (options.shared_tokens == nullptr ||
+                    step >= options.shared_tokens->size()) {
                     result.error = "coordinator token was not produced";
                     return;
                 }
                 token = (*options.shared_tokens)[step];
-            } else {
-                token = sampled;
             }
             std::vector<int32_t> token_ids = {token};
             ok = run_step(token_ids, 1, ::ps::runtime::ExecutionClass::DECODE, options,
@@ -220,7 +221,7 @@ private:
     }
 
     void finish_step(const SyntheticRunOptions& options, int32_t sampled, bool ok) {
-        if (ok && options.sample && options.shared_tokens != nullptr)
+        if (ok && options.publish_shared_tokens && options.shared_tokens != nullptr)
             options.shared_tokens->push_back(sampled);
         arrive(options);
     }

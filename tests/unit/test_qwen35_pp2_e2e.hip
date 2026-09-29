@@ -147,6 +147,7 @@ int main() {
     stage0_options.hidden_taps = taps;
     stage0_options.shared_tokens = &shared_tokens;
     stage0_options.step_barrier = &step_barrier;
+    stage0_options.read_shared_tokens = true;
 
     ps::test::SyntheticRunOptions stage1_options;
     stage1_options.model_dir = model_dir;
@@ -158,6 +159,7 @@ int main() {
     stage1_options.sample = true;
     stage1_options.shared_tokens = &shared_tokens;
     stage1_options.step_barrier = &step_barrier;
+    stage1_options.publish_shared_tokens = true;
 
     ps::test::SyntheticRunResult stage0_result;
     ps::test::SyntheticRunResult stage1_result;
