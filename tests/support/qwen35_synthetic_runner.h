@@ -34,6 +34,9 @@ struct SyntheticRunOptions {
     std::vector<uint32_t> hidden_taps;
     std::vector<int32_t>* shared_tokens = nullptr;
     std::barrier<>* step_barrier = nullptr;
+    uint32_t tensor_parallel_size = 1;
+    uint32_t tensor_parallel_rank = 0;
+    ::ps::qwen35::Qwen35TensorShard tensor_shard;
     uint64_t arena_bytes = 512ull * 1024ull * 1024ull;
 };
 
@@ -90,8 +93,10 @@ private:
         }
         arena_ = std::make_unique<::ps::gpu::GpuArena>(arena_result.release());
 
+        ::ps::qwen35::Qwen35LoadOptions load_options;
+        load_options.tensor_shard = options.tensor_shard;
         auto model_result = ::ps::qwen35::Qwen35Model::load_from_safetensors(
-            options.model_dir, *arena_, stream_);
+            options.model_dir, *arena_, stream_, load_options);
         if (!model_result.ok()) {
             result.error = message("load model", model_result.status());
             return false;
@@ -136,6 +141,8 @@ private:
         config.backend = ::ps::qwen35::runtime::DecodeBackend::Host;
         config.partition = options.partition;
         config.pipeline_peer_rank = options.pipeline_peer_rank;
+        config.tensor_parallel_size = options.tensor_parallel_size;
+        config.tensor_parallel_rank = options.tensor_parallel_rank;
         for (uint32_t i = 0; i < options.hidden_taps.size() && i < max_taps; ++i)
             config.target_hidden_taps[i] = options.hidden_taps[i];
         config.target_hidden_tap_count =
