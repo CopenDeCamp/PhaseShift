@@ -527,8 +527,8 @@ token を host へ戻して次の position を決めたりしない。`draft_row
 
 proposer の full PSQ8 lm_head を、INT2 coarse 全語彙探索 → coarse Top-N → original PSQ8
 lm_head による candidate rerank → exact Top-16 に置き換える。target の lm_head と Verify は
-一切変更しない（DFlash proposal 専用の lossy head）。`PHASESHIFT_DFLASH2_INT2_HEAD` で
-有効化する（既定 0 = full PSQ8）。
+一切変更しない（DFlash proposal 専用の lossy head）。`PHASESHIFT_DFLASH2_INT2_HEAD`で
+明示選択できる。固定語彙は`PHASESHIFT_DFLASH2_DRAFT_VOCAB=1`または明示FILEでのみ有効にする。
 
 data:
 
@@ -626,11 +626,51 @@ small Top-16 と remap:
 
 env:
 
-- `PHASESHIFT_DFLASH2_INT2_HEAD`（0 = full PSQ8、1 = INT2、2 = diag。既定 0）
+- `PHASESHIFT_DFLASH2_INT2_HEAD`（0 = full PSQ8、1 = INT2、2 = diag。未指定時は0。明示した固定語彙が適合すれば1）
 - `PHASESHIFT_DFLASH2_DRAFT_RERANK`（pool。既定 32、[16, 128] に clamp）
 - `PHASESHIFT_DFLASH2_INT2_CODEBOOK`（`symmetric` で対称 codebook）
 - `PHASESHIFT_DFLASH2_INT2_DIAG` / `PHASESHIFT_DFLASH2_INT2_TIMING`（診断。既定 off）
 - INT2 有効時も target-only / Verify は INT2 コードパスを通らない。
+
+### 固定語彙profile
+
+one-shotとserve-stdioの両方で、target model directoryの`dflash2-draft-vocab.json`と
+`dflash2-draft-vocab.u32`を解決する。resolverはGPU allocationを行わず、選択したpathと
+INT2 modeを`DFlash2ExecutorConfig`へ渡す。診断はstderrへ出し、serveのJSON stdoutを汚さない。
+
+metadataは`schema_version=phaseshift-dflash2-vocab-v1`、`profile_id`、
+`vocab_file=dflash2-draft-vocab.u32`、`vocab_count`、`target_vocab_size`、`target_hidden_size`、
+`vocab_sha256`、`tokenizer_sha256`を持つ。payloadはlittle-endian uint32の昇順・重複なしID列で、
+件数は16の倍数、IDはtarget vocab内、件数はrerank pool以上である。
+未知schema、破損、部分配置、不正IDを黙って利用しない。
+
+固定語彙は既定off。`PHASESHIFT_DFLASH2_DRAFT_VOCAB`の未指定・空文字・0では標準profileを読まない。
+`INT2_HEAD=1`だけなら標準profileが配置済みでも全語彙INT2を使う。
+`DRAFT_VOCAB=1`を明示し、形状・payload hash・target tokenizer.jsonの実SHAが一致すれば、INT2＋固定語彙を使う。
+有効化時にprofileなし、または正常だが非適合なら、head未指定時はfull PSQ8、明示mode 1なら全語彙INT2を維持する。
+明示mode 0/2は標準profileより優先する。明示`DRAFT_VOCAB_FILE`はそれ自体がopt-inであり、
+raw ID列を受け付けmode 1へ接続する。FILEとmode 0/2または明示`DRAFT_VOCAB=0`の競合は拒否する。
+
+compact INT2 codesとscaleを元PSQ8の選択行から直接作る。codebookは全語彙PSQ8から導出し、
+coarseとTop-Nはlocal ID、rerankとCandidateSelectorはglobal IDを使う。Top-Nの直後にID mapで復元する。
+縮小PSQ8行列は持たない。`PHASESHIFT_DFLASH2_DRAFT_VOCAB_CHECK=1`は明示診断としてfull INT2/PSQ8
+対照へ照合し、追加buffer・同期・D2Hを伴うため性能測定では無効にする。
+
+profile作成者は、検証済みID列とtokenizerから配布用directoryを作れる。
+
+```sh
+python3 tools/quantization/prepare_draft_vocab.py pack \
+  --vocab-file /path/to/selected-ids.u32 --tokenizer /path/to/tokenizer.json \
+  --profile-id qwen3.8-27b-98304-v1 --model-vocab-size 248320 --hidden-size 5120 \
+  --source-manifest-sha256 <manifest-sha256> \
+  --notice docs/references/qwen38-draft-vocab-notice.txt --output-dir /path/to/new-bundle
+```
+
+packはコーパスからIDを選ぶtoolではない。集計レシピで作ったID列を包み、生成元NOTICEを付ける。
+installは`tokenizer_vocab_sha256`により表現形式に依存しないtoken→ID対応を確認し、配置先の
+`tokenizer_sha256`へmetadataを結び直す。token map digestはmodel.vocabとadded_tokensを統合し、
+`(id, UTF-8 token bytes)`順に`u32le(id) || u32le(byte length) || token bytes`をSHA-256へ入力する。
+推論時はtokenizerをPythonで処理せず、配置済みmetadataと実ファイルのSHAを照合する。
 
 ---
 
@@ -889,7 +929,9 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 | `PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE` | 0 | 1 で base snapshot + full target rerun の参照 path |
 | `PHASESHIFT_DFLASH2_TOPK_REFERENCE` | 0 | 1 で reference top-k |
 | `PHASESHIFT_DFLASH2_ATTENTION_REFERENCE` | 0 | 1 で ring attention 参照実装 |
-| `PHASESHIFT_DFLASH2_INT2_HEAD` | 0 | 1 で INT2 coarse head、2 で diag |
+| `PHASESHIFT_DFLASH2_INT2_HEAD` | 0 | 0でfull PSQ8、1でINT2、2でdiag。固定語彙の明示有効化時は未指定なら1 |
+| `PHASESHIFT_DFLASH2_DRAFT_VOCAB` | 0 | 1で標準固定語彙profileを検証して有効化 |
+| `PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE` | 未指定 | 独自のraw ID列を明示指定 |
 | `PHASESHIFT_DFLASH2_DRAFT_RERANK` | 32 | rerank pool（[16, 128] に clamp） |
 | `PHASESHIFT_DFLASH2_INT2_CODEBOOK` | lloyd | `symmetric` で対称 codebook |
 | `PHASESHIFT_DFLASH2_INT2_DIAG` | off | INT2 診断出力 |

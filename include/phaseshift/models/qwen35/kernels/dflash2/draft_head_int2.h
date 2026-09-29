@@ -66,6 +66,21 @@ hipError_t launch_dflash2_int2_pack(
     uint32_t k_padded,
     hipStream_t stream);
 
+hipError_t launch_dflash2_gather_pack_int2_rows(
+    const uint8_t* source_codes,
+    const uint8_t* source_scales,
+    const int32_t* selected_ids,
+    const uint8_t* map_table,
+    uint8_t* reduced_codes,
+    uint8_t* reduced_scales,
+    uint32_t selected_rows,
+    uint32_t k_padded,
+    uint32_t source_code_stride,
+    uint32_t source_scale_stride,
+    uint32_t reduced_code_stride,
+    uint32_t reduced_scale_stride,
+    hipStream_t stream);
+
 hipError_t launch_dflash2_int2_coarse_head(
     const uint8_t* int2_codes,
     const uint8_t* weight_scales,

@@ -207,6 +207,60 @@ __global__ void int2_pack_kernel(
     }
 }
 
+__global__ void dflash2_gather_pack_int2_rows_kernel(
+    const uint8_t* source_codes,
+    const uint8_t* source_scales,
+    const int32_t* selected_ids,
+    const uint8_t* map_table,
+    uint8_t* reduced_codes,
+    uint8_t* reduced_scales,
+    uint32_t selected_rows,
+    uint32_t k_padded,
+    uint32_t source_code_stride,
+    uint32_t source_scale_stride,
+    uint32_t reduced_code_stride,
+    uint32_t reduced_scale_stride) {
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= selected_rows)
+        return;
+    const uint32_t source_row = static_cast<uint32_t>(selected_ids[row]);
+    const uint32_t blocks_k = k_padded >> 5u;
+    const uint8_t* source_row_base =
+        source_codes + static_cast<std::size_t>(source_row >> 4u) * source_code_stride +
+        static_cast<std::size_t>(source_row & 15u) * 16u;
+    uint8_t* reduced_row_base =
+        reduced_codes + static_cast<std::size_t>(row >> 4u) * reduced_code_stride +
+        static_cast<std::size_t>(row & 15u) * 4u;
+    for (uint32_t ib = 0u; ib < blocks_k; ++ib) {
+        const uint8_t* source_block = source_row_base + static_cast<std::size_t>(ib) * 512u;
+        uint8_t* reduced_block = reduced_row_base + static_cast<std::size_t>(ib) * 128u;
+        for (uint32_t half = 0u; half < 2u; ++half) {
+            for (uint32_t kg = 0u; kg < 2u; ++kg) {
+                const uint8_t* source_half = source_block + half * 256u + kg * 8u;
+                uint8_t packed0 = 0u;
+                uint8_t packed1 = 0u;
+                #pragma unroll
+                for (uint32_t q4 = 0u; q4 < 4u; ++q4) {
+                    packed0 = static_cast<uint8_t>(packed0 |
+                        (map_table[source_half[q4]] << (2u * q4)));
+                    packed1 = static_cast<uint8_t>(packed1 |
+                        (map_table[source_half[q4 + 4u]] << (2u * q4)));
+                }
+                reduced_block[half * 64u + kg * 2u] = packed0;
+                reduced_block[half * 64u + kg * 2u + 1u] = packed1;
+            }
+        }
+        const uint16_t* source_scale = reinterpret_cast<const uint16_t*>(
+            source_scales + static_cast<std::size_t>(source_row >> 4u) * source_scale_stride +
+            static_cast<std::size_t>(source_row & 15u) * 2u);
+        uint16_t* reduced_scale = reinterpret_cast<uint16_t*>(
+            reduced_scales + static_cast<std::size_t>(row >> 4u) * reduced_scale_stride +
+            static_cast<std::size_t>(row & 15u) * 2u);
+        reduced_scale[static_cast<std::size_t>(ib) * 16u] =
+            source_scale[static_cast<std::size_t>(ib) * 16u];
+    }
+}
+
 __global__ void __launch_bounds__(kCoarseHeadThreads) int2_coarse_head_kernel(
     const uint8_t* __restrict__ int2_codes,
     const uint8_t* __restrict__ weight_scales,
@@ -720,6 +774,34 @@ hipError_t launch_dflash2_int2_pack(
     const uint32_t blocks = (total + threads - 1u) / threads;
     int2_pack_kernel<<<blocks, threads, 0, stream>>>(psq8_codes, map_table, int2_codes, rows,
                                                      k_padded);
+    return hipGetLastError();
+}
+
+hipError_t launch_dflash2_gather_pack_int2_rows(
+    const uint8_t* source_codes,
+    const uint8_t* source_scales,
+    const int32_t* selected_ids,
+    const uint8_t* map_table,
+    uint8_t* reduced_codes,
+    uint8_t* reduced_scales,
+    uint32_t selected_rows,
+    uint32_t k_padded,
+    uint32_t source_code_stride,
+    uint32_t source_scale_stride,
+    uint32_t reduced_code_stride,
+    uint32_t reduced_scale_stride,
+    hipStream_t stream) {
+    if (source_codes == nullptr || source_scales == nullptr || selected_ids == nullptr ||
+        map_table == nullptr || reduced_codes == nullptr || reduced_scales == nullptr)
+        return hipErrorInvalidValue;
+    if (selected_rows == 0u || k_padded == 0u || (k_padded & 31u) != 0u)
+        return hipErrorInvalidValue;
+    const uint32_t threads = 256u;
+    const uint32_t blocks = (selected_rows + threads - 1u) / threads;
+    dflash2_gather_pack_int2_rows_kernel<<<blocks, threads, 0, stream>>>(
+        source_codes, source_scales, selected_ids, map_table, reduced_codes, reduced_scales,
+        selected_rows, k_padded, source_code_stride, source_scale_stride, reduced_code_stride,
+        reduced_scale_stride);
     return hipGetLastError();
 }
 
