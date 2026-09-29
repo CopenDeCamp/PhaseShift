@@ -352,42 +352,62 @@ GDN history mode では 1.5 GiB guard（rows ≤ 10）により wide rows をそ
 有効化できる**（本節の旧値は破棄のまま）。`PHASESHIFT_GDN_RECURRENCE_EXACT=1` は parity には
 不要である。
 
-### 6.3 性能（parity が成立する C8 のみ有効）
+### 6.3 性能（R64 修正後の全 matrix）
 
-paired median（A に対する tok/s 比）:
+§3.8 / §3.9 の修正後、`A / B / C8 / C16 / C32` を 6 workload × 5 sample で再測定した
+（`artifacts/ngram_tail_gate2/wide_tail/`、parity **174/174**、failed=0。T=16/32 を含む）。
 
-| workload | B vs A | **C8 vs A** | E_ratio (C8/A) | L_ratio (C8/A) | break-even |
-| --- | --- | --- | --- | --- | --- |
-| code PP512 | -0.13% | **-3.02%** | 1.010 | 1.041 | 否 |
-| code PP2048 | -0.11% | **-5.50%** | 1.159 | 1.226 | 否 |
-| **json PP512** | -0.04% | **+5.84%** | 1.227 | 1.160 | **成立** |
-| json PP2048 | -0.11% | **-9.70%** | 1.017 | 1.126 | 否 |
-| prose PP2048 | -0.08% | **-0.32%** | 1.105 | 1.108 | 否 |
-| reasoning PP2048 | -0.06% | **-7.00%** | 1.143 | 1.229 | 否 |
+paired median（A に対する tok/s 比、n=5）:
 
-`E_ratio > L_ratio` が break-even の必要条件（§47）で、json PP512 のみ成立し、
-実測 tok/s も一致して増加している。
+| workload | B | C8 | C16 | C32 |
+| --- | --- | --- | --- | --- |
+| code PP512 | -0.08% | -2.69% | -3.39% | -4.87% |
+| code PP2048 | -0.12% | -5.47% | -9.95% | -16.69% |
+| **json PP512** | -0.10% | **+5.94%** | **+0.42%** | -4.28% |
+| json PP2048 | -0.08% | -9.75% | -11.54% | -15.89% |
+| prose PP2048 | -0.09% | -0.32% | -1.72% | -4.13% |
+| reasoning PP2048 | -0.08% | -6.98% | -9.02% | -14.85% |
 
-baseline B は全 workload で A と ±0.13% 以内 → **proposal D2H（seed wait）は
+break-even（`E_ratio > L_ratio`、§47）は json PP512 の C8（1.227 > 1.159）と C16
+（1.241 > 1.236）でのみ成立する。C16 の実測は +0.42% とほぼ横ばい、C32 は
+E_ratio 1.286 < L_ratio 1.343 で不成立。
+
+⇒ **tail を伸ばすほど verify 幅（`rows/round`）と rerun prefix のコストが受容増を
+上回る。** T=8 が最良で、T=16 は json PP512 でかろうじて横ばい、T=32 は全 workload で
+悪化する。Gate 1 が示した「tail 32 まで伸ばす」価値は、この corpus では確認できない。
+
+baseline B は全 workload で A と ±0.12% 以内 → **proposal D2H（seed wait）は
 コストとして観測されない**。先に stream を sync しているだけであり、
 decision sync の時間と相殺される。
 
-内訳（median tok/s、mean/round）:
+主要内訳（median tok/s、mean/round）:
 
-| workload | config | tok/s | E/round | tail acc/round | tail acc/reached | hit/round | reach/round | rows/round | round_ms | verify_gpu_ms | rerun_ms |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| code PP512 | A | 70.78 | 5.059 | 0.000 | — | — | — | 8.0 | 71.97 | 41.16 | 23.89 |
-| code PP512 | C8 | 68.36 | 5.110 | 0.060 | 1.500 | 0.060 | 0.040 | 8.4 | 75.14 | 41.88 | 26.13 |
-| code PP2048 | A | 111.65 | 7.000 | 0.000 | — | — | — | 8.0 | 62.73 | 42.00 | 12.51 |
-| code PP2048 | C8 | 105.48 | 8.111 | 1.317 | 4.611 | 0.365 | 0.286 | 10.8 | 76.88 | 45.63 | 22.85 |
-| **json PP512** | A | 65.03 | 4.731 | 0.000 | — | — | — | 8.0 | 72.75 | 40.89 | 24.98 |
-| **json PP512** | C8 | **68.88** | **5.807** | **1.534** | 5.870 | 0.489 | 0.261 | 11.7 | 84.34 | 45.20 | 32.08 |
-| json PP2048 | A | 56.00 | 4.294 | 0.000 | — | — | — | 8.0 | 76.69 | 41.95 | 26.54 |
-| json PP2048 | C8 | 50.49 | 4.368 | 0.248 | 1.812 | 0.179 | 0.137 | 9.4 | 86.64 | 43.82 | 34.48 |
-| prose PP2048 | A | 57.07 | 4.405 | 0.000 | — | — | — | 8.0 | 77.20 | 41.96 | 27.04 |
-| prose PP2048 | C8 | 56.90 | 4.867 | 0.790 | 5.188 | 0.219 | 0.152 | 9.7 | 85.57 | 44.16 | 33.07 |
-| reasoning PP2048 | A | 67.19 | 4.913 | 0.000 | — | — | — | 7.9 | 73.15 | 41.92 | 23.03 |
-| reasoning PP2048 | C8 | 62.49 | 5.615 | 0.879 | 3.333 | 0.473 | 0.264 | 11.7 | 89.87 | 46.67 | 34.86 |
+| workload | config | tok/s | E/round | tail acc/round | rows/round | round_ms | verify_gpu_ms | rerun_ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| code PP512 | A | 70.76 | 5.059 | 0.000 | 8.0 | 71.50 | 40.90 | 23.76 |
+| code PP512 | C8 | 68.85 | 5.110 | 0.060 | 8.4 | 74.21 | 41.42 | 25.85 |
+| code PP512 | C16 | 68.36 | 5.110 | 0.060 | 8.9 | 74.75 | 41.95 | 25.86 |
+| code PP512 | C32 | 67.32 | 5.110 | 0.060 | 9.6 | 75.91 | 43.10 | 25.88 |
+| code PP2048 | A | 111.50 | 7.000 | 0.000 | 8.0 | 62.77 | 42.04 | 12.53 |
+| code PP2048 | C8 | 105.40 | 8.111 | 1.317 | 10.8 | 76.95 | 45.69 | 22.88 |
+| code PP2048 | C16 | 100.40 | 8.517 | 1.700 | 14.2 | 84.81 | 50.13 | 26.28 |
+| code PP2048 | C32 | 92.89 | 8.810 | 2.052 | 19.1 | 94.85 | 59.51 | 26.91 |
+| **json PP512** | A | 64.96 | 4.731 | 0.000 | 8.0 | 72.84 | 40.95 | 25.03 |
+| **json PP512** | **C8** | **68.82** | **5.807** | **1.534** | 11.7 | 84.38 | 45.24 | 32.12 |
+| json PP512 | C16 | 65.24 | 5.874 | 1.667 | 14.1 | 90.03 | 48.25 | 34.74 |
+| json PP512 | C32 | 62.17 | 6.083 | 1.940 | 17.5 | 97.84 | 54.06 | 36.73 |
+| json PP2048 | A | 55.94 | 4.294 | 0.000 | 8.0 | 76.76 | 41.99 | 26.58 |
+| json PP2048 | C8 | 50.48 | 4.368 | 0.248 | 9.4 | 86.50 | 43.76 | 34.44 |
+| json PP2048 | C16 | 49.49 | 4.368 | 0.248 | 10.7 | 88.26 | 45.49 | 34.47 |
+| json PP2048 | C32 | 47.05 | 4.368 | 0.248 | 13.1 | 92.83 | 50.01 | 34.52 |
+| prose PP2048 | A | 57.00 | 4.405 | 0.000 | 8.0 | 77.28 | 42.01 | 27.09 |
+| prose PP2048 | C8 | 56.82 | 4.867 | 0.790 | 9.7 | 85.64 | 44.20 | 33.12 |
+| prose PP2048 | C16 | 56.02 | 5.059 | 1.149 | 11.2 | 90.31 | 46.14 | 35.82 |
+| prose PP2048 | C32 | 54.65 | 5.162 | 1.333 | 12.9 | 94.45 | 49.42 | 36.68 |
+| reasoning PP2048 | A | 67.08 | 4.913 | 0.000 | 7.9 | 73.25 | 41.99 | 23.08 |
+| reasoning PP2048 | C8 | 62.40 | 5.615 | 0.879 | 11.7 | 89.99 | 46.73 | 34.93 |
+| reasoning PP2048 | C16 | 61.03 | 5.874 | 1.299 | 14.8 | 96.24 | 51.02 | 36.85 |
+| reasoning PP2048 | C32 | 57.12 | 5.874 | 1.299 | 18.5 | 102.82 | 57.54 | 36.92 |
 
 CPU Ngram lookup は 1 round あたり 0.001〜0.003 ms（linear scan）で無視できる。
 `ngram_seed_wait_ms` は B と同水準（6.0〜7.4 ms/round）で、A の decision sync と相殺される。
@@ -398,7 +418,7 @@ CPU Ngram lookup は 1 round あたり 0.001〜0.003 ms（linear scan）で無�
 primary 終了後に n=8 で json PP512 のみ追加測定（`artifacts/ngram_tail_gate2/secondary_n8/`）。
 
 - parity 12/12
-- paired median **+6.76%**（n=5 の +5.84% より良い）
+- paired median **+6.76%**（n=5 の +5.94% より良い）
 - E/round 5.742（A 4.731）、round_ms 82.73（A 72.74）、tail acc/round 1.427、hit 0.348
 
 ### 6.5 GDN recurrence exact のコスト（参考計測）
@@ -451,20 +471,20 @@ recurrence コストは verify の **+約 7 ms/round（+17%）**である。pref
 
 §55 の条件を json PP512 で満たす。
 
-- correctness: Gate 2A PASS、A / B / C8 は全 30 run で target parity 100%
-- candidate tok/s ≥ baseline + 2%: **C8 = +5.84%**（n=8 で +6.76%）paired median
+- correctness: Gate 2 の T = 8 / 16 / 32 を含む全 run で target parity 100%
+  （wide-tail 再測定 174/174）
+- candidate tok/s ≥ baseline + 2%: **C8 = +5.94%**（n=8 で +6.76%）paired median
 - `tail_accepted_per_round` = 1.534 > 0
 - +5% 以上 → **strong direct GO**
 
 ただし次の 2 点がこの GO の範囲を狭める。
 
-1. **GO は json PP512 のみ**。残り 5 workload は -0.32% 〜 -9.70% で、
+1. **GO は json PP512 のみ**。残り 5 workload は -0.32% 〜 -9.75% で、
    `E_ratio > L_ratio` を満たさない。反復構造が強い workload 限定の GO である。
-2. **T = 16 / 32 は測定不能（hard stop）**。verify rows > 16 の R64 bucket で
-   target parity が崩れるため、§54 に従い性能値を破棄した。
-   Gate 1 が示した「tail 32 まで伸ばす」価値は、この gap が解消するまで検証できない。
-   → **2026-09-29 解消**（§3.9 / §6.2 追記）。既定 lossy のまま C16 / C32 が parity に
-   合格し、T = 16 / 32 の性能値を再測定できる。再測定は未実施。
+2. **tail を伸ばしても改善しない**。R64 gap 解消（§3.8 / §3.9）後に T = 16 / 32 を
+   再測定した結果、json PP512 の C16 は +0.42% とほぼ横ばい、C32 は -4.28%。
+   他 workload は T が伸びるほど悪化する（§6.3）。**T = 8 が最良**であり、
+   Gate 1 が示した「tail 32 まで伸ばす」価値はこの corpus では確認できない。
 
 NO-GO 条件（§57）には該当しない（json PP512 で改善があり、
 `emitted_per_round` gain は +21〜23%）。
@@ -493,11 +513,12 @@ C8 では tail 受容分だけ rerun prefix が長くなる）。
    scope は `docs/rnd/mtp/optimization_history.md` §7.64 / §7.65 の続編として
    verify role の exact 保証を R64 bucket まで広げること。
    → **2026-09-29 解消**（§3.8 / §3.9）。bf16 GEMM exact rows を 64 へ拡張し、
-   attention split partials を 32 MiB へ拡張する。既定 lossy のままで parity が成立し、
-   T = 16 / 32 の性能再測定は次の作業。
+   attention split partials を 32 MiB へ拡張する。既定 lossy のままで parity が成立。
+   → **wide-tail 再測定完了**（§6.3、parity 174/174）。結論は **T = 8 が最良**で、
+   T = 16 / 32 は改善しない。
 2. **json PP512（反復構造）を対象に Gate 3（production 統合）へ進む**。
    推奨 parameter は `DFlash2 K=7 + NgramTail T=8 / n=5`（n=8 も候補）、window 2048、
-   Exact、`PHASESHIFT_TARGET_LM_HEAD_PROXY=0` のまま。
+   Exact、`PHASESHIFT_TARGET_LM_HEAD_PROXY=0` のまま。T = 16 以上は採用しない。
 3. **composite seed の改善を検討する**（次 Gate）。K を減らす（K=3 + T=16 のような構成）と
    seed に committed token が混じって hit が増えるが、`E/round` が下がるトレードオフが
    ある。Gate 2A の `k3_t4`（json PP512 で hit 29/61 round、tail 81 token）は有望。
@@ -515,6 +536,7 @@ C8 では tail 受容分だけ rerun prefix が長くなる）。
 | `raw_perf.csv` | Gate 2B 主要 matrix（150 run、TG512 × 5 sample × 5 config × 6 workload） |
 | `aggregate_perf.csv` | config 別集計（median tok/s、E/round、tail 指標、rows、ms） |
 | `secondary_n8/` | json PP512 の n=8 追加測定 |
+| `wide_tail/` | R64 修正後の再測定（A / B / C8 / C16 / C32、150 run、parity 174/174） |
 | `diag_rows/` | rows 閾値切り分け（A / C8 / C9 / C16） |
 | `diag_history/` | GDN history guard の確認（rows=23 が 1.5 GiB guard で reject） |
 
