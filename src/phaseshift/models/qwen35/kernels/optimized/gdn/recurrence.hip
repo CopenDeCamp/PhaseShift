@@ -789,14 +789,18 @@ void phaseshift_qwen35_gdn_recurrence_wmma_decode1(GdnRecurrenceArgs a) {
     if (a.compact_delta != nullptr) {
         const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
         const uint64_t qkdim = static_cast<uint64_t>(a.key_heads) * hd;
+        const uint64_t base = static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
         for (uint32_t v = tid; v < g::kWv; ++v)
-            a.compact_delta[static_cast<size_t>(row) * vdim +
+            a.compact_delta[base + static_cast<size_t>(row) * vdim +
                             static_cast<size_t>(v_head) * hv + v0 + v] = s.delta[v];
         if (tid == 0u && a.compact_a != nullptr)
-            a.compact_a[static_cast<size_t>(row) * a.num_v_heads + v_head] = dval;
+            a.compact_a[static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride +
+                        static_cast<size_t>(row) * a.num_v_heads + v_head] = dval;
         if (a.compact_k != nullptr) {
+            const uint64_t kbase =
+                static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride;
             for (uint32_t d = tid; d < hd; d += g::kWthreads)
-                a.compact_k[static_cast<size_t>(row) * qkdim +
+                a.compact_k[kbase + static_cast<size_t>(row) * qkdim +
                             static_cast<size_t>(qk_head) * hd + d] =
                     a.k[static_cast<size_t>(row) * a.k_row_stride +
                         static_cast<size_t>(qk_head) * hd + d];
@@ -839,75 +843,81 @@ void phaseshift_qwen35_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
     const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
     const uint64_t qkdim = static_cast<uint64_t>(a.key_heads) * hd;
 
-    float* state_head = a.recurrent_state
-        + static_cast<uint64_t>(slot) * a.recurrent_slot_stride
-        + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
-        + static_cast<uint64_t>(v_head) * hd * hv;
-
     const uint32_t kt0 = (warp >> 1u) * 2u;
     const uint32_t vt0 = (warp & 1u) * 2u;
-
-    f32x8_t Sacc[4];
-    #pragma unroll
-    for (uint32_t ki = 0; ki < 2u; ++ki)
-        #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-            const uint32_t n0 = (vt0 + vj) * 16u + lo;
-            const float* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e)
-                Sacc[ki * 2u + vj][e] = sp[static_cast<size_t>(e) * hv];
-        }
-
     const uint32_t row_begin = req.row_begin;
-    for (uint32_t i = 0u; i < a.compact_rows; ++i) {
-        const uint32_t row = row_begin + i;
-        const float egv = a.compact_a[static_cast<size_t>(row) * a.num_v_heads +
-                                      static_cast<size_t>(v_head)];
+
+    for (uint32_t li = 0u; li < a.num_gdn_states; ++li) {
+        float* state_head = a.recurrent_state
+            + static_cast<uint64_t>(slot) * a.recurrent_slot_stride
+            + static_cast<uint64_t>(li) * a.recurrent_layer_stride
+            + static_cast<uint64_t>(v_head) * hd * hv;
+        const uint64_t dbase = static_cast<uint64_t>(li) * a.compact_delta_layer_stride;
+        const uint64_t kbase = static_cast<uint64_t>(li) * a.compact_k_layer_stride;
+        const uint64_t abase = static_cast<uint64_t>(li) * a.compact_a_layer_stride;
+
+        f32x8_t Sacc[4];
         #pragma unroll
-        for (uint32_t t = 0; t < 4u; ++t)
-            #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] *= egv;
-        #pragma unroll
-        for (uint32_t tstep = 0; tstep < g::kWt / 16u; ++tstep) {
-            Frag2 bv[2];
+        for (uint32_t ki = 0; ki < 2u; ++ki)
             #pragma unroll
             for (uint32_t vj = 0; vj < 2u; ++vj) {
-                float dtmp[8] = {};
-                if (tstep == 0u && kh == 0u)
-                    dtmp[0] = a.compact_delta[
-                        static_cast<size_t>(row) * vdim + static_cast<size_t>(v_head) * hv +
-                        v0 + (vt0 + vj) * 16u + lo];
-                bv[vj] = g::gdn_decomp8<kLossy>(dtmp);
-            }
-            #pragma unroll
-            for (uint32_t ki = 0; ki < 2u; ++ki) {
-                float ktmp[8] = {};
-                if (tstep == 0u && kh == 0u)
-                    ktmp[0] = a.compact_k[
-                        static_cast<size_t>(row) * qkdim + static_cast<size_t>(qk_head) * hd +
-                        (kt0 + ki) * 16u + lo];
-                const Frag2 akT = g::gdn_decomp8<kLossy>(ktmp);
+                const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
+                const uint32_t n0 = (vt0 + vj) * 16u + lo;
+                const float* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
                 #pragma unroll
-                for (uint32_t vj = 0; vj < 2u; ++vj)
-                    Sacc[ki * 2u + vj] =
-                        g::gdn_wmma2<kLossy>(Sacc[ki * 2u + vj], akT, bv[vj]);
+                for (uint32_t e = 0; e < 8u; ++e)
+                    Sacc[ki * 2u + vj][e] = sp[static_cast<size_t>(e) * hv];
+            }
+
+        for (uint32_t i = 0u; i < a.compact_rows; ++i) {
+            const uint32_t row = row_begin + i;
+            const float egv =
+                a.compact_a[abase + static_cast<size_t>(row) * a.num_v_heads +
+                            static_cast<size_t>(v_head)];
+            #pragma unroll
+            for (uint32_t t = 0; t < 4u; ++t)
+                #pragma unroll
+                for (uint32_t e = 0; e < 8u; ++e) Sacc[t][e] *= egv;
+            #pragma unroll
+            for (uint32_t tstep = 0; tstep < g::kWt / 16u; ++tstep) {
+                Frag2 bv[2];
+                #pragma unroll
+                for (uint32_t vj = 0; vj < 2u; ++vj) {
+                    float dtmp[8] = {};
+                    if (tstep == 0u && kh == 0u)
+                        dtmp[0] = a.compact_delta[
+                            dbase + static_cast<size_t>(row) * vdim +
+                            static_cast<size_t>(v_head) * hv + v0 + (vt0 + vj) * 16u + lo];
+                    bv[vj] = g::gdn_decomp8<kLossy>(dtmp);
+                }
+                #pragma unroll
+                for (uint32_t ki = 0; ki < 2u; ++ki) {
+                    float ktmp[8] = {};
+                    if (tstep == 0u && kh == 0u)
+                        ktmp[0] = a.compact_k[
+                            kbase + static_cast<size_t>(row) * qkdim +
+                            static_cast<size_t>(qk_head) * hd + (kt0 + ki) * 16u + lo];
+                    const Frag2 akT = g::gdn_decomp8<kLossy>(ktmp);
+                    #pragma unroll
+                    for (uint32_t vj = 0; vj < 2u; ++vj)
+                        Sacc[ki * 2u + vj] =
+                            g::gdn_wmma2<kLossy>(Sacc[ki * 2u + vj], akT, bv[vj]);
+                }
             }
         }
-    }
 
-    #pragma unroll
-    for (uint32_t ki = 0; ki < 2u; ++ki)
         #pragma unroll
-        for (uint32_t vj = 0; vj < 2u; ++vj) {
-            const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
-            const uint32_t n0 = (vt0 + vj) * 16u + lo;
-            float* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
+        for (uint32_t ki = 0; ki < 2u; ++ki)
             #pragma unroll
-            for (uint32_t e = 0; e < 8u; ++e)
-                sp[static_cast<size_t>(e) * hv] = Sacc[ki * 2u + vj][e];
-        }
+            for (uint32_t vj = 0; vj < 2u; ++vj) {
+                const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
+                const uint32_t n0 = (vt0 + vj) * 16u + lo;
+                float* sp = state_head + static_cast<size_t>(m0) * hv + v0 + n0;
+                #pragma unroll
+                for (uint32_t e = 0; e < 8u; ++e)
+                    sp[static_cast<size_t>(e) * hv] = Sacc[ki * 2u + vj][e];
+            }
+    }
 }
 
 template <uint32_t kRows>
@@ -1125,6 +1135,29 @@ gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
             }
         }
 
+        if (a.compact_delta != nullptr) {
+            const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
+            const uint64_t qkdim = static_cast<uint64_t>(a.key_heads) * hd;
+            const uint64_t dbase =
+                static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
+            const uint64_t abase =
+                static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride;
+            const uint64_t kbase =
+                static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride;
+            for (uint32_t v = tid; v < g::kWv; ++v)
+                a.compact_delta[dbase + static_cast<size_t>(row) * vdim +
+                                static_cast<size_t>(v_head) * hv + v0 + v] = s.delta[v];
+            if (tid == 0u && a.compact_a != nullptr)
+                a.compact_a[abase + static_cast<size_t>(row) * a.num_v_heads + v_head] = dval;
+            if (a.compact_k != nullptr) {
+                for (uint32_t d = tid; d < hd; d += g::kWthreads)
+                    a.compact_k[kbase + static_cast<size_t>(row) * qkdim +
+                                static_cast<size_t>(qk_head) * hd + d] =
+                        a.k[static_cast<size_t>(row) * a.k_row_stride +
+                            static_cast<size_t>(qk_head) * hd + d];
+            }
+        }
+
         if (hist_head != nullptr) {
             #pragma unroll
             for (uint32_t ki = 0; ki < 2u; ++ki)
@@ -1301,9 +1334,13 @@ hipError_t launch_gdn_recurrence_f32_wmma_commit(
     const GdnRecurrenceArgs& args, hipStream_t stream) {
     if (!gdn_recurrence_commit_supported(args)) return hipErrorNotSupported;
     if (args.num_requests == 0u || args.compact_rows == 0u) return hipErrorInvalidValue;
+    if (args.num_gdn_states == 0u) return hipErrorInvalidValue;
     if (args.recurrent_state == nullptr || args.requests == nullptr)
         return hipErrorInvalidValue;
     if (args.compact_delta == nullptr || args.compact_k == nullptr || args.compact_a == nullptr)
+        return hipErrorInvalidValue;
+    if (args.compact_delta_layer_stride == 0u || args.compact_k_layer_stride == 0u ||
+        args.compact_a_layer_stride == 0u)
         return hipErrorInvalidValue;
     const uint32_t vgroups = args.head_v / gdngfx12::kWv;
     const uint64_t grid_x = static_cast<uint64_t>(args.num_requests) * args.num_v_heads * vgroups;

@@ -56,6 +56,9 @@ struct GdnRecurrenceArgs {
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;
+    uint64_t compact_delta_layer_stride = 0;
+    uint64_t compact_k_layer_stride = 0;
+    uint64_t compact_a_layer_stride = 0;
     uint32_t compact_rows = 0;
 };
 

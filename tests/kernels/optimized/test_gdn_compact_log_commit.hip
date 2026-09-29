@@ -47,6 +47,7 @@ constexpr uint32_t kHeads = 48u;
 constexpr uint32_t kHeadK = 128u;
 constexpr uint32_t kHeadV = 128u;
 constexpr uint32_t kRows = 16u;
+constexpr uint32_t kStates = 2u;
 constexpr uint32_t kQk = kKeyHeads * kHeadK;
 constexpr uint32_t kVdim = kHeads * kHeadV;
 constexpr uint64_t kSlotStride = (uint64_t)kHeads * kHeadK * kHeadV;
@@ -84,11 +85,13 @@ bool setup(Buf& d, uint32_t seed) {
     if (hipMalloc(&d.b, g_bytes) != hipSuccess) return false;
     if (hipMalloc(&d.dt_bias, kHeads * 2u) != hipSuccess) return false;
     if (hipMalloc(&d.a_log, kHeads * 2u) != hipSuccess) return false;
-    if (hipMalloc(&d.state, kSlotStride * 4u) != hipSuccess) return false;
+    if (hipMalloc(&d.state, kStates * kSlotStride * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.out, (size_t)kRows * kVdim * 4u) != hipSuccess) return false;
-    if (hipMalloc(&d.compact_delta, (size_t)kRows * kVdim * 4u) != hipSuccess) return false;
-    if (hipMalloc(&d.compact_k, (size_t)kRows * kQk * 4u) != hipSuccess) return false;
-    if (hipMalloc(&d.compact_a, (size_t)kRows * kHeads * 4u) != hipSuccess) return false;
+    if (hipMalloc(&d.compact_delta, (size_t)kStates * kRows * kVdim * 4u) != hipSuccess)
+        return false;
+    if (hipMalloc(&d.compact_k, (size_t)kStates * kRows * kQk * 4u) != hipSuccess) return false;
+    if (hipMalloc(&d.compact_a, (size_t)kStates * kRows * kHeads * 4u) != hipSuccess)
+        return false;
     if (hipMalloc(&d.requests, sizeof(::ps::runtime::DeviceRequestDescriptor)) != hipSuccess)
         return false;
 
@@ -103,7 +106,7 @@ bool setup(Buf& d, uint32_t seed) {
     for (uint16_t& x : hb) x = bf16_of(rndf(s) * 0.5f);
     for (uint16_t& x : hdt) x = bf16_of(rndf(s) * 0.5f);
     for (uint16_t& x : hal) x = bf16_of(rndf(s) * 0.5f);
-    std::vector<float> hs(kSlotStride);
+    std::vector<float> hs((size_t)kStates * kSlotStride);
     for (float& x : hs) x = rndf(s) * 0.25f;
 
     if (hipMemcpy(d.q, hq.data(), hq.size() * 4u, hipMemcpyHostToDevice) != hipSuccess ||
@@ -145,16 +148,19 @@ bool setup(Buf& d, uint32_t seed) {
     a.output_row_stride = kVdim;
     a.state_index = 0u;
     a.max_sequences = 1u;
-    a.num_gdn_states = 1u;
+    a.num_gdn_states = kStates;
     a.key_heads = kKeyHeads;
     a.num_v_heads = kHeads;
     a.head_k = kHeadK;
     a.head_v = kHeadV;
-    a.recurrent_slot_stride = kSlotStride;
+    a.recurrent_slot_stride = (uint64_t)kStates * kSlotStride;
     a.recurrent_layer_stride = kSlotStride;
     a.compact_delta = d.compact_delta;
     a.compact_k = d.compact_k;
     a.compact_a = d.compact_a;
+    a.compact_delta_layer_stride = (uint64_t)kRows * kVdim;
+    a.compact_k_layer_stride = (uint64_t)kRows * kQk;
+    a.compact_a_layer_stride = (uint64_t)kRows * kHeads;
     return a;
 }
 
@@ -197,20 +203,23 @@ int main() {
         return 1;
     }
 
-    std::vector<float> s0(kSlotStride);
+    const size_t state_n = (size_t)kStates * kSlotStride;
+    std::vector<float> s0(state_n);
     ps::gpu::discard_cleanup_result(
-        hipMemcpy(s0.data(), d.state, kSlotStride * 4u, hipMemcpyDeviceToHost));
+        hipMemcpy(s0.data(), d.state, state_n * 4u, hipMemcpyDeviceToHost));
 
-    const size_t state_n = kSlotStride;
     std::vector<std::vector<float>> ref_traj(kRows + 1u);
     for (auto& v : ref_traj) v.resize(state_n);
 
     bool ok = true;
     for (uint32_t r = 0u; r < kRows && ok; ++r) {
-        ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
-        a.row_override = static_cast<int32_t>(r);
-        if (::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1(a, stream) != hipSuccess)
-            ok = false;
+        for (uint32_t li = 0u; li < kStates && ok; ++li) {
+            ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
+            a.state_index = li;
+            a.row_override = static_cast<int32_t>(r);
+            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1(a, stream) != hipSuccess)
+                ok = false;
+        }
         if (ok && hipStreamSynchronize(stream) != hipSuccess) ok = false;
         if (ok)
             ok = hipMemcpy(ref_traj[r + 1u].data(), d.state, state_n * 4u,

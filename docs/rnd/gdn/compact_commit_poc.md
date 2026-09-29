@@ -74,29 +74,44 @@ compact log + conv で 40 MiB 級。full state snapshot の 2 GiB 級から大�
 
 ## 本番 kernel への実装（2026-09-29）
 
-decode1 kernel（`phaseshift_qwen35_gdn_recurrence_wmma_decode1`）に compact log の
-optional spill を追加した。`GdnRecurrenceArgs` の `compact_delta` / `compact_k` /
-`compact_a` が非 null のとき、各行の `δ`（`s.delta`）、raw `k`、`a = dval` を書き出す。
+decode1 kernel（`phaseshift_qwen35_gdn_recurrence_wmma_decode1`）と decode_rows_exact
+kernel に compact log の optional spill を追加した。`GdnRecurrenceArgs` の
+`compact_delta` / `compact_k` / `compact_a`（+ layer stride）が非 null のとき、各行の
+`δ`（`s.delta`）、raw `k`、`a = dval` を書き出す。log は `[state_index][row][...]` で、
+`compact_*_layer_stride` で層ごとに分離する。
 
 commit は decode1 と同一の state fragment / WMMA 順序を mirror する専用 kernel
-`phaseshift_qwen35_gdn_recurrence_wmma_commit` で行う。`S_0` に対し
-`S ← a_i·S + k_i·δ_i^T` を `compact_rows` 回適用する。
+`phaseshift_qwen35_gdn_recurrence_wmma_commit` で行う。全 GDN 層（`num_gdn_states`）を
+1 launch でループし、`S ← a_i·S + k_i·δ_i^T` を `compact_rows` 回適用する。
 
-検証 `tests/kernels/optimized/test_gdn_compact_log_commit.hip`（27B geometry、
+検証 `tests/kernels/optimized/test_gdn_compact_log_commit.hip`（27B geometry、2 層、
 rows=16）:
 
-- sequential decode1 で各行を回して spill と参照軌跡を取得
+- sequential decode1 で各行・各層を回して spill と参照軌跡を取得
 - 各 m で `S_0` から commit し、参照 `S_m` と比較
-- 結果: **全 m で bit-exact**
+- 結果: **全 m・全層で bit-exact**
+
+## e2e 統合の試み（未完了）
+
+decoder に `PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT=1` で compact commit 経路を接続する
+実装を試した（conv は既存 history 機構を conv-only で併用、rec は snapshot + commit）。
+
+- 最初の off-by-one（log 行数を `history_rows` で確保し、verify の `total_k+1` 行が
+  隣層の row 0 を上書き）を修正し、parity は 0/32 → 16/32 まで改善した。
+- しかし **kernel 単体では bit-exact であるにもかかわらず、e2e parity は content 依存で
+  約半数失敗**する（json512 / reasoning2048 は合格、code / json2048 / prose2048 は不合格）。
+- 原因は未特定。decoder 統合はいったん revert し、kernel 層（spill / commit / 層対応 /
+  bit-exact テスト）のみ確定した。
+
+次の調査候補: conv-only history の restore、snapshot 併用時の状態差、verify
+Decode1Serial と commit の層インデックス対応。
 
 ## 次の作業
 
-1. 本番 recurrence kernel に compact log の optional spill を追加する
-   （`dT` = `v_new`、raw `k`、per-row `a`）。→ **完了**
-2. spill した log からの逐次 replay が、現行 history の full state と bit-exact かを確認。
-   → **完了**（decode1 経路）
-3. verify rows を増やして target parity を測る（`test_dflash2_ngram_tail_gate2`）。
-   decoder に compact commit 経路を env-gated で接続して A/B する。
+1. 本番 recurrence kernel に compact log の optional spill を追加する。→ **完了**（層対応含む）
+2. spill した log からの逐次 replay が bit-exact かを確認。→ **完了**（2 層、bit-exact）
+3. verify rows を増やして target parity を測る。→ **未完了**（e2e 統合で content 依存の
+   残差を確認、原因調査が必要）
 4. commit を次回 GDN kernel へ fusion できるか設計する（pending prefix commit）。
 
 ## 再現
