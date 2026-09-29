@@ -59,6 +59,47 @@ backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation は�
 `temperature > 0` / `grammar` / `structural_tag` / `prefix_cache_checkpoint_position`
 を含む request を fail-closed で拒否する。
 
+### 固定draft語彙の配置と既定動作
+
+対応する語彙profileをtarget modelへ配置すると、DFlash2はINT2＋固定語彙を既定で使う。
+通常利用者はprofile配布物だけを用意し、SWE-chat等の生成元コーパスを取得する必要はない。
+配置にはPython 3の標準ライブラリだけを使い、推論時のPython依存は追加しない。
+
+Qwen3.8-27B用の[語彙profileを取得](https://github.com/jyohukuchan/PhaseShift/releases/download/draft-vocab-qwen38-v1/qwen38-draft-vocab-98304-v1.tar.gz)して展開する。
+SHA-256は`b7bd94c9131c3ef3573c27c92a512b5463bc9676c57a1a70ac0223fc2f8df246`。
+この配布物はcontributorのforkで提供する。
+
+```sh
+python3 tools/quantization/prepare_draft_vocab.py install \
+  --bundle-dir /path/to/extracted-vocabulary-profile \
+  --model-dir /path/to/target-PSQ-model
+```
+
+配置先は`--model-dir`のtarget側であり、`--dflash2-model-dir`ではない。
+toolはmodel形状とtokenizerのtoken→ID対応を照合し、次の3ファイルを配置する。
+
+- `dflash2-draft-vocab.u32`
+- `dflash2-draft-vocab.json`
+- `DRAFT_VOCAB_NOTICE.txt`
+
+異なる既存内容を置き換える場合だけ`--overwrite`を指定する。同梱NOTICEは保持する。
+profileなしでは従来のfull PSQ8 headを使う。正常なprofileが別tokenizer/形状向けなら、
+理由をstderrへ示して従来経路を使う。片方だけのファイル、破損・不正なprofileはエラーになる。
+
+比較・切戻しの指定:
+
+```sh
+PHASESHIFT_DFLASH2_INT2_HEAD=0 ./build-gfx1201/phaseshift-compute ...
+PHASESHIFT_DFLASH2_INT2_HEAD=1 PHASESHIFT_DFLASH2_DRAFT_VOCAB=0 \
+  ./build-gfx1201/phaseshift-compute ...
+```
+
+前者はfull PSQ8、後者は全語彙INT2を選ぶ。通常の自動選択ではどちらの環境変数も不要。
+明示的な独自語彙は`PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE`で指定でき、INT2経路を選ぶ。
+この明示ファイルと`INT2_HEAD=0/2`または`DRAFT_VOCAB=0`の同時指定はエラーになる。
+
+profile作成者向けの`pack`手順と契約は[開発者文書](../developer/dflash2.md#固定語彙profile)を参照する。
+
 ## serve-stdio
 
 `--serve-stdio` はserver backendから利用されるengine modeである。modelとruntimeを

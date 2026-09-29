@@ -11,6 +11,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace ps::qwen35::dflash2 {
@@ -22,6 +23,8 @@ struct DFlash2ExecutorConfig {
     uint32_t max_context_rows = 0;
     const ps::weights::MatrixWeight* target_lm_head = nullptr;
     const ps::weights::MatrixWeight* target_embed_tokens = nullptr;
+    std::string draft_vocab_file;
+    int32_t int2_head_mode = -1;
 };
 
 struct DFlash2Executor {
@@ -71,6 +74,13 @@ struct DFlash2Executor {
     const ps::weights::MatrixWeight* target_embed_tokens = nullptr;
     uint32_t draft_rows = 0;
 
+    bool draft_vocab_enabled = false;
+    uint32_t draft_vocab_size = 0;
+    std::vector<int32_t> draft_vocab_ids;
+    gpu::Tensor draft_vocab_ids_device;
+    bool draft_vocab_check_enabled = false;
+    gpu::Tensor draft_vocab_check_logits;
+
     gpu::Tensor noise_token_ids;
     gpu::Tensor noise_embedding;
 
@@ -105,6 +115,9 @@ struct DFlash2Executor {
     gpu::Tensor int2_diag_ids;
     gpu::Tensor int2_diag_logits;
     gpu::Tensor int2_diag_tokens;
+    gpu::Tensor int2_vocab_scales;
+    uint32_t int2_vocab_scale_stride_bytes = 0;
+    gpu::Tensor draft_vocab_check_int2_codes;
     uint32_t int2_scratch_row_stride = 0;
     uint32_t int2_partitions = 0;
     uint32_t int2_radix_partitions = 0;

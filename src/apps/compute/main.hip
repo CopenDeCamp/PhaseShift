@@ -2,6 +2,7 @@
 
 #include <phaseshift/models/qwen35/dflash2/config.h>
 #include <phaseshift/models/qwen35/dflash2/context_state.h>
+#include <phaseshift/models/qwen35/dflash2/draft_vocab_profile.h>
 #include <phaseshift/models/qwen35/dflash2/executor.h>
 #include <phaseshift/models/qwen35/dflash2/weights.h>
 #include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
@@ -531,11 +532,25 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
 
     const uint32_t max_seq = runtime.config().max_seq_len;
 
+    auto vocab_profile_result = ps::qwen35::dflash2::resolve_draft_vocab_profile(
+        runtime.config().model_dir, static_cast<uint32_t>(text_config.vocab_size),
+        static_cast<uint32_t>(text_config.hidden_size),
+        ps::qwen35::dflash2::draft_vocab_resolve_options_from_environment());
+    if (!vocab_profile_result.ok()) {
+        fprintf(stderr, "dflash2 draft vocabulary profile failed: %s\n",
+                vocab_profile_result.status().message().c_str());
+        return 1;
+    }
+    const auto vocab_profile = vocab_profile_result.release();
+    fprintf(stderr, "DFLASH2_DRAFT_VOCAB=%s\n", vocab_profile.reason.c_str());
+
     ps::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
     draft_config.target_lm_head = &model.weights().lm_head;
     draft_config.target_embed_tokens = &model.weights().embed_tokens;
+    draft_config.draft_vocab_file = vocab_profile.vocab_file;
+    draft_config.int2_head_mode = static_cast<int32_t>(vocab_profile.int2_head_mode);
     auto draft_result = ps::qwen35::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {
@@ -1454,11 +1469,26 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         }
         dflash.weights = weights_result.release();
 
+        const auto& text_config = runtime.model().text_config();
+        auto vocab_profile_result = ps::qwen35::dflash2::resolve_draft_vocab_profile(
+            runtime.config().model_dir, static_cast<uint32_t>(text_config.vocab_size),
+            static_cast<uint32_t>(text_config.hidden_size),
+            ps::qwen35::dflash2::draft_vocab_resolve_options_from_environment());
+        if (!vocab_profile_result.ok()) {
+            fprintf(stderr, "dflash2 draft vocabulary profile failed: %s\n",
+                    vocab_profile_result.status().message().c_str());
+            return 1;
+        }
+        const auto vocab_profile = vocab_profile_result.release();
+        fprintf(stderr, "DFLASH2_DRAFT_VOCAB=%s\n", vocab_profile.reason.c_str());
+
         ps::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
         draft_config.max_rows = static_cast<uint32_t>(dflash.config.block_size);
         draft_config.max_context_rows = static_cast<uint32_t>(dflash.config.sliding_window);
         draft_config.target_lm_head = &runtime.model().weights().lm_head;
         draft_config.target_embed_tokens = &runtime.model().weights().embed_tokens;
+        draft_config.draft_vocab_file = vocab_profile.vocab_file;
+        draft_config.int2_head_mode = static_cast<int32_t>(vocab_profile.int2_head_mode);
         auto draft_result = ps::qwen35::dflash2::create_dflash2_executor(
             dflash.config, dflash.weights, runtime.arena(), draft_config);
         if (!draft_result.ok()) {

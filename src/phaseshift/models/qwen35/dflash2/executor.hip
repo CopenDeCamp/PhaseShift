@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <string>
@@ -132,6 +133,147 @@ uint32_t int2_head_mode_env() {
     if (v >= 2)
         return 2u;
     return 1u;
+}
+
+const char* draft_vocab_file_env() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE");
+    return env != nullptr && env[0] != '\0' ? env : nullptr;
+}
+
+bool draft_vocab_check_env() {
+    const char* env = std::getenv("PHASESHIFT_DFLASH2_DRAFT_VOCAB_CHECK");
+    return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+Status load_draft_vocab_ids(
+    const char* path,
+    uint32_t target_vocab,
+    uint32_t selector_top_k,
+    std::vector<int32_t>& out) {
+    if (path == nullptr) {
+        return Status::invalid_argument("dflash2 draft vocabulary path is null", __FILE__,
+                                        __LINE__);
+    }
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return Status::invalid_argument("dflash2 draft vocabulary file cannot be opened",
+                                        __FILE__, __LINE__);
+    }
+    const std::streamoff end = file.tellg();
+    if (end <= 0 || (end % static_cast<std::streamoff>(sizeof(uint32_t))) != 0) {
+        return Status::invalid_argument(
+            "dflash2 draft vocabulary file must contain non-empty uint32 records", __FILE__,
+            __LINE__);
+    }
+    const uint64_t byte_count = static_cast<uint64_t>(end);
+    if (byte_count > static_cast<uint64_t>(std::numeric_limits<std::size_t>::max()) ||
+        byte_count > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max())) {
+        return Status::invalid_argument("dflash2 draft vocabulary file is too large", __FILE__,
+                                        __LINE__);
+    }
+    const std::size_t count = static_cast<std::size_t>(byte_count / sizeof(uint32_t));
+    if (count < 16u || count < selector_top_k || (count % 16u) != 0u ||
+        count > static_cast<std::size_t>(target_vocab)) {
+        return Status::invalid_argument(
+            "dflash2 draft vocabulary size must be aligned, bounded, and >= selector top-k",
+            __FILE__, __LINE__);
+    }
+
+    std::vector<uint8_t> bytes(byte_count);
+    file.seekg(0, std::ios::beg);
+    if (!file.read(reinterpret_cast<char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()))) {
+        return Status::invalid_argument("dflash2 draft vocabulary file read failed", __FILE__,
+                                        __LINE__);
+    }
+
+    out.clear();
+    out.reserve(count);
+    uint32_t previous = 0u;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t off = i * sizeof(uint32_t);
+        const uint32_t id = static_cast<uint32_t>(bytes[off]) |
+                            (static_cast<uint32_t>(bytes[off + 1u]) << 8u) |
+                            (static_cast<uint32_t>(bytes[off + 2u]) << 16u) |
+                            (static_cast<uint32_t>(bytes[off + 3u]) << 24u);
+        if (id >= target_vocab || (i != 0u && id <= previous)) {
+            return Status::invalid_argument(
+                "dflash2 draft vocabulary ids must be sorted, unique, and in range", __FILE__,
+                __LINE__);
+        }
+        previous = id;
+        out.push_back(static_cast<int32_t>(id));
+    }
+    return Status::make_ok();
+}
+
+__global__ void dflash2_remap_draft_vocab_ids_kernel(
+    int32_t* ids,
+    const int32_t* selected_ids,
+    uint32_t count,
+    uint32_t selected_rows) {
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count)
+        return;
+    const int32_t local = ids[index];
+    if (local >= 0 && static_cast<uint32_t>(local) < selected_rows)
+        ids[index] = selected_ids[static_cast<uint32_t>(local)];
+    else
+        ids[index] = -1;
+}
+
+__global__ void dflash2_gather_pack_int2_rows_kernel(
+    const uint8_t* source_codes,
+    const uint8_t* source_scales,
+    const int32_t* selected_ids,
+    const uint8_t* map_table,
+    uint8_t* reduced_codes,
+    uint8_t* reduced_scales,
+    uint32_t selected_rows,
+    uint32_t k_padded,
+    uint32_t source_code_stride,
+    uint32_t source_scale_stride,
+    uint32_t reduced_code_stride,
+    uint32_t reduced_scale_stride) {
+    const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= selected_rows)
+        return;
+    const uint32_t source_row = static_cast<uint32_t>(selected_ids[row]);
+    const uint32_t blocks_k = k_padded >> 5u;
+    const uint8_t* source_row_base =
+        source_codes + static_cast<std::size_t>(source_row >> 4u) * source_code_stride +
+        static_cast<std::size_t>(source_row & 15u) * 16u;
+    uint8_t* reduced_row_base =
+        reduced_codes + static_cast<std::size_t>(row >> 4u) * reduced_code_stride +
+        static_cast<std::size_t>(row & 15u) * 4u;
+    for (uint32_t ib = 0u; ib < blocks_k; ++ib) {
+        const uint8_t* source_block = source_row_base + static_cast<std::size_t>(ib) * 512u;
+        uint8_t* reduced_block = reduced_row_base + static_cast<std::size_t>(ib) * 128u;
+        for (uint32_t half = 0u; half < 2u; ++half) {
+            for (uint32_t kg = 0u; kg < 2u; ++kg) {
+                const uint8_t* source_half = source_block + half * 256u + kg * 8u;
+                uint8_t packed0 = 0u;
+                uint8_t packed1 = 0u;
+                #pragma unroll
+                for (uint32_t q4 = 0u; q4 < 4u; ++q4) {
+                    packed0 = static_cast<uint8_t>(packed0 |
+                        (map_table[source_half[q4]] << (2u * q4)));
+                    packed1 = static_cast<uint8_t>(packed1 |
+                        (map_table[source_half[q4 + 4u]] << (2u * q4)));
+                }
+                reduced_block[half * 64u + kg * 2u] = packed0;
+                reduced_block[half * 64u + kg * 2u + 1u] = packed1;
+            }
+        }
+        const uint16_t* source_scale = reinterpret_cast<const uint16_t*>(
+            source_scales + static_cast<std::size_t>(source_row >> 4u) * source_scale_stride +
+            static_cast<std::size_t>(source_row & 15u) * 2u);
+        uint16_t* reduced_scale = reinterpret_cast<uint16_t*>(
+            reduced_scales + static_cast<std::size_t>(row >> 4u) * reduced_scale_stride +
+            static_cast<std::size_t>(row & 15u) * 2u);
+        reduced_scale[static_cast<std::size_t>(ib) * 16u] =
+            source_scale[static_cast<std::size_t>(ib) * 16u];
+    }
 }
 
 uint32_t int2_pool_env(uint32_t max_pool) {
@@ -415,9 +557,69 @@ Result<DFlash2Executor> create_dflash2_executor(
     DFlash2Executor ex;
     ex.config = &config;
     ex.weights = &weights;
+    ex.target_lm_head = exec_config.target_lm_head;
+    ex.target_embed_tokens = exec_config.target_embed_tokens;
     ex.max_rows = exec_config.max_rows;
     ex.max_context_rows = exec_config.max_context_rows != 0u ? exec_config.max_context_rows
                                                              : exec_config.max_rows;
+
+    const std::string configured_draft_vocab_file = exec_config.draft_vocab_file;
+    const char* draft_vocab_path = !configured_draft_vocab_file.empty()
+                                       ? configured_draft_vocab_file.c_str()
+                                       : draft_vocab_file_env();
+    const char* int2_head_env = std::getenv("PHASESHIFT_DFLASH2_INT2_HEAD");
+    const bool explicit_int2_head_env = int2_head_env != nullptr && int2_head_env[0] != '\0';
+    uint32_t requested_int2_mode = exec_config.int2_head_mode >= 0
+                                       ? static_cast<uint32_t>(exec_config.int2_head_mode)
+                                       : int2_head_mode_env();
+    if (draft_vocab_path != nullptr && exec_config.int2_head_mode < 0 &&
+        !explicit_int2_head_env) {
+        requested_int2_mode = 1u;
+    }
+    if (requested_int2_mode > 2u) {
+        return Status::invalid_argument("dflash2 int2 head mode must be 0, 1, or 2", __FILE__,
+                                        __LINE__);
+    }
+    if (draft_vocab_path != nullptr && requested_int2_mode != 1u) {
+        return Status::invalid_argument(
+            "dflash2 static draft vocabulary requires INT2_HEAD=1", __FILE__,
+            __LINE__);
+    }
+    if (draft_vocab_path != nullptr) {
+        if (ex.target_lm_head == nullptr) {
+            return Status::invalid_argument(
+                "dflash2 static draft vocabulary requires a target lm_head", __FILE__,
+                __LINE__);
+        }
+        const ps::weights::MatrixWeight& head = *ex.target_lm_head;
+        if (head.encoding != ps::weights::MatrixEncoding::Psq8 || !head.preshuffled ||
+            head.rows != config.vocab_size || head.cols != config.hidden_size ||
+            head.weight_scale_group != 32u || (head.k_padded % 32u) != 0u) {
+            return Status::invalid_argument(
+                "dflash2 static draft vocabulary requires a preshuffled psq8 lm_head", __FILE__,
+                __LINE__);
+        }
+        const uint32_t blocks_k = head.k_padded / 32u;
+        const uint32_t code_stride = blocks_k * 512u;
+        const uint32_t scale_stride = blocks_k * 32u;
+        if (head.codes.ndim() != 2u || head.scales.ndim() != 2u ||
+            head.codes.dim(0) != (head.rows + 15u) / 16u ||
+            head.scales.dim(0) != (head.rows + 15u) / 16u ||
+            head.codes.dim(1) != code_stride || head.scales.dim(1) != scale_stride ||
+            head.codes_row_stride_bytes != code_stride ||
+            head.storage_scale_stride_bytes != scale_stride) {
+            return Status::invalid_argument(
+                "dflash2 static draft vocabulary lm_head native geometry is invalid", __FILE__,
+                __LINE__);
+        }
+        Status vocab_status = load_draft_vocab_ids(
+            draft_vocab_path, head.rows, config.selector_top_k, ex.draft_vocab_ids);
+        if (!vocab_status.ok())
+            return vocab_status;
+        ex.draft_vocab_enabled = true;
+        ex.draft_vocab_size = static_cast<uint32_t>(ex.draft_vocab_ids.size());
+    }
+    ex.int2_head_mode = requested_int2_mode;
 
     const std::size_t rows = exec_config.max_rows;
     const std::size_t ctx_rows = ex.max_context_rows;
@@ -498,7 +700,6 @@ Result<DFlash2Executor> create_dflash2_executor(
     st = alloc({rows, hidden}, ex.backbone_output);
     if (!st.ok()) return st;
 
-    ex.target_lm_head = exec_config.target_lm_head;
     ex.draft_rows = config.block_size > 0u ? config.block_size - 1u : 0u;
     const std::size_t draft = ex.draft_rows;
     if (draft == 0u) {
@@ -537,7 +738,20 @@ Result<DFlash2Executor> create_dflash2_executor(
         arena, {act_layout.scales_bytes() / sizeof(float)}, ex.activation_scales);
     if (!st.ok()) return st;
 
-    ex.int2_head_mode = int2_head_mode_env();
+    if (ex.draft_vocab_enabled) {
+        const uint32_t reduced_rows = ex.draft_vocab_size;
+        st = allocate_contiguous_tensor<int32_t>(
+            arena, {reduced_rows}, ex.draft_vocab_ids_device);
+        if (!st.ok()) return st;
+        hipError_t herr = hipMemcpy(
+            ex.draft_vocab_ids_device.data<int32_t>(), ex.draft_vocab_ids.data(),
+            static_cast<std::size_t>(reduced_rows) * sizeof(int32_t), hipMemcpyHostToDevice);
+        if (herr != hipSuccess) {
+            return Status::hip_error("dflash2 draft vocabulary id upload", hipGetErrorString(herr),
+                                     __FILE__, __LINE__);
+        }
+    }
+
     if (ex.int2_head_mode != 0u) {
         if (exec_config.target_lm_head == nullptr) {
             return Status::invalid_argument(
@@ -550,9 +764,14 @@ Result<DFlash2Executor> create_dflash2_executor(
                 "dflash2 int2 draft head requires a preshuffled psq8 lm_head", __FILE__,
                 __LINE__);
         }
-        const uint32_t vocab = head.rows;
+        const bool reduced_vocab = ex.draft_vocab_enabled;
+        const uint32_t vocab = reduced_vocab ? ex.draft_vocab_size : head.rows;
         const uint32_t k_padded = head.k_padded;
         ex.int2_pool = int2_pool_env(ps::kernel::kDflash2Int2MaxPool);
+        if (ex.int2_pool > vocab) {
+            return Status::invalid_argument(
+                "dflash2 int2 candidate pool exceeds draft vocabulary", __FILE__, __LINE__);
+        }
         ex.int2_partitions = ps::kernel::dflash2_int2_default_partitions(vocab);
         ex.int2_scratch_row_stride =
             ex.int2_partitions * ps::kernel::kDflash2Int2MaxPool;
@@ -562,6 +781,15 @@ Result<DFlash2Executor> create_dflash2_executor(
             static_cast<std::size_t>(k_padded) * 4u;
         st = allocate_contiguous_tensor<uint8_t>(arena, {code_bytes}, ex.int2_codes);
         if (!st.ok()) return st;
+        if (reduced_vocab) {
+            const std::size_t scale_bytes =
+                ((static_cast<std::size_t>(vocab) + 15u) / 16u) *
+                static_cast<std::size_t>(head.storage_scale_stride_bytes);
+            st = allocate_contiguous_tensor<uint8_t>(
+                arena, {scale_bytes}, ex.int2_vocab_scales);
+            if (!st.ok()) return st;
+            ex.int2_vocab_scale_stride_bytes = head.storage_scale_stride_bytes;
+        }
         st = allocate_contiguous_tensor<uint8_t>(arena, {1280u}, ex.int2_tables);
         if (!st.ok()) return st;
         st = allocate_contiguous_tensor<int32_t>(arena, {draft, ex.int2_pool},
@@ -625,7 +853,7 @@ Result<DFlash2Executor> create_dflash2_executor(
             ps::kernel::dflash2_int2_derive_codebook(histogram.data(), false);
         const ps::kernel::Dflash2Int2Codebook codebook_symmetric =
             ps::kernel::dflash2_int2_derive_codebook(histogram.data(), true);
-        std::printf(
+        std::fprintf(stderr,
             "DFLASH2_INT2_CODEBOOK lloyd=[%.6f %.6f %.6f %.6f] error=%.6g "
             "symmetric=[%.6f %.6f %.6f %.6f] error=%.6g chosen=%s\n",
             codebook_lloyd.decoded[0], codebook_lloyd.decoded[1], codebook_lloyd.decoded[2],
@@ -646,12 +874,42 @@ Result<DFlash2Executor> create_dflash2_executor(
                                      __FILE__, __LINE__);
         }
         (void)hipEventRecord(int2_ev1, nullptr);
-        herr = ps::kernel::launch_dflash2_int2_pack(
-            head.codes.data<uint8_t>(), ex.int2_tables.data<uint8_t>(),
-            ex.int2_codes.data<uint8_t>(), head.rows, k_padded, nullptr);
+        if (reduced_vocab) {
+            const dim3 pack_blocks((vocab + 255u) / 256u);
+            dflash2_gather_pack_int2_rows_kernel<<<pack_blocks, 256u, 0, nullptr>>>(
+                head.codes.data<uint8_t>(), head.scales.data<uint8_t>(),
+                ex.draft_vocab_ids_device.data<int32_t>(), ex.int2_tables.data<uint8_t>(),
+                ex.int2_codes.data<uint8_t>(), ex.int2_vocab_scales.data<uint8_t>(), vocab,
+                k_padded, head.codes_row_stride_bytes, head.storage_scale_stride_bytes,
+                k_padded * 4u, head.storage_scale_stride_bytes);
+            herr = hipGetLastError();
+        } else {
+            herr = ps::kernel::launch_dflash2_int2_pack(
+                head.codes.data<uint8_t>(), ex.int2_tables.data<uint8_t>(),
+                ex.int2_codes.data<uint8_t>(), head.rows, k_padded, nullptr);
+        }
         if (herr != hipSuccess) {
             return Status::hip_error("dflash2 int2 pack launch", hipGetErrorString(herr),
                                      __FILE__, __LINE__);
+        }
+        if (reduced_vocab && draft_vocab_check_env()) {
+            ex.draft_vocab_check_enabled = true;
+            st = allocate_contiguous_tensor<float>(
+                arena, {draft, head.rows}, ex.draft_vocab_check_logits);
+            if (!st.ok()) return st;
+            const std::size_t full_code_bytes =
+                ((static_cast<std::size_t>(head.rows) + 15u) / 16u) *
+                static_cast<std::size_t>(k_padded) * 4u;
+            st = allocate_contiguous_tensor<uint8_t>(
+                arena, {full_code_bytes}, ex.draft_vocab_check_int2_codes);
+            if (!st.ok()) return st;
+            herr = ps::kernel::launch_dflash2_int2_pack(
+                head.codes.data<uint8_t>(), ex.int2_tables.data<uint8_t>(),
+                ex.draft_vocab_check_int2_codes.data<uint8_t>(), head.rows, k_padded, nullptr);
+            if (herr != hipSuccess) {
+                return Status::hip_error("dflash2 int2 diagnostic pack launch",
+                                         hipGetErrorString(herr), __FILE__, __LINE__);
+            }
         }
         if (int2_diag_enabled()) {
             st = allocate_contiguous_tensor<int32_t>(
@@ -673,9 +931,9 @@ Result<DFlash2Executor> create_dflash2_executor(
         float int2_pack_ms = 0.0f;
         (void)hipEventElapsedTime(&int2_hist_ms, int2_ev0, int2_ev1);
         (void)hipEventElapsedTime(&int2_pack_ms, int2_ev1, int2_ev2);
-        std::printf("DFLASH2_INT2_INIT codes_bytes=%zu histogram_ms=%.2f pack_ms=%.2f\n",
-                    code_bytes, static_cast<double>(int2_hist_ms),
-                    static_cast<double>(int2_pack_ms));
+        std::fprintf(stderr, "DFLASH2_INT2_INIT codes_bytes=%zu histogram_ms=%.2f pack_ms=%.2f\n",
+                     code_bytes, static_cast<double>(int2_hist_ms),
+                     static_cast<double>(int2_pack_ms));
         (void)hipEventDestroy(int2_ev0);
         (void)hipEventDestroy(int2_ev1);
         (void)hipEventDestroy(int2_ev2);
@@ -766,6 +1024,12 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.target_lm_head = nullptr;
     executor.target_embed_tokens = nullptr;
     executor.draft_rows = 0;
+    executor.draft_vocab_enabled = false;
+    executor.draft_vocab_size = 0u;
+    executor.draft_vocab_ids.clear();
+    executor.draft_vocab_ids_device = gpu::Tensor{};
+    executor.draft_vocab_check_enabled = false;
+    executor.draft_vocab_check_logits = gpu::Tensor{};
     executor.noise_token_ids = gpu::Tensor{};
     executor.noise_embedding = gpu::Tensor{};
     executor.selector_hidden_proj = gpu::Tensor{};
@@ -791,12 +1055,17 @@ Status dflash2_executor_shutdown(DFlash2Executor& executor) noexcept {
     executor.int2_rerank_logits = gpu::Tensor{};
     executor.int2_scratch_ids = gpu::Tensor{};
     executor.int2_scratch_logits = gpu::Tensor{};
+    executor.int2_radix_scratch = gpu::Tensor{};
     executor.int2_coarse_logits = gpu::Tensor{};
     executor.int2_diag_ids = gpu::Tensor{};
     executor.int2_diag_logits = gpu::Tensor{};
     executor.int2_diag_tokens = gpu::Tensor{};
+    executor.int2_vocab_scales = gpu::Tensor{};
+    executor.int2_vocab_scale_stride_bytes = 0u;
+    executor.draft_vocab_check_int2_codes = gpu::Tensor{};
     executor.int2_scratch_row_stride = 0u;
     executor.int2_partitions = 0u;
+    executor.int2_radix_partitions = 0u;
     executor.max_rows = 0;
     executor.max_context_rows = 0;
     executor.weights = nullptr;
@@ -1366,8 +1635,10 @@ Status dflash2_forward_backbone_stateless(
 
 namespace {
 
-Status lm_head_validate(const DFlash2Executor& executor, uint32_t rows) {
-    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+Status lm_head_validate(
+    const DFlash2Executor& executor,
+    const ps::weights::MatrixWeight& weight,
+    uint32_t rows) {
     const DFlash2Config& config = *executor.config;
     if (weight.encoding != ps::weights::MatrixEncoding::Psq8) {
         return Status::unsupported("dflash2 target lm_head is not psq8", __FILE__, __LINE__);
@@ -1376,7 +1647,8 @@ Status lm_head_validate(const DFlash2Executor& executor, uint32_t rows) {
         return Status::invalid_argument("dflash2 target lm_head shape mismatch", __FILE__,
                                         __LINE__);
     }
-    if (!weight.preshuffled || weight.weight_scale_group != 32u) {
+    if (!weight.preshuffled || weight.weight_scale_group != 32u ||
+        (weight.k_padded % 32u) != 0u) {
         return Status::invalid_argument("dflash2 target lm_head layout invalid", __FILE__,
                                         __LINE__);
     }
@@ -1388,10 +1660,10 @@ Status lm_head_validate(const DFlash2Executor& executor, uint32_t rows) {
 
 Status lm_head_quantize(
     DFlash2Executor& executor,
+    const ps::weights::MatrixWeight& weight,
     const bf16_t* hidden,
     uint32_t rows,
     hipStream_t stream) {
-    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
     const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
         weight.cols, executor.draft_rows);
     if (layout.codes_bytes() > executor.activation_codes.dim(0) ||
@@ -1412,11 +1684,11 @@ Status lm_head_quantize(
 
 Status lm_head_gemm(
     DFlash2Executor& executor,
+    const ps::weights::MatrixWeight& weight,
     uint32_t rows,
     float* logits,
     uint32_t logits_row_stride,
     hipStream_t stream) {
-    const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
     const uint32_t k_padded = weight.k_padded;
     const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
         weight.cols, executor.draft_rows);
@@ -1443,18 +1715,19 @@ Status lm_head_gemm(
 
 Status lm_head_logits(
     DFlash2Executor& executor,
+    const ps::weights::MatrixWeight& weight,
     const bf16_t* hidden,
     uint32_t rows,
     float* logits,
     uint32_t logits_row_stride,
     hipStream_t stream) {
-    Status st = lm_head_validate(executor, rows);
+    Status st = lm_head_validate(executor, weight, rows);
     if (!st.ok())
         return st;
-    st = lm_head_quantize(executor, hidden, rows, stream);
+    st = lm_head_quantize(executor, weight, hidden, rows, stream);
     if (!st.ok())
         return st;
-    return lm_head_gemm(executor, rows, logits, logits_row_stride, stream);
+    return lm_head_gemm(executor, weight, rows, logits, logits_row_stride, stream);
 }
 
 Status int2_coarse_logits(
@@ -1462,17 +1735,24 @@ Status int2_coarse_logits(
     uint32_t rows,
     hipStream_t stream) {
     const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const uint32_t vocab = executor.draft_vocab_enabled ? executor.draft_vocab_size
+                                                         : weight.rows;
+    const uint8_t* scales = executor.draft_vocab_enabled
+                                ? executor.int2_vocab_scales.data<uint8_t>()
+                                : weight.scales.data<uint8_t>();
+    const uint32_t scale_stride = executor.draft_vocab_enabled
+                                      ? executor.int2_vocab_scale_stride_bytes
+                                      : weight.storage_scale_stride_bytes;
     const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
         weight.cols, executor.draft_rows);
     const uint32_t* expand_table =
         reinterpret_cast<const uint32_t*>(executor.int2_tables.data<uint8_t>() + 256u);
     const hipError_t err = ps::kernel::launch_dflash2_int2_coarse_head(
-        executor.int2_codes.data<uint8_t>(), weight.scales.data<uint8_t>(),
+        executor.int2_codes.data<uint8_t>(), scales,
         executor.activation_codes.data<uint8_t>(),
         executor.activation_scales.data<float>(), expand_table,
-        executor.int2_coarse_logits.data<float>(), rows, weight.rows, weight.k_padded,
-        weight.storage_scale_stride_bytes, layout.code_row_stride_bytes,
-        layout.scale_row_stride_bytes, weight.rows, stream);
+        executor.int2_coarse_logits.data<float>(), rows, vocab, weight.k_padded,
+        scale_stride, layout.code_row_stride_bytes, layout.scale_row_stride_bytes, vocab, stream);
     if (err != hipSuccess) {
         return Status::hip_error("dflash2 int2 coarse head launch", hipGetErrorString(err),
                                  __FILE__, __LINE__);
@@ -1485,9 +1765,11 @@ Status int2_coarse_topn(
     uint32_t rows,
     hipStream_t stream) {
     const ps::weights::MatrixWeight& weight = *executor.target_lm_head;
+    const uint32_t vocab = executor.draft_vocab_enabled ? executor.draft_vocab_size
+                                                         : weight.rows;
     if (ps::kernel::dflash2_radix_topn_preferred(executor.int2_pool)) {
         const hipError_t err = ps::kernel::launch_dflash2_radix_topn(
-            executor.int2_coarse_logits.data<float>(), rows, weight.rows, weight.rows,
+            executor.int2_coarse_logits.data<float>(), rows, vocab, vocab,
             executor.int2_pool, executor.int2_pool_ids.data<int32_t>(),
             executor.int2_pool_logits.data<float>(), executor.int2_radix_partitions,
             executor.int2_radix_scratch.data<uint32_t>(),
@@ -1499,7 +1781,7 @@ Status int2_coarse_topn(
         return Status::make_ok();
     }
     const hipError_t err = ps::kernel::launch_dflash2_coarse_topn(
-        executor.int2_coarse_logits.data<float>(), rows, weight.rows, weight.rows,
+        executor.int2_coarse_logits.data<float>(), rows, vocab, vocab,
         executor.int2_pool, executor.int2_pool_ids.data<int32_t>(),
         executor.int2_pool_logits.data<float>(), executor.int2_scratch_ids.data<int32_t>(),
         executor.int2_scratch_logits.data<float>(), executor.int2_scratch_row_stride,
@@ -1565,6 +1847,208 @@ Status int2_small_top16(
     return Status::make_ok();
 }
 
+Status int2_remap_pool_to_global(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    hipStream_t stream) {
+    if (!executor.draft_vocab_enabled)
+        return Status::make_ok();
+    const std::size_t count = static_cast<std::size_t>(rows) * executor.int2_pool;
+    const dim3 blocks(static_cast<unsigned>((count + 255u) / 256u));
+    dflash2_remap_draft_vocab_ids_kernel<<<blocks, 256u, 0, stream>>>(
+        executor.int2_pool_ids.data<int32_t>(), executor.draft_vocab_ids_device.data<int32_t>(),
+        static_cast<uint32_t>(count), executor.draft_vocab_size);
+    const hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 int2 draft vocabulary id remap launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status draft_vocab_int2_check_coarse(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    hipStream_t stream) {
+    if (!executor.draft_vocab_check_enabled)
+        return Status::make_ok();
+    const ps::weights::MatrixWeight& head = *executor.target_lm_head;
+    const auto layout = ps::runtime::Int8ActivationWorkspaceLayout::make(
+        head.cols, executor.draft_rows);
+    const uint32_t* expand_table =
+        reinterpret_cast<const uint32_t*>(executor.int2_tables.data<uint8_t>() + 256u);
+    hipError_t err = ps::kernel::launch_dflash2_int2_coarse_head(
+        executor.draft_vocab_check_int2_codes.data<uint8_t>(), head.scales.data<uint8_t>(),
+        executor.activation_codes.data<uint8_t>(), executor.activation_scales.data<float>(),
+        expand_table, executor.draft_vocab_check_logits.data<float>(), rows, head.rows,
+        head.k_padded, head.storage_scale_stride_bytes, layout.code_row_stride_bytes,
+        layout.scale_row_stride_bytes, head.rows, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 full coarse launch",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    err = hipStreamSynchronize(stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 coarse sync",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    const std::size_t full_count = static_cast<std::size_t>(rows) * head.rows;
+    const std::size_t reduced_count =
+        static_cast<std::size_t>(rows) * executor.draft_vocab_size;
+    const std::size_t pool_count = static_cast<std::size_t>(rows) * executor.int2_pool;
+    std::vector<float> full_logits(full_count);
+    std::vector<float> reduced_logits(reduced_count);
+    std::vector<int32_t> pool_ids(pool_count);
+    err = hipMemcpy(full_logits.data(), executor.draft_vocab_check_logits.data<float>(),
+                    full_count * sizeof(float), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 full coarse read",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    err = hipMemcpy(reduced_logits.data(), executor.int2_coarse_logits.data<float>(),
+                    reduced_count * sizeof(float), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 reduced coarse read",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    err = hipMemcpy(pool_ids.data(), executor.int2_pool_ids.data<int32_t>(),
+                    pool_count * sizeof(int32_t), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 local ids read",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+
+    bool pass = true;
+    float max_abs = 0.0f;
+    for (uint32_t row = 0u; row < rows; ++row) {
+        for (uint32_t local = 0u; local < executor.draft_vocab_size; ++local) {
+            const uint32_t global = static_cast<uint32_t>(executor.draft_vocab_ids[local]);
+            const float full = full_logits[static_cast<std::size_t>(row) * head.rows + global];
+            const float reduced = reduced_logits[static_cast<std::size_t>(row) *
+                                                 executor.draft_vocab_size + local];
+            if (!std::isfinite(full) || !std::isfinite(reduced)) {
+                pass = false;
+                continue;
+            }
+            const float abs_diff = std::fabs(full - reduced);
+            if (abs_diff > max_abs)
+                max_abs = abs_diff;
+            if (full != reduced)
+                pass = false;
+        }
+        for (uint32_t i = 0u; i < executor.int2_pool; ++i) {
+            const int32_t local = pool_ids[static_cast<std::size_t>(row) * executor.int2_pool + i];
+            if (local < 0 || static_cast<uint32_t>(local) >= executor.draft_vocab_size)
+                pass = false;
+        }
+    }
+    std::fprintf(stderr,
+        "DFLASH2_DRAFT_VOCAB_INT2_CHECK rows=%u elements=%zu pool=%u max_abs=%.9g "
+        "status=%s\n",
+        rows, reduced_count, executor.int2_pool, static_cast<double>(max_abs),
+        pass ? "PASS" : "FAIL");
+    if (!pass) {
+        return Status::invalid_state("dflash2 draft vocabulary int2 coarse mismatch",
+                                     __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status draft_vocab_int2_check_global_ids(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    hipStream_t stream) {
+    if (!executor.draft_vocab_check_enabled)
+        return Status::make_ok();
+    const std::size_t count = static_cast<std::size_t>(rows) * executor.int2_pool;
+    std::vector<int32_t> ids(count);
+    const hipError_t err = hipMemcpy(ids.data(), executor.int2_pool_ids.data<int32_t>(),
+                                     count * sizeof(int32_t), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 global ids read",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    bool pass = true;
+    for (int32_t id : ids) {
+        if (id < 0 || !std::binary_search(executor.draft_vocab_ids.begin(),
+                                           executor.draft_vocab_ids.end(), id)) {
+            pass = false;
+            break;
+        }
+    }
+    std::fprintf(stderr, "DFLASH2_DRAFT_VOCAB_INT2_IDS count=%zu status=%s\n", count,
+                 pass ? "PASS" : "FAIL");
+    if (!pass) {
+        return Status::invalid_state("dflash2 draft vocabulary int2 global id mismatch",
+                                     __FILE__, __LINE__);
+    }
+    (void)stream;
+    return Status::make_ok();
+}
+
+Status draft_vocab_int2_check_rerank(
+    DFlash2Executor& executor,
+    uint32_t rows,
+    hipStream_t stream) {
+    if (!executor.draft_vocab_check_enabled)
+        return Status::make_ok();
+    const ps::weights::MatrixWeight& head = *executor.target_lm_head;
+    Status st = lm_head_gemm(executor, head, rows,
+                            executor.draft_vocab_check_logits.data<float>(), head.rows, stream);
+    if (!st.ok()) return st;
+    hipError_t err = hipStreamSynchronize(stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 rerank check sync",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    const std::size_t count = static_cast<std::size_t>(rows) * executor.int2_pool;
+    const std::size_t full_count = static_cast<std::size_t>(rows) * head.rows;
+    std::vector<float> full(full_count);
+    std::vector<float> actual(count);
+    std::vector<int32_t> ids(count);
+    err = hipMemcpy(full.data(), executor.draft_vocab_check_logits.data<float>(),
+                    full_count * sizeof(float), hipMemcpyDeviceToHost);
+    if (err == hipSuccess) {
+        err = hipMemcpy(actual.data(), executor.int2_rerank_logits.data<float>(),
+                        count * sizeof(float), hipMemcpyDeviceToHost);
+    }
+    if (err == hipSuccess) {
+        err = hipMemcpy(ids.data(), executor.int2_pool_ids.data<int32_t>(),
+                        count * sizeof(int32_t), hipMemcpyDeviceToHost);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("dflash2 draft vocabulary int2 rerank check read",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    bool pass = true;
+    float max_abs = 0.0f;
+    for (uint32_t row = 0u; row < rows; ++row) {
+        for (uint32_t candidate = 0u; candidate < executor.int2_pool; ++candidate) {
+            const std::size_t index = static_cast<std::size_t>(row) * executor.int2_pool + candidate;
+            const int32_t id = ids[index];
+            if (id < 0 || static_cast<uint32_t>(id) >= head.rows) {
+                pass = false;
+                continue;
+            }
+            const float expected = full[static_cast<std::size_t>(row) * head.rows + id];
+            const float got = actual[index];
+            if (!std::isfinite(expected) || !std::isfinite(got)) {
+                pass = false;
+                continue;
+            }
+            max_abs = std::max(max_abs, std::fabs(expected - got));
+            if (expected != got) pass = false;
+        }
+    }
+    std::fprintf(stderr, "DFLASH2_DRAFT_VOCAB_INT2_RERANK count=%zu max_abs=%.9g status=%s\n", count,
+                 static_cast<double>(max_abs), pass ? "PASS" : "FAIL");
+    if (!pass) {
+        return Status::invalid_state("dflash2 draft vocabulary int2 rerank mismatch",
+                                     __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
 Status int2_select_impl(
     DFlash2Executor& executor,
     uint32_t rows,
@@ -1575,6 +2059,9 @@ Status int2_select_impl(
     if (!st.ok())
         return st;
     st = int2_coarse_topn(executor, rows, stream);
+    if (!st.ok())
+        return st;
+    st = int2_remap_pool_to_global(executor, rows, stream);
     if (!st.ok())
         return st;
     st = int2_rerank(executor, rows, stream);
@@ -1608,7 +2095,8 @@ Status dflash2_compute_target_logits(
         return Status::invalid_argument("dflash2 logits rows out of range", __FILE__,
                                         __LINE__);
     }
-    return lm_head_logits(executor, hidden, rows, logits, logits_row_stride, stream);
+    return lm_head_logits(executor, *executor.target_lm_head, hidden, rows, logits,
+                          logits_row_stride, stream);
 }
 
 Status dflash2_run_candidate_selector(
@@ -1782,7 +2270,7 @@ void int2_diag_accumulate(
     c.pipeline_ms += pipe;
 
     const double rows = static_cast<double>(c.rows);
-    std::printf(
+    std::fprintf(stderr,
         "DFLASH2_INT2_DIAG rounds=%llu rows=%llu pool=%u top1=%.4f recall16=%.4f "
         "contain=%.4f selcov=%.4f setmatch=%.4f ordered=%.4f top1match=%.4f "
         "tokenmatch=%.4f quant_ms=%.3f coarse_ms=%.3f topn_ms=%.3f rerank_ms=%.3f "
@@ -1814,7 +2302,7 @@ void int2_timing_accumulate(uint32_t draft, const hipEvent_t* ev, bool full_head
     c.selector_ms += int2_ev_ms(ev[6], ev[7]);
     c.pipeline_ms += int2_ev_ms(ev[0], ev[7]);
     const double rounds = static_cast<double>(c.rounds);
-    std::printf(
+    std::fprintf(stderr,
         "DFLASH2_INT2_TIMING rounds=%llu quant=%.3f full=%.3f coarse=%.3f topn=%.3f "
         "rerank=%.3f top16=%.3f selector=%.3f pipe=%.3f\n",
         static_cast<unsigned long long>(c.rounds), c.quant_ms / rounds, c.full_ms / rounds,
@@ -1829,7 +2317,8 @@ Status int2_select_path(
     int32_t anchor_token,
     int32_t* output_draft_tokens,
     hipStream_t stream) {
-    const bool diag = executor.int2_head_mode == 2u && int2_diag_enabled();
+    const bool diag = !executor.draft_vocab_enabled && executor.int2_head_mode == 2u &&
+                      int2_diag_enabled();
     const bool timing = diag || int2_timing_enabled();
     hipEvent_t ev[8] = {};
     if (timing) {
@@ -1838,14 +2327,15 @@ Status int2_select_path(
         (void)hipEventRecord(ev[0], stream);
     }
 
-    Status st = lm_head_quantize(executor, draft_hidden, draft, stream);
+    Status st = lm_head_quantize(executor, *executor.target_lm_head, draft_hidden, draft, stream);
     if (!st.ok())
         return st;
     if (timing)
         (void)hipEventRecord(ev[1], stream);
 
     if (diag) {
-        st = lm_head_gemm(executor, draft, executor.proposal_logits.data<float>(),
+        st = lm_head_gemm(executor, *executor.target_lm_head, draft,
+                          executor.proposal_logits.data<float>(),
                           executor.target_lm_head->rows, stream);
         if (!st.ok())
             return st;
@@ -1868,11 +2358,25 @@ Status int2_select_path(
     if (timing)
         (void)hipEventRecord(ev[4], stream);
 
+    st = draft_vocab_int2_check_coarse(executor, draft, stream);
+    if (!st.ok())
+        return st;
+    st = int2_remap_pool_to_global(executor, draft, stream);
+    if (!st.ok())
+        return st;
+    st = draft_vocab_int2_check_global_ids(executor, draft, stream);
+    if (!st.ok())
+        return st;
+
     st = int2_rerank(executor, draft, stream);
     if (!st.ok())
         return st;
     if (timing)
         (void)hipEventRecord(ev[5], stream);
+
+    st = draft_vocab_int2_check_rerank(executor, draft, stream);
+    if (!st.ok())
+        return st;
 
     st = int2_small_top16(executor, draft, executor.int2_rerank_logits.data<float>(),
                           executor.proposal_topk_ids.data<int32_t>(),
@@ -1953,6 +2457,7 @@ Status dflash2_select_draft_tokens(
     const uint32_t draft = block_rows - 1u;
     const uint32_t hidden = static_cast<uint32_t>(executor.config->hidden_size);
     const uint32_t rank = executor.config->selector_rank;
+    const ps::weights::MatrixWeight& draft_head = *executor.target_lm_head;
     const uint32_t vocab = executor.config->vocab_size;
     const uint32_t top_k = executor.config->selector_top_k;
     const bf16_t* draft_hidden = final_hidden + hidden;
@@ -1981,7 +2486,7 @@ Status dflash2_select_draft_tokens(
                                 output_draft_tokens, stream);
     }
 
-    Status st = lm_head_logits(executor, draft_hidden, draft,
+    Status st = lm_head_logits(executor, draft_head, draft_hidden, draft,
                                executor.proposal_logits.data<float>(), vocab, stream);
     if (!st.ok()) return st;
 

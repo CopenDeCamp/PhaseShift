@@ -160,6 +160,7 @@ set(
     src/phaseshift/models/qwen35/model/qwen35_model.cpp
     src/phaseshift/models/qwen35/model/lower_to_primitives.cpp
     src/phaseshift/models/qwen35/dflash2/config.cpp
+    src/phaseshift/models/qwen35/dflash2/draft_vocab_profile.cpp
     src/phaseshift/models/qwen35/dflash2/weights.cpp
     src/phaseshift/models/qwen35/dflash2/context_state.hip
 )
