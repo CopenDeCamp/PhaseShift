@@ -471,6 +471,27 @@ __device__ __forceinline__ void gdn_recurrence_wmma_body(
                     Sacc[ki * 2u + vj] = g::gdn_wmma2<kLossy>(Sacc[ki * 2u + vj], akT, bv[vj]);
             }
         }
+        if constexpr (kSerialRows) {
+            if (a.recurrent_history != nullptr && ci < a.capture_rows &&
+                (a.capture_verify_only == 0u ||
+                 req.execution_class == ::ps::runtime::ExecutionClass::SPEC_VERIFY)) {
+                float* hist_head = a.recurrent_history
+                    + static_cast<uint64_t>(ci) * a.recurrent_history_row_stride
+                    + static_cast<uint64_t>(a.state_index) * a.recurrent_layer_stride
+                    + static_cast<uint64_t>(v_head) * hd * hv;
+                #pragma unroll
+                for (uint32_t ki = 0; ki < 2u; ++ki)
+                    #pragma unroll
+                    for (uint32_t vj = 0; vj < 2u; ++vj) {
+                        const uint32_t m0 = (kt0 + ki) * 16u + 8u * hi;
+                        const uint32_t n0 = (vt0 + vj) * 16u + lo;
+                        float* hp = hist_head + static_cast<size_t>(m0) * hv + v0 + n0;
+                        #pragma unroll
+                        for (uint32_t e = 0; e < 8u; ++e)
+                            hp[static_cast<size_t>(e) * hv] = Sacc[ki * 2u + vj][e];
+                    }
+            }
+        }
         __syncthreads();
         #pragma unroll
         for (uint32_t ki = 0; ki < 2u; ++ki)
