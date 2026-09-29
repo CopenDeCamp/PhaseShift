@@ -291,6 +291,13 @@ shard 対象は次。
   各ブロック内で head が連結しているため half split でも
   rank の local な `[q | k | v]` と pool の対応が保たれる
 
+## 通信 bytes の計測
+
+`RcclTransport::issued_bytes(global_rank)` が rank ごとの累積 bytes を返す。
+`all_reduce_sum` / `send` / `recv` / `broadcast` が enqueue に成功した時点で
+`elements * rccl_dtype_bytes(dtype)` を加算する。
+測定はこの counter と `tests/unit/test_qwen35_parallel_bench.hip` が正本。
+
 ## tensor parallel の対象を layer 種別で切り分ける
 
 `Qwen35LowerOptions` / `ExecutorConfig` の `tp_full_attention` と
@@ -321,6 +328,9 @@ send / recv と同じく physical kernel ではなく
 | `test_qwen35_tp_row_linear` | `gpu2;rccl;rccl_2gpu` | Row Parallel LINEAR の AllReduce と精度 |
 | `test_qwen35_tp2_attention` | `gpu2;rccl;rccl_2gpu` | standard attention の TP 化と 1GPU との比較 |
 | `test_qwen35_tp3_gdn` | `gpu2;rccl;rccl_2gpu` | GDN の TP 化と 1GPU との比較 |
+| `test_qwen35_tp4_e2e` | `gpu2;rccl;rccl_2gpu` | 全 layer の TP 化と collective 数の照合 |
+| `test_qwen35_pp2_tp2_e2e` | `gpu4;rccl;rccl_4gpu` | PP2 × TP2 の同時実行 |
+| `test_qwen35_parallel_bench` | `gpu4;rccl;perf` | 構成間の時間と通信 bytes の計測 |
 
 synthetic model は `tests/support/synthetic_qwen35_model.h` が
 `config.json` と `model.safetensors` を書き出し、通常の

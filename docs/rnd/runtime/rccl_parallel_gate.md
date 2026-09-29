@@ -315,6 +315,53 @@ sampled token は 1GPU と一致しているため argmax には影響してい�
 FP32 partial + FP32 AllReduce に変えると改善する見込みで、
 attention と同じく次 Gate の判断事項とする。
 
+## Gate C1: PP2 × TP2 topology
+
+`test_rccl_topology`（4 GPU、label `gpu4;rccl;rccl_4gpu`）が該当する。
+`world_size = 4` の clique として次を実際に初期化し、操作まで通す。
+
+```text
+rank=0 device=0 pp_rank=0 tp_rank=0
+rank=1 device=1 pp_rank=0 tp_rank=1
+rank=2 device=2 pp_rank=1 tp_rank=0
+rank=3 device=3 pp_rank=1 tp_rank=1
+tp_group[0] devices=0 1
+tp_group[1] devices=2 3
+pp_lane[0] devices=0 2
+pp_lane[1] devices=1 3
+```
+
+TP の AllReduce は {0,1} と {2,3} の2 clique、PP の send/recv は
+0↔2 と 1↔3 のみで、4 rank 全体を1つの collective にしないことを
+テストで固定している。
+
+## Gate C2: PP2 × TP2 E2E
+
+`test_qwen35_pp2_tp2_e2e`（4 GPU）。stage0 = rank0/1、stage1 = rank2/3。
+stage ごとに TP をかけ、境界は rank 対で `COMM_SEND` / `COMM_RECV` を行う。
+
+```text
+rank0 tokens:                        collectives=5
+rank1 tokens:                        collectives=5
+rank2 tokens: 44 44 44 44 44         collectives=5
+rank3 tokens: 44 44 44 44 44         collectives=5
+collectives: stage0 expected=5 stage1 expected=5
+pp2 tp2 vs 1GPU logits: mismatches=304/320
+  max_abs=0.0371094  scale=1.78906  max_abs/scale=0.0207424
+PP2_TP2_E2E: PASS
+```
+
+- collective 数は stage0 が「4 層分の row-parallel out」+ `COMM_SEND`、
+  stage1 が同様 + `COMM_RECV` で **expected と一致**した
+- stage0 の両 rank、stage1 の両 rank で token と logits が一致
+- 1GPU baseline の token とも一致
+- logits の差は出力 scale の 2.07%（Gate TP3 と同じ値。PP は数式を変えないため
+  TP 由来の差のみが現れる）
+- RCCL error 0、deadlock 0
+
+coordinator は stage1 の rank2 のみが `shared_tokens` を書き、
+stage0 の両 rank がそれを読む。全 rank が同じ step の barrier に参加する。
+
 ## Gate P0: 構成間の比較計測
 
 `test_qwen35_parallel_bench`（label `gpu4;rccl;perf`）で4構成を同じ条件で測った。
