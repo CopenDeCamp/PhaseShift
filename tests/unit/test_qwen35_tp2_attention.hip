@@ -53,7 +53,6 @@ w8::MatrixShardSpec make_spec(w8::ShardAxis axis, std::uint32_t rank) {
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    setenv("PHASESHIFT_QWEN35_KERNEL_MODE", "correctness", 1);
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 2) {
         std::printf("SKIP: need 2 GPUs, have %d\n", device_count);

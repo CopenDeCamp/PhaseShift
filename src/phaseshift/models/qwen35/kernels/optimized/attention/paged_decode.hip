@@ -111,7 +111,7 @@ __device__ __forceinline__ void attention_paged_bf16_body(
         q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
     }
 
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
+    const uint64_t head_off = static_cast<uint64_t>(kv_head + a.kv_head_offset) * head_dim;
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
 
@@ -346,7 +346,7 @@ __device__ __forceinline__ void attention_paged_split_bf16_body(
     }
     __syncthreads();
 
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
+    const uint64_t head_off = static_cast<uint64_t>(kv_head + a.kv_head_offset) * head_dim;
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
 
     float run_max[kQPerKV];
@@ -1037,10 +1037,10 @@ void attention_paged_fp8_impl(
         q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
     }
 
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * head_dim;
+    const uint64_t head_off = static_cast<uint64_t>(kv_head + a.kv_head_offset) * head_dim;
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
     const size_t scale_layer_base =
-        static_cast<size_t>(a.layer) * a.num_pages * a.page_tokens * a.kv_heads;
+        static_cast<size_t>(a.layer) * a.num_pages * a.page_tokens * a.pool_kv_heads;
     const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
 
     float run_max = -FLT_MAX;
@@ -1057,14 +1057,15 @@ void attention_paged_fp8_impl(
         const uint64_t page_base =
             layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
         const size_t page_scale_base =
-            scale_layer_base + static_cast<size_t>(page) * page_tokens * a.kv_heads;
+            scale_layer_base + static_cast<size_t>(page) * page_tokens * a.pool_kv_heads;
         const uint32_t page_start = page_index * page_tokens;
         const uint32_t tokens_here =
             (visible - page_start < page_tokens) ? (visible - page_start) : page_tokens;
         for (uint32_t off = wave; off < tokens_here; off += kWaves) {
             const uint64_t elem =
                 page_base + static_cast<uint64_t>(off) * a.elems_per_token;
-            const size_t si = page_scale_base + static_cast<size_t>(off) * a.kv_heads + kv_head;
+            const size_t si = page_scale_base + static_cast<size_t>(off) * a.pool_kv_heads +
+                           (kv_head + a.kv_head_offset);
             const float k_scale = k_scale_pool[si];
             const float v_scale = v_scale_pool[si];
             const fp8* k_head = k_pool + elem + head_off;
@@ -1285,7 +1286,7 @@ void attention_paged_psq4_impl(
         q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
     }
 
-    const uint32_t blocks_per_token = kv_heads * blocks_per_head;
+    const uint32_t blocks_per_token = a.pool_kv_heads * blocks_per_head;
     const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
 
     float run_max = -FLT_MAX;
@@ -1305,7 +1306,8 @@ void attention_paged_psq4_impl(
         for (uint32_t off = wave; off < tokens_here; off += kWaves) {
             const uint64_t token_block_base =
                 ((static_cast<uint64_t>(a.layer) * a.num_pages + page) * page_tokens + off)
-                * blocks_per_token + static_cast<uint64_t>(kv_head) * blocks_per_head;
+                * blocks_per_token +
+                static_cast<uint64_t>(kv_head + a.kv_head_offset) * blocks_per_head;
             float kdec[kElemsPerLane];
             float vdec[kElemsPerLane];
             #pragma unroll
@@ -1488,7 +1490,8 @@ void attention_paged_split_psq4_impl(
         for (uint32_t off = wave; off < tokens_here; off += kSplitWaves) {
             const uint64_t token_block_base =
                 ((static_cast<uint64_t>(a.layer) * a.num_pages + page) * page_tokens + off)
-                * (kv_heads * blocks_per_head) + static_cast<uint64_t>(kv_head) * blocks_per_head;
+                * (a.pool_kv_heads * blocks_per_head) +
+                static_cast<uint64_t>(kv_head + a.kv_head_offset) * blocks_per_head;
             float kf[kElemsPerLane];
             float vf[kElemsPerLane];
             #pragma unroll
@@ -1747,7 +1750,7 @@ void attention_paged_psq8_impl(
         q_reg[j] = (kFullHead || d < head_dim) ? __bfloat162float(q_row[d]) : 0.0f;
     }
 
-    const uint32_t blocks_per_token = kv_heads * blocks_per_head;
+    const uint32_t blocks_per_token = a.pool_kv_heads * blocks_per_head;
     const uint32_t page_count = (visible + page_tokens - 1u) / page_tokens;
 
     float run_max = -FLT_MAX;
@@ -1767,7 +1770,8 @@ void attention_paged_psq8_impl(
         for (uint32_t off = wave; off < tokens_here; off += kWaves) {
             const uint64_t token_block_base =
                 ((static_cast<uint64_t>(a.layer) * a.num_pages + page) * page_tokens + off)
-                * blocks_per_token + static_cast<uint64_t>(kv_head) * blocks_per_head;
+                * blocks_per_token +
+                static_cast<uint64_t>(kv_head + a.kv_head_offset) * blocks_per_head;
             const uint4 ks_v = *reinterpret_cast<const uint4*>(k_scale_pool + token_block_base);
             const uint4 vs_v = *reinterpret_cast<const uint4*>(v_scale_pool + token_block_base);
             float kdec[kElemsPerLane];
@@ -1956,7 +1960,8 @@ void attention_paged_split_psq8_impl(
         for (uint32_t off = wave; off < tokens_here; off += kSplitWaves) {
             const uint64_t token_block_base =
                 ((static_cast<uint64_t>(a.layer) * a.num_pages + page) * page_tokens + off)
-                * (kv_heads * blocks_per_head) + static_cast<uint64_t>(kv_head) * blocks_per_head;
+                * (a.pool_kv_heads * blocks_per_head) +
+                static_cast<uint64_t>(kv_head + a.kv_head_offset) * blocks_per_head;
             const uint4 ks_v = *reinterpret_cast<const uint4*>(k_scale_pool + token_block_base);
             const uint4 vs_v = *reinterpret_cast<const uint4*>(v_scale_pool + token_block_base);
             float kf[kElemsPerLane];

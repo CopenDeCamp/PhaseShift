@@ -236,7 +236,7 @@ void impl(const KvAppendCommonArgs a, fp8* k_pool, fp8* v_pool, float* k_scale_p
     const float v_scale = v_scale_shared;
 
     if (threadIdx.x == 0u) {
-        const size_t si = ((static_cast<size_t>(a.layer) * a.num_pages + page_shared) * a.page_tokens + offset_shared) * a.kv_heads + head;
+        const size_t si = ((static_cast<size_t>(a.layer) * a.num_pages + page_shared) * a.page_tokens + offset_shared) * a.pool_kv_heads + (head + a.kv_head_offset);
         k_scale_pool[si] = k_scale;
         v_scale_pool[si] = v_scale;
     }
@@ -381,7 +381,7 @@ void impl(const KvAppendCommonArgs a,
     const float vx = __bfloat162float(v_src[d]);
 
     const uint64_t bi = (((static_cast<uint64_t>(a.layer) * a.num_pages + page_shared)
-                          * a.page_tokens + offset_shared) * a.kv_heads + head)
+                          * a.page_tokens + offset_shared) * a.pool_kv_heads + (head + a.kv_head_offset))
                         * blocks_per_head + wave;
 
     const float k_amax = wave_max_p4(fabsf(kx));
@@ -519,7 +519,7 @@ void impl(const KvAppendCommonArgs a,
     const float vx = __bfloat162float(v_src[d]);
 
     const uint64_t bi = (((static_cast<uint64_t>(a.layer) * a.num_pages + page_shared)
-                          * a.page_tokens + offset_shared) * a.kv_heads + head)
+                          * a.page_tokens + offset_shared) * a.pool_kv_heads + (head + a.kv_head_offset))
                         * blocks_per_head + wave;
 
     const float k_amax = wave_max_p8(fabsf(kx));

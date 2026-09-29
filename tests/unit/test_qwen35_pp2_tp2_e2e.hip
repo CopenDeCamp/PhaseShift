@@ -64,7 +64,6 @@ std::size_t expected_collectives(const ps::test::SyntheticQwen35Spec& spec,
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    setenv("PHASESHIFT_QWEN35_KERNEL_MODE", "correctness", 1);
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 4) {
         std::printf("SKIP: need 4 GPUs, have %d\n", device_count);

@@ -206,7 +206,7 @@ void attention_paged_prefill_bf16_body(
     for (uint32_t nt = 0u; nt < 4u; ++nt) oacc[nt] = wf8_t{};
 
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * kHeadDim;
+    const uint64_t head_off = static_cast<uint64_t>(kv_head + a.kv_head_offset) * kHeadDim;
 
     for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
         const uint32_t page = block_table[page_index];
@@ -232,10 +232,11 @@ void attention_paged_prefill_bf16_body(
             uint4 kv;
             uint4 vv;
             if constexpr (kMode == 2u) {
-                const uint32_t blocks_per_token = a.kv_heads * blocks_per_head;
+                const uint32_t blocks_per_token = a.pool_kv_heads * blocks_per_head;
                 const uint64_t token_block_base =
                     ((static_cast<uint64_t>(a.layer) * a.num_pages + page) * kPageTokens + t)
-                    * blocks_per_token + static_cast<uint64_t>(kv_head) * blocks_per_head;
+                    * blocks_per_token +
+                    static_cast<uint64_t>(kv_head + a.kv_head_offset) * blocks_per_head;
                 const uint32_t chunk_dim = c * 8u;
                 const uint64_t bi = token_block_base + chunk_dim / 32u;
                 const uint32_t lane0 = chunk_dim % 32u;
@@ -260,10 +261,11 @@ void attention_paged_prefill_bf16_body(
                 kv = *reinterpret_cast<const uint4*>(kh);
                 vv = *reinterpret_cast<const uint4*>(vh);
             } else if constexpr (kMode == 3u) {
-                const uint32_t blocks_per_token = a.kv_heads * blocks_per_head;
+                const uint32_t blocks_per_token = a.pool_kv_heads * blocks_per_head;
                 const uint64_t token_block_base =
                     ((static_cast<uint64_t>(a.layer) * a.num_pages + page) * kPageTokens + t)
-                    * blocks_per_token + static_cast<uint64_t>(kv_head) * blocks_per_head;
+                    * blocks_per_token +
+                    static_cast<uint64_t>(kv_head + a.kv_head_offset) * blocks_per_head;
                 const uint32_t chunk_dim = c * 8u;
                 const uint64_t bi = token_block_base + chunk_dim / 32u;
                 const uint32_t lane0 = chunk_dim % 32u;
@@ -655,7 +657,7 @@ void attention_paged_prefill_fp8_impl(
         + static_cast<size_t>(q_head) * kHeadDim;
 
     const size_t scale_layer_base =
-        static_cast<size_t>(a.layer) * a.num_pages * kPageTokens * a.kv_heads;
+        static_cast<size_t>(a.layer) * a.num_pages * kPageTokens * a.pool_kv_heads;
 
     wbf8_t q_frag[4];
     #pragma unroll
@@ -672,7 +674,7 @@ void attention_paged_prefill_fp8_impl(
     for (uint32_t nt = 0u; nt < 4u; ++nt) oacc[nt] = wf8_t{};
 
     const uint64_t layer_base = static_cast<uint64_t>(a.layer) * a.elems_per_layer;
-    const uint64_t head_off = static_cast<uint64_t>(kv_head) * kHeadDim;
+    const uint64_t head_off = static_cast<uint64_t>(kv_head + a.kv_head_offset) * kHeadDim;
 
     for (uint32_t page_index = 0u; page_index < page_count; ++page_index) {
         const uint32_t page = block_table[page_index];
@@ -685,7 +687,7 @@ void attention_paged_prefill_fp8_impl(
         if (tokens_here > kPageTokens) tokens_here = kPageTokens;
         const uint64_t page_base = layer_base + static_cast<uint64_t>(page) * a.elems_per_page;
         const size_t scale_page_base =
-            scale_layer_base + static_cast<size_t>(page) * kPageTokens * a.kv_heads;
+            scale_layer_base + static_cast<size_t>(page) * kPageTokens * a.pool_kv_heads;
         const fp8* k_src = k_pool + page_base + head_off;
         const fp8* v_src = v_pool + page_base + head_off;
         auto store_chunk = [&](uint32_t t, uint32_t c) {
@@ -751,8 +753,12 @@ void attention_paged_prefill_fp8_impl(
             const uint32_t visr = s.vis[r];
             const bool va = (page_start + ta) < visr;
             const bool vb = (page_start + tb) < visr;
-            const size_t sa_idx = scale_page_base + static_cast<size_t>(ta) * a.kv_heads + kv_head;
-            const size_t sb_idx = scale_page_base + static_cast<size_t>(tb) * a.kv_heads + kv_head;
+            const size_t sa_idx = scale_page_base +
+                                 static_cast<size_t>(ta) * a.pool_kv_heads +
+                                 (kv_head + a.kv_head_offset);
+            const size_t sb_idx = scale_page_base +
+                                 static_cast<size_t>(tb) * a.pool_kv_heads +
+                                 (kv_head + a.kv_head_offset);
             sa = va ? sa * scale * k_scale_pool[sa_idx] : -FLT_MAX;
             sb = vb ? sb * scale * k_scale_pool[sb_idx] : -FLT_MAX;
             const float pmax = group_max8(fmaxf(sa, sb));
