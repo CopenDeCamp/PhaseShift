@@ -145,6 +145,48 @@ DecodeRowsExact を使う。Gate 2A は `total verify rows <= 8`（= composite d
 守ることでこの path を維持する。Gate 2B の rows > 8 は既知の測定条件として記録し、
 この Gate では最適化しない。
 
+### 3.8 bf16 GEMM の exact rows 拡張（R64 gap の 1 つ目）
+
+`VerifyNumericMode::Exact` でも bf16 GEMM の exact 経路は
+`kBf16GemmExactRowsMax = 16` までしか選ばれず、rows ≥ 17 では WMMA（lossy）へ
+落ちていた。K 還元順が M=1 decode と一致しないため、R64 bucket（rows 17..40）で
+target parity が崩れる。
+
+- `kBf16GemmExactRowsMax` を 64 に拡大し、`kBf16GemmExactRowsKernelMax = 16`（
+  template kernel の per-launch 上限）を分離した。
+- `launch_gemm_bf16_exact_rows()` は rows > 16 のとき 16 行ずつ chunk launch する。
+  `gemm_bf16_exact_rows_body<R>` の K 還元ループと lane 減算は row 数に依存しないため、
+  chunk 化しても M=1 と bit-exact である。weight 再利用も chunk 単位で維持され、
+  template 実体は 1..16 のままなのでコンパイル時間は増えない。
+
+効果（`C9` = K7 + T9、max rows 17）: 修正前 NO → 修正後 **parity 恢復**。
+rows 18..24（`C16` / `C32`）には別要因が残り、それは §3.9 で扱う。
+
+### 3.9 GDN recurrence lossy と exact history capture（R64 gap の 2 つ目）
+
+bf16 GEMM 修正後も rerun mode で残った rows ≥ 17 の divergence は GDN recurrence の
+lossy 経路に由来する。`PHASESHIFT_GDN_RECURRENCE_EXACT=1` を与えると parity が恢復する
+（例: prose PP2048, GEN=128 の C13/C14）。したがって `VerifyNumericMode::Exact` で
+rows > 16 を測る場合は GDN recurrence も exact（`PHASESHIFT_GDN_RECURRENCE_EXACT=1`）
+にする必要がある。既定は lossy のまま据え置く。
+
+この exact 経路には別の不具合があった。lossy off では `gdn_recurrence_decode1_supported()`
+が false になり verify variant が `WmmaSerial` へ変わるが、GDN spec history の capture は
+decode1 kernel の `row_override >= 0` 条件付きブロックにのみ実装されていた。`WmmaSerial`
+は `row_override` を設定しないため history が書かれず、history mode（Gate 2A）では
+restore が未初期化行を読んで generation が崩壊した（parity 0/24）。
+
+修正として `gdn_recurrence_wmma_body<kLossy, kSerialRows>` の serial chunk 終端で
+state 更新後の `Sacc` を history 行 `ci` へ書く（条件・レイアウトは
+`gdn_recurrence_wmma_decode_rows_exact_impl` と同一）。詳細は
+`docs/rnd/gdn/optimization_history.md` §7.96。
+
+- `PHASESHIFT_GDN_RECURRENCE_EXACT=1` + `PHASESHIFT_TARGET_LM_HEAD_PROXY=0` の
+  Gate 2A（correctness, history mode）: parity **24/24**、violations **0**。
+- 既定 lossy の Gate 2A は従来どおり parity 24/24。
+- 回帰テスト `test_gdn_recurrence_exact_history`（required）で exact serial と
+  sequential exact M=1 の state / output / history が bit-exact。
+
 ## 4. 測定
 
 ### 4.1 target parity と lm_head proxy
@@ -334,6 +376,22 @@ primary 終了後に n=8 で json PP512 のみ追加測定（`artifacts/ngram_ta
 - parity 12/12
 - paired median **+6.76%**（n=5 の +5.84% より良い）
 - E/round 5.742（A 4.731）、round_ms 82.73（A 72.74）、tail acc/round 1.427、hit 0.348
+
+### 6.5 GDN recurrence exact のコスト（参考計測）
+
+`PHASESHIFT_GDN_RECURRENCE_EXACT=1` の有無を A_k7_t0 で同一条件測定
+（TG512、n=5、6 workload、`artifacts/ngram_tail_gate2/gdn_exact_timing/`）。
+
+| 指標 | lossy 既定 | exact | 差 |
+| --- | --- | --- | --- |
+| verify GPU ms/round | 40.9–42.0 | 47.2–49.1 | **+6.8–7.1 ms（+17%、全 workload 一定）** |
+| round_ms | 62.7–77.2 | 70.3–92.8 | +1.7–15.6 |
+| tok/s | 基準 | — | **-24.8%〜+32.2%** |
+
+tok/s が大きく振れるのは GDN の数値差が DFlash2 drafter の target tap に伝播し、
+draft 受容（E/round）が ±26〜28% 変わるためで、計算コスト差ではない。純粋な
+recurrence コストは verify の **+約 7 ms/round（+17%）**である。prefill 側の既存計測は
+`docs/rnd/gdn/optimization_history.md` §7.51（e2e PP で lossy が +3.7% tok/s）を参照。
 
 ## 7. Gate 1 oracle との差
 
