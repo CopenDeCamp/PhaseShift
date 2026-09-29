@@ -1,5 +1,6 @@
 #include <phaseshift/quantization/offline/quantizer.h>
 #include <phaseshift/quantization/offline/adapter_dispatch.h>
+#include <phaseshift/models/qwen35/model/qwen35_config.h>
 #include <phaseshift/quantization/offline/gpu_quantizer.h>
 #include <phaseshift/quantization/offline/qwen35_adapter.h>
 #include <phaseshift/quantization/offline/shard_resolver.h>
@@ -300,7 +301,9 @@ Result<QuantizeSummary> run_quantize(const QuantizeOptions& opts) {
         imatrix_cov.policy = opts.imatrix_policy;
     }
 
-    const bool tie = config.value("tie_word_embeddings", false);
+    auto tie_result = ps::qwen35::read_qwen35_tie_word_embeddings(opts.input_dir);
+    if (!tie_result.ok()) return tie_result.status();
+    const bool tie = tie_result.value();
     auto num_layers_result = quantization_num_layers(arch, config_text);
     if (!num_layers_result.ok()) return num_layers_result.status();
     const uint32_t num_layers = num_layers_result.value();
@@ -312,6 +315,8 @@ Result<QuantizeSummary> run_quantize(const QuantizeOptions& opts) {
     std::vector<PlannedTensor> planned;
     std::map<std::string, int> dtype_counts;
     bool has_visual = false;
+    bool has_output = false;
+    bool has_embedding = false;
     uint64_t skipped_tensors = 0;
 
     std::map<std::string, std::unique_ptr<ps::io::SafetensorsReader>> readers;
@@ -373,6 +378,8 @@ Result<QuantizeSummary> run_quantize(const QuantizeOptions& opts) {
                 "tied checkpoint unexpectedly contains an Output-role tensor (lm_head.weight)",
                 __FILE__, __LINE__);
         }
+        if (p.info.role == TensorRole::Output) has_output = true;
+        if (p.info.role == TensorRole::TokenEmbedding) has_embedding = true;
         const uint32_t li = p.info.layer_index >= 0 ? static_cast<uint32_t>(p.info.layer_index) : 0;
         p.enc = choose_weight_encoding(opts.preset, arch, p.info.role, li, num_layers);
 
@@ -412,6 +419,19 @@ Result<QuantizeSummary> run_quantize(const QuantizeOptions& opts) {
             "Qwen3.5 multimodal conversion is not supported by FPX V1. "
             "Use --scope text-only to convert the language model only.",
             __FILE__, __LINE__);
+    }
+
+    if (arch == Architecture::Qwen35Dense) {
+        if (!has_embedding) {
+            return Status::invalid_argument(
+                "checkpoint has no embed_tokens.weight", __FILE__, __LINE__);
+        }
+        if (!tie && !has_output) {
+            return Status::invalid_argument(
+                "tie_word_embeddings=false but checkpoint has no lm_head.weight "
+                "(check tie_word_embeddings in config.json)",
+                __FILE__, __LINE__);
+        }
     }
 
     if (imatrix_cov.used && imatrix_cov.required > 0) {
