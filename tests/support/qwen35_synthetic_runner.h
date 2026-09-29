@@ -59,6 +59,7 @@ struct SyntheticRunResult {
     std::vector<uint64_t> step_us;
     std::size_t weight_bytes = 0;
     bool unowned_layers_empty = false;
+    std::size_t vram_used_bytes = 0;
 };
 
 class SyntheticRunner {
@@ -131,8 +132,25 @@ private:
         return bytes;
     }
 
+    static bool debug_enabled() {
+        const char* env = std::getenv("PHASESHIFT_RUNNER_DEBUG");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }
+
+    static void debug_mark(const char* what, int device,
+                           std::chrono::steady_clock::time_point begin) {
+        if (!debug_enabled()) return;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - begin)
+                            .count();
+        std::printf("device=%d mark=%s elapsed_ms=%lld\n", device, what,
+                    static_cast<long long>(ms));
+    }
+
     bool initialize(const SyntheticRunOptions& options, SyntheticRunResult& result) {
+        const auto mark_begin = std::chrono::steady_clock::now();
         auto arena_result = ::ps::gpu::GpuArena::create(options.device, options.arena_bytes);
+        debug_mark("arena", options.device, mark_begin);
         if (!arena_result.ok()) {
             result.error = message("GpuArena::create", arena_result.status());
             return false;
@@ -142,15 +160,30 @@ private:
         ::ps::qwen35::Qwen35LoadOptions load_options;
         load_options.tensor_shard = options.tensor_shard;
         load_options.partition = options.partition;
+        debug_mark("model_load_begin", options.device, mark_begin);
         auto model_result = ::ps::qwen35::Qwen35Model::load_from_safetensors(
             options.model_dir, *arena_, stream_, load_options);
         if (!model_result.ok()) {
             result.error = message("load model", model_result.status());
             return false;
         }
+        debug_mark("model_load_done", options.device, mark_begin);
         model_ = std::make_unique<::ps::qwen35::Qwen35Model>(model_result.release());
 
+        debug_mark("pools_begin", options.device, mark_begin);
         result.weight_bytes = model_weight_bytes(model_->weights());
+        {
+            std::size_t vram_free = 0;
+            std::size_t vram_total = 0;
+            if (hipMemGetInfo(&vram_free, &vram_total) == hipSuccess)
+                result.vram_used_bytes = vram_total - vram_free;
+        }
+
+        max_tokens_ = options.prefill_tokens > options.decode_steps ? options.prefill_tokens
+                                                                    : options.decode_steps;
+        if (max_tokens_ < 16u) max_tokens_ = 16u;
+        max_seq_len_ = options.prefill_tokens + options.decode_steps + 16u;
+        if (max_seq_len_ < 64u) max_seq_len_ = 64u;
 
         const auto& tc = model_->text_config();
         {
@@ -224,6 +257,7 @@ private:
             static_cast<uint32_t>(options.hidden_taps.size() < max_taps
                                       ? options.hidden_taps.size()
                                       : max_taps);
+        debug_mark("executor_begin", options.device, mark_begin);
         auto executor_result = ::ps::qwen35::create_model_executor(
             *model_, *slot_pool_, *gdn_pool_, *kv_pool_, *arena_, config);
         if (!executor_result.ok()) {
