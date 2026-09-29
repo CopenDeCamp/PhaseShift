@@ -1642,8 +1642,9 @@ Result<Executor> create_model_executor(
 
     const Qwen35TextConfig& tc = model.text_config();
     {
-        const auto expected_gdn =
-            GdnStatePoolLayout::from_text_config(tc, config.tensor_parallel_size);
+        const uint32_t gdn_tp =
+            config.tp_linear_attention ? config.tensor_parallel_size : 1u;
+        const auto expected_gdn = GdnStatePoolLayout::from_text_config(tc, gdn_tp);
         const auto& actual_gdn = gdn_state_pool.layout();
         if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
             actual_gdn.conv_dim != expected_gdn.conv_dim ||

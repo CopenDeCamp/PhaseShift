@@ -362,6 +362,24 @@ PP2_TP2_E2E: PASS
 coordinator は stage1 の rank2 のみが `shared_tokens` を書き、
 stage0 の両 rank がそれを読む。全 rank が同じ step の barrier に参加する。
 
+## Gate C1 の後の回帰で見つかった GDN pool 幾何の不具合
+
+`GdnStatePoolLayout::from_text_config(tc, tensor_parallel)` に
+`tensor_parallel_size` をそのまま渡していたため、
+GDN を sharded しない構成（`tp_linear_attention = false`）でも
+pool の `conv_dim` / `num_v_heads` だけが local に切り替わっていた。
+lowering は full の `conv_features` を組むので、
+`exec_gdn_conv1d` の `in.features != gdn.conv_dim` で
+`INVALID_BINDING` を返し、全 rank が PREFILL の最初で停止する。
+
+`create_model_executor` の幾何検証も同じ引数で計算していたため、
+**検証は通り、kernel だけが失敗する**構造になっていた。
+pool 幾何は `tp_linear_attention` に依存させることで解消した。
+
+失敗 node の特定には `PHASESHIFT_OP_DUMP` 有効時に
+`error_word` の変化点を出力させた（`record_status` が
+最初の失敗のみ `atomicCAS` で残すため、変化点が最初の失敗 node になる）。
+
 ## Gate P0: 構成間の比較計測
 
 `test_qwen35_parallel_bench`（label `gpu4;rccl;perf`）で4構成を同じ条件で測った。

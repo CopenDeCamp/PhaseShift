@@ -123,10 +123,10 @@ private:
         }
         slot_pool_ = std::make_unique<::ps::qwen35::SequenceSlotPool>(slot_result.release());
 
+        const uint32_t gdn_tp =
+            options.tp_linear_attention ? options.tensor_parallel_size : 1u;
         auto gdn_result = ::ps::qwen35::GdnStatePool::create(
-            *arena_, 1,
-            ::ps::qwen35::GdnStatePoolLayout::from_text_config(
-                tc, options.tensor_parallel_size));
+            *arena_, 1, ::ps::qwen35::GdnStatePoolLayout::from_text_config(tc, gdn_tp));
         if (!gdn_result.ok()) {
             result.error = message("GdnStatePool::create", gdn_result.status());
             return false;
