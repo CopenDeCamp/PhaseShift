@@ -369,6 +369,23 @@ hipError_t launch_gemm_bf16_exact_rows(
     uint32_t output_row_stride,
     hipStream_t stream) {
     const uint32_t grid = bf16_exact_rows_grid_x(out_features);
+    if (rows > kBf16GemmExactRowsKernelMax) {
+        const size_t output_elem =
+            output_dtype == Bf16GemmOutputDType::BF16 ? sizeof(ps::bf16_t) : sizeof(float);
+        for (uint32_t base = 0u; base < rows; base += kBf16GemmExactRowsKernelMax) {
+            const uint32_t chunk =
+                (rows - base) < kBf16GemmExactRowsKernelMax ? (rows - base)
+                                                            : kBf16GemmExactRowsKernelMax;
+            const hipError_t err = launch_gemm_bf16_exact_rows(
+                weight, input + static_cast<size_t>(base) * input_row_stride,
+                static_cast<char*>(output) +
+                    static_cast<size_t>(base) * output_row_stride * output_elem,
+                output_dtype, chunk, out_features, k, input_row_stride, output_row_stride,
+                stream);
+            if (err != hipSuccess) return err;
+        }
+        return hipGetLastError();
+    }
     switch (rows) {
         case 1u: {
             Bf16GemmExactRowsArgs args{};
