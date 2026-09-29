@@ -92,6 +92,7 @@ phaseshift_add_test(NAME test_fp8_block128_payload SOURCE unit/test_fp8_block128
 phaseshift_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
+phaseshift_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_quantization_adapter SOURCE unit/test_dflash2_quantization_adapter.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_quantizer_core)
 phaseshift_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_feature_concat SOURCE unit/test_dflash2_feature_concat.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
@@ -226,6 +227,7 @@ add_custom_target(
         test_weight_load
         test_qwen35_mtp_weight_load
         test_dflash2_config
+        test_qwen35_config_tie
         test_dflash2_quantization_adapter
         test_dflash2_weight_contract
         test_dflash2_feature_concat

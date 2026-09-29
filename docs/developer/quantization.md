@@ -45,6 +45,12 @@ fpx format / quant reference / io / core / gpu
 ```
 
 - model側はencodingの分岐（`if PSQ4` 等）を持たない。
+- `tie_word_embeddings` は config.json の root → `text_config` の順に読み、
+  どちらにも無ければ false とする（`read_qwen35_tie_word_embeddings` /
+  `include/phaseshift/models/qwen35/model/qwen35_config.h`）。runtime の
+  `read_qwen35_text_config` と offline の `quantize` は同じ規則を使う。
+  tie のとき `Qwen35ModelWeights.lm_head_tied` が true になり、`lm_head` は
+  `embed_tokens` を参照する。
 - BF16もquantized model内のweight formatの一種として同一経路でロードする
   （量子化されていないことを特別扱いしない）。
 - `WeightLoadOptions.preshuffle` が load-time preshuffle のスイッチである。
@@ -75,6 +81,16 @@ ppl       → corpusのteacher-forced perplexity
 `kld` はGPU shadow modelでlogit cacheをbuildし、
 window / stride単位でKLDを評価する（`kld.cpp` / `gpu_kld.hip` /
 `kld_shadow_model.cpp`）。
+
+`quantize` は checkpoint と `tie_word_embeddings` の整合を検証する。
+
+- tie=true で `lm_head.weight` が混入している場合、
+- tie=false で `lm_head.weight` が欠落している場合、
+- `embed_tokens.weight` が欠落している場合
+
+はいずれも error で停止する。tie=true の出力は manifest の `aliases` で
+`lm_head.weight` を `embed_tokens` へ解決する。tie=false の出力は
+`lm_head.weight` を独立した tensor として量子化し、alias を持たない。
 
 ## Runtime contract
 
