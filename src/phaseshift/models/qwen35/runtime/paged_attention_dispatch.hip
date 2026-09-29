@@ -100,7 +100,7 @@ void probe_write_meta(const std::string& dir, const ProbeDumpConfig& cfg,
         (void)hipMemcpy(pos.data(), c.row_positions, c.rows * sizeof(uint32_t), hipMemcpyDeviceToHost);
         (void)hipMemcpy(slot.data(), c.row_sequence_slots, c.rows * sizeof(uint32_t), hipMemcpyDeviceToHost);
     }
-    const uint32_t scale_elems = c.num_pages * c.page_tokens * c.kv_heads;
+    const uint32_t scale_elems = c.num_pages * c.page_tokens * c.pool_kv_heads;
     (void)stream;
     FILE* f = std::fopen((dir + "/meta.txt").c_str(), "w");
     if (f == nullptr) return;
@@ -109,7 +109,7 @@ void probe_write_meta(const std::string& dir, const ProbeDumpConfig& cfg,
     std::fprintf(f, "layer=%u\n", c.layer);
     std::fprintf(f, "rows=%u\n", c.rows);
     std::fprintf(f, "q_heads=%u\n", c.q_heads);
-    std::fprintf(f, "kv_heads=%u\n", c.kv_heads);
+    std::fprintf(f, "kv_heads=%u\n", c.pool_kv_heads);
     std::fprintf(f, "head_dim=%u\n", c.head_dim);
     std::fprintf(f, "page_tokens=%u\n", c.page_tokens);
     std::fprintf(f, "num_pages=%u\n", c.num_pages);
@@ -187,7 +187,7 @@ bool probe_dump_inputs(const ::ps::kernel::PagedAttentionCommonArgs& c,
             return false;
         if (!probe_write_file(dir + "/k.bin", k.data(), k.size())) return false;
         if (!probe_write_file(dir + "/v.bin", v.data(), v.size())) return false;
-        const uint32_t scale_elems = c.num_pages * c.page_tokens * c.kv_heads;
+        const uint32_t scale_elems = c.num_pages * c.page_tokens * c.pool_kv_heads;
         const std::size_t scale_off = static_cast<std::size_t>(c.layer) * scale_elems;
         std::vector<float> ks(scale_elems), vs(scale_elems);
         if (hipMemcpy(ks.data(), a.k_scale_pool + scale_off, scale_elems * sizeof(float), hipMemcpyDeviceToHost) != hipSuccess)
@@ -312,6 +312,7 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     if (head_dim == 0u || head_dim > 256u || q_in.feature_count % head_dim != 0u)
         return Status::invalid_state("paged-attention: head_dim invalid", __FILE__, __LINE__);
     const uint32_t q_heads = q_in.feature_count / head_dim;
+    const uint32_t local_kv_heads = b.kv_heads;
 
     const uint32_t dtype_raw = ctx.model_state.kv_dtype;
     const ::ps::qwen35::KVCacheDType kv_dtype =
@@ -424,8 +425,14 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     c.page_tokens = page_tokens;
     c.num_pages = num_pages;
     c.num_attention_layers = num_layers;
+    if (local_kv_heads == 0u || kv_heads == 0u || b.kv_head_offset >= kv_heads ||
+        local_kv_heads + b.kv_head_offset > kv_heads || q_heads % local_kv_heads != 0u)
+        return Status::invalid_state("paged-attention: kv head shard out of range",
+                                     __FILE__, __LINE__);
     c.q_heads = q_heads;
-    c.kv_heads = kv_heads;
+    c.kv_heads = local_kv_heads;
+    c.pool_kv_heads = kv_heads;
+    c.kv_head_offset = b.kv_head_offset;
     c.head_dim = head_dim;
     c.elems_per_token = ept;
     c.elems_per_page = epp;

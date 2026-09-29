@@ -148,11 +148,17 @@ Result<KvAppendResolvedArgs> resolve_kv_append_args(
     if (b.group_size != head_dim)
         return Status::invalid_state("kv-append: group_size != head_dim", __FILE__, __LINE__);
 
+    const uint32_t local_kv_heads = b.kv_heads;
     const uint64_t exp_ept = static_cast<uint64_t>(kv_heads) * head_dim;
     const uint64_t exp_epp = static_cast<uint64_t>(page_tokens) * exp_ept;
     const uint64_t exp_epl = static_cast<uint64_t>(num_pages) * exp_epp;
-    if (exp_ept != static_cast<uint64_t>(k_in.feature_count))
-        return Status::invalid_state("kv-append: features != kv_heads*head_dim", __FILE__, __LINE__);
+    if (local_kv_heads == 0u || b.kv_head_offset >= kv_heads ||
+        local_kv_heads + b.kv_head_offset > kv_heads)
+        return Status::invalid_state("kv-append: kv head shard out of range", __FILE__, __LINE__);
+    if (static_cast<uint64_t>(local_kv_heads) * head_dim !=
+        static_cast<uint64_t>(k_in.feature_count))
+        return Status::invalid_state("kv-append: features != local_kv_heads*head_dim",
+                                     __FILE__, __LINE__);
     if (static_cast<uint64_t>(ept) != exp_ept || static_cast<uint64_t>(epp) != exp_epp ||
         static_cast<uint64_t>(epl) != exp_epl)
         return Status::invalid_state("kv-append: pool stride inconsistent", __FILE__, __LINE__);
@@ -174,7 +180,9 @@ Result<KvAppendResolvedArgs> resolve_kv_append_args(
     c.page_tokens = page_tokens;
     c.num_pages = num_pages;
     c.num_attention_layers = num_layers;
-    c.kv_heads = kv_heads;
+    c.kv_heads = local_kv_heads;
+    c.pool_kv_heads = kv_heads;
+    c.kv_head_offset = b.kv_head_offset;
     c.head_dim = head_dim;
     c.elems_per_token = ept;
     c.elems_per_page = epp;

@@ -75,6 +75,9 @@ struct PagedAttentionCommonArgs {
     uint32_t elems_per_layer = 0;
 
     float scale = 0.0f;
+
+    uint32_t pool_kv_heads = 0;
+    uint32_t kv_head_offset = 0;
 };
 
 struct PagedAttentionBf16Args {
@@ -83,7 +86,7 @@ struct PagedAttentionBf16Args {
     const bf16_t* v_pool = nullptr;
 };
 
-static_assert(sizeof(PagedAttentionCommonArgs) == 112);
+static_assert(sizeof(PagedAttentionCommonArgs) == 120);
 static_assert(alignof(PagedAttentionCommonArgs) == 8);
 static_assert(offsetof(PagedAttentionCommonArgs, q) == 0);
 static_assert(offsetof(PagedAttentionCommonArgs, output) == 8);
@@ -107,10 +110,12 @@ static_assert(offsetof(PagedAttentionCommonArgs, elems_per_token) == 96);
 static_assert(offsetof(PagedAttentionCommonArgs, elems_per_page) == 100);
 static_assert(offsetof(PagedAttentionCommonArgs, elems_per_layer) == 104);
 static_assert(offsetof(PagedAttentionCommonArgs, scale) == 108);
-static_assert(sizeof(PagedAttentionBf16Args) == 128);
+static_assert(offsetof(PagedAttentionCommonArgs, pool_kv_heads) == 112);
+static_assert(offsetof(PagedAttentionCommonArgs, kv_head_offset) == 116);
+static_assert(sizeof(PagedAttentionBf16Args) == 136);
 static_assert(alignof(PagedAttentionBf16Args) == 8);
-static_assert(offsetof(PagedAttentionBf16Args, k_pool) == 112);
-static_assert(offsetof(PagedAttentionBf16Args, v_pool) == 120);
+static_assert(offsetof(PagedAttentionBf16Args, k_pool) == 120);
+static_assert(offsetof(PagedAttentionBf16Args, v_pool) == 128);
 
 struct PagedAttentionSplitArgs {
     PagedAttentionCommonArgs common{};
@@ -126,16 +131,16 @@ struct PagedAttentionSplitReduceArgs {
     uint32_t splits = 0;
 };
 
-static_assert(sizeof(PagedAttentionSplitArgs) == 144);
+static_assert(sizeof(PagedAttentionSplitArgs) == 152);
 static_assert(alignof(PagedAttentionSplitArgs) == 8);
-static_assert(offsetof(PagedAttentionSplitArgs, k_pool) == 112);
-static_assert(offsetof(PagedAttentionSplitArgs, v_pool) == 120);
-static_assert(offsetof(PagedAttentionSplitArgs, partials) == 128);
-static_assert(offsetof(PagedAttentionSplitArgs, splits) == 136);
-static_assert(sizeof(PagedAttentionSplitReduceArgs) == 128);
+static_assert(offsetof(PagedAttentionSplitArgs, k_pool) == 120);
+static_assert(offsetof(PagedAttentionSplitArgs, v_pool) == 128);
+static_assert(offsetof(PagedAttentionSplitArgs, partials) == 136);
+static_assert(offsetof(PagedAttentionSplitArgs, splits) == 144);
+static_assert(sizeof(PagedAttentionSplitReduceArgs) == 136);
 static_assert(alignof(PagedAttentionSplitReduceArgs) == 8);
-static_assert(offsetof(PagedAttentionSplitReduceArgs, partials) == 112);
-static_assert(offsetof(PagedAttentionSplitReduceArgs, splits) == 120);
+static_assert(offsetof(PagedAttentionSplitReduceArgs, partials) == 120);
+static_assert(offsetof(PagedAttentionSplitReduceArgs, splits) == 128);
 
 hipError_t
 launch_attention_paged_bf16(

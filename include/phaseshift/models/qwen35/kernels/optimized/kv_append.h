@@ -38,6 +38,9 @@ struct KvAppendCommonArgs {
     uint32_t elems_per_token = 0;
     uint32_t elems_per_page = 0;
     uint32_t elems_per_layer = 0;
+
+    uint32_t pool_kv_heads = 0;
+    uint32_t kv_head_offset = 0;
 };
 
 inline constexpr const char* kKvAppendBf16Symbol =
@@ -49,7 +52,7 @@ struct KvAppendBf16Args {
     bf16_t* v_pool = nullptr;
 };
 
-static_assert(sizeof(KvAppendCommonArgs) == 96);
+static_assert(sizeof(KvAppendCommonArgs) == 104);
 static_assert(alignof(KvAppendCommonArgs) == 8);
 static_assert(offsetof(KvAppendCommonArgs, k_input) == 0);
 static_assert(offsetof(KvAppendCommonArgs, v_input) == 8);
@@ -70,10 +73,12 @@ static_assert(offsetof(KvAppendCommonArgs, head_dim) == 80);
 static_assert(offsetof(KvAppendCommonArgs, elems_per_token) == 84);
 static_assert(offsetof(KvAppendCommonArgs, elems_per_page) == 88);
 static_assert(offsetof(KvAppendCommonArgs, elems_per_layer) == 92);
-static_assert(sizeof(KvAppendBf16Args) == 112);
+static_assert(offsetof(KvAppendCommonArgs, pool_kv_heads) == 96);
+static_assert(offsetof(KvAppendCommonArgs, kv_head_offset) == 100);
+static_assert(sizeof(KvAppendBf16Args) == 120);
 static_assert(alignof(KvAppendBf16Args) == 8);
-static_assert(offsetof(KvAppendBf16Args, k_pool) == 96);
-static_assert(offsetof(KvAppendBf16Args, v_pool) == 104);
+static_assert(offsetof(KvAppendBf16Args, k_pool) == 104);
+static_assert(offsetof(KvAppendBf16Args, v_pool) == 112);
 
 hipError_t
 launch_kv_append_bf16(
