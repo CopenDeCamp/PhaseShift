@@ -75,6 +75,7 @@ bool compare_steps(const char* label,
 }
 
 int main() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 2) {
         std::printf("SKIP: need 2 GPUs, have %d\n", device_count);
@@ -133,8 +134,7 @@ int main() {
     endpoint1.global_rank = 1;
 
     std::vector<int32_t> shared_tokens;
-    const int steps = static_cast<int>(baseline_options.decode_steps) + 1;
-    std::barrier step_barrier(steps);
+    std::barrier step_barrier(2);
 
     ps::test::SyntheticRunOptions stage0_options;
     stage0_options.model_dir = model_dir;
@@ -161,8 +161,16 @@ int main() {
 
     ps::test::SyntheticRunResult stage0_result;
     ps::test::SyntheticRunResult stage1_result;
-    std::thread stage0([&] { stage0_result = ps::test::run_synthetic_model(stage0_options); });
-    std::thread stage1([&] { stage1_result = ps::test::run_synthetic_model(stage1_options); });
+    std::thread stage0([&] {
+        stage0_result = ps::test::run_synthetic_model(stage0_options);
+        std::printf("stage0 finished ok=%d error=%s\n",
+                    stage0_result.ok ? 1 : 0, stage0_result.error.c_str());
+    });
+    std::thread stage1([&] {
+        stage1_result = ps::test::run_synthetic_model(stage1_options);
+        std::printf("stage1 finished ok=%d error=%s\n",
+                    stage1_result.ok ? 1 : 0, stage1_result.error.c_str());
+    });
     stage0.join();
     stage1.join();
 
@@ -180,6 +188,9 @@ int main() {
         return 1;
     }
 
+    std::printf("shared tokens:");
+    for (int32_t t : shared_tokens) std::printf(" %d", t);
+    std::printf("\n");
     std::printf("pp2 tokens:");
     for (int32_t t : stage1_result.tokens) std::printf(" %d", t);
     std::printf("\n");

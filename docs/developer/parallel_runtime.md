@@ -191,6 +191,35 @@ layout を使わなければならず、`PagedKVPool::create` の
 などの logical batch metadata は全 rank で同一にし、
 local layer range / local state index のみ rank 固有にする。
 
+## Tensor Parallel の weight shard
+
+`include/phaseshift/weights/matrix_shard.h`
+
+```cpp
+enum class ShardAxis { None, OutputFeatures, InputFeatures };
+
+struct MatrixShardSpec {
+    ShardAxis axis;
+    uint32_t rank;
+    uint32_t world_size;
+};
+```
+
+`shard_bf16_weight(full, spec, arena, stream)` が rank の持つ local matrix を返す。
+
+- `OutputFeatures`（Column Parallel）: logical `[out, in]` の out 方向を分割。
+  元 tensor の row view をそのまま使う。追加コピーはない。
+- `InputFeatures`（Row Parallel）: logical `[out, in]` の in 方向を分割。
+  **view では切らない。** GEMM は weight / input を連続 row-major として読むため、
+  stride を持つ view を渡すと行がずれる。連続な local matrix へコピーする。
+
+`validate()` は `rank < world_size` と、分割軸の全長が `world_size` で割り切れることを
+要求する。BF16 以外の encoding は `unsupported` で拒否する。
+
+quantized weight の shard はまだ実装していない。K 方向の shard は
+quant scale group の境界と一致させる必要があるため、pack format の実装を
+読んだうえで loader / packer 側で行う。
+
 ## Tests
 
 | test | label | 内容 |
@@ -201,6 +230,8 @@ local layer range / local state index のみ rank 固有にする。
 | `test_rccl_transport` | `gpu2;rccl;rccl_2gpu` | AllReduce / Send / Recv / 連続利用 |
 | `test_rccl_topology` | `gpu4;rccl;rccl_4gpu` | PP2TP2 の communicator 構成 |
 | `test_qwen35_pp2_e2e` | `gpu2;rccl;rccl_2gpu` | PP2 と 1GPU の一致比較 |
+| `test_qwen35_tp_column_linear` | `gpu2;multi_gpu` | Column Parallel LINEAR の一致比較 |
+| `test_qwen35_tp_row_linear` | `gpu2;rccl;rccl_2gpu` | Row Parallel LINEAR の AllReduce と精度 |
 
 synthetic model は `tests/support/synthetic_qwen35_model.h` が
 `config.json` と `model.safetensors` を書き出し、通常の

@@ -14,6 +14,7 @@
 
 #include <barrier>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -60,13 +61,13 @@ public:
             result.error = "hipStreamCreate failed";
             return result;
         }
-        if (!runner.initialize(options, result)) {
-            runner.cleanup();
-            arrive(options);
-            return result;
+        const int total_steps = static_cast<int>(options.decode_steps) + 1;
+        int completed = 0;
+        if (runner.initialize(options, result)) {
+            runner.execute(options, result, &completed);
         }
-        runner.execute(options, result);
         runner.cleanup();
+        for (int i = completed; i < total_steps; ++i) arrive(options);
         if (result.error.empty() && !runner.error_.empty()) result.error = runner.error_;
         result.ok = result.error.empty();
         return result;
@@ -162,7 +163,8 @@ private:
         return true;
     }
 
-    void execute(const SyntheticRunOptions& options, SyntheticRunResult& result) {
+    void execute(const SyntheticRunOptions& options, SyntheticRunResult& result,
+                 int* completed) {
         std::vector<int32_t> context(options.prefill_tokens);
         for (uint32_t i = 0; i < options.prefill_tokens; ++i)
             context[i] = static_cast<int32_t>((i * 7 + 3) % 64);
@@ -172,6 +174,7 @@ private:
                            ::ps::runtime::ExecutionClass::PREFILL, options, result,
                            &sampled);
         finish_step(options, sampled, ok);
+        ++*completed;
         if (!ok) return;
 
         for (uint32_t step = 0; step < options.decode_steps; ++step) {
@@ -179,7 +182,6 @@ private:
             if (options.shared_tokens != nullptr) {
                 if (step >= options.shared_tokens->size()) {
                     result.error = "coordinator token was not produced";
-                    arrive(options);
                     return;
                 }
                 token = (*options.shared_tokens)[step];
@@ -190,6 +192,7 @@ private:
             ok = run_step(token_ids, 1, ::ps::runtime::ExecutionClass::DECODE, options,
                           result, &sampled);
             finish_step(options, sampled, ok);
+            ++*completed;
             if (!ok) return;
         }
     }
@@ -204,9 +207,16 @@ private:
                   ::ps::runtime::ExecutionClass execution_class,
                   const SyntheticRunOptions& options, SyntheticRunResult& result,
                   int32_t* sampled) {
+        const std::size_t step_index = result.positions.size();
         result.positions.push_back(sequence_->position);
         result.block_counts.push_back(
             static_cast<uint32_t>(sequence_->block_table.size()));
+        std::printf("device=%d step=%zu class=%s begin position=%u\n", options.device,
+                    step_index,
+                    execution_class == ::ps::runtime::ExecutionClass::PREFILL
+                        ? "PREFILL"
+                        : "DECODE",
+                    sequence_->position);
         ::ps::qwen35::ScheduledRequest req;
         req.sequence = sequence_.get();
         req.handle = sequence_->request_handle();
@@ -274,6 +284,7 @@ private:
                 result.tokens.push_back(token);
             }
         }
+        std::printf("device=%d step=%zu done\n", options.device, step_index);
         return true;
     }
 
