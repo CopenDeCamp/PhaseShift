@@ -165,6 +165,19 @@ Status load_q_vector(
     return Status::make_ok();
 }
 
+bool shard_applies_to_layer(const Qwen35LoadOptions& options, bool is_gdn) {
+    return is_gdn ? options.tensor_shard.linear_attention
+                  : options.tensor_shard.full_attention;
+}
+
+ps::weights::WeightLoadOptions layer_matrix_options(const Qwen35LoadOptions& options,
+                                                    bool applies,
+                                                    const ps::weights::MatrixShardSpec& axis) {
+    ps::weights::WeightLoadOptions out = options.weights;
+    out.shard = applies ? axis : ps::weights::MatrixShardSpec{};
+    return out;
+}
+
 Status load_layer_bf16(
     gpu::GpuArena& arena, hipStream_t stream,
     const SafetensorsCollection& collection, std::size_t layer,
@@ -172,6 +185,11 @@ Status load_layer_bf16(
     Qwen35LayerWeights& w)
 {
     const std::string prefix = layer_prefix(layer);
+    const bool is_gdn = !collection.tensor_spec(prefix + "self_attn.q_proj.weight").ok();
+    w.is_gdn = is_gdn;
+    const bool applies = shard_applies_to_layer(options, is_gdn);
+    const auto column_opts = layer_matrix_options(options, applies, options.tensor_shard.column);
+    const auto row_opts = layer_matrix_options(options, applies, options.tensor_shard.row);
 
     Status st = load_norm_vector(collection, prefix + "input_layernorm.weight", arena, stream,
                                  w.input_layernorm_weight);
@@ -179,28 +197,25 @@ Status load_layer_bf16(
     st = load_norm_vector(collection, prefix + "post_attention_layernorm.weight", arena, stream,
                           w.post_attention_layernorm_weight);
     if (!st.ok()) return st;
-    st = load_matrix(collection, prefix + "mlp.gate_proj.weight", arena, stream, options.weights, w.mlp_gate_proj);
+    st = load_matrix(collection, prefix + "mlp.gate_proj.weight", arena, stream, column_opts, w.mlp_gate_proj);
     if (!st.ok()) return st;
-    st = load_matrix(collection, prefix + "mlp.up_proj.weight", arena, stream, options.weights, w.mlp_up_proj);
+    st = load_matrix(collection, prefix + "mlp.up_proj.weight", arena, stream, column_opts, w.mlp_up_proj);
     if (!st.ok()) return st;
-    st = load_matrix(collection, prefix + "mlp.down_proj.weight", arena, stream, options.weights, w.mlp_down_proj);
+    st = load_matrix(collection, prefix + "mlp.down_proj.weight", arena, stream, row_opts, w.mlp_down_proj);
     if (!st.ok()) return st;
-
-    const bool is_gdn = !collection.tensor_spec(prefix + "self_attn.q_proj.weight").ok();
-    w.is_gdn = is_gdn;
 
     if (is_gdn) {
-        st = load_matrix(collection, prefix + "linear_attn.in_proj_a.weight", arena, stream, options.weights, w.attn_in_proj_a);
+        st = load_matrix(collection, prefix + "linear_attn.in_proj_a.weight", arena, stream, column_opts, w.attn_in_proj_a);
         if (!st.ok()) return st;
-        st = load_matrix(collection, prefix + "linear_attn.in_proj_b.weight", arena, stream, options.weights, w.attn_in_proj_b);
+        st = load_matrix(collection, prefix + "linear_attn.in_proj_b.weight", arena, stream, column_opts, w.attn_in_proj_b);
         if (!st.ok()) return st;
-        st = load_matrix(collection, prefix + "linear_attn.in_proj_qkv.weight", arena, stream, options.weights, w.attn_in_proj_qkv);
+        st = load_matrix(collection, prefix + "linear_attn.in_proj_qkv.weight", arena, stream, column_opts, w.attn_in_proj_qkv);
         if (!st.ok()) return st;
-        st = load_matrix(collection, prefix + "linear_attn.in_proj_z.weight", arena, stream, options.weights, w.attn_in_proj_z);
+        st = load_matrix(collection, prefix + "linear_attn.in_proj_z.weight", arena, stream, column_opts, w.attn_in_proj_z);
         if (!st.ok()) return st;
         st = load_vector(collection, prefix + "linear_attn.conv1d.weight", arena, stream, w.attn_conv1d_weight);
         if (!st.ok()) return st;
-        st = load_matrix(collection, prefix + "linear_attn.out_proj.weight", arena, stream, options.weights, w.attn_out_proj);
+        st = load_matrix(collection, prefix + "linear_attn.out_proj.weight", arena, stream, row_opts, w.attn_out_proj);
         if (!st.ok()) return st;
         st = load_vector(collection, prefix + "linear_attn.norm.weight", arena, stream, w.attn_norm_weight);
         if (!st.ok()) return st;
@@ -209,13 +224,13 @@ Status load_layer_bf16(
         st = load_vector(collection, prefix + "linear_attn.A_log", arena, stream, w.attn_A_log);
         if (!st.ok()) return st;
     } else {
-        st = load_matrix(collection, prefix + "self_attn.q_proj.weight", arena, stream, options.weights, w.attn_q_proj);
+        st = load_matrix(collection, prefix + "self_attn.q_proj.weight", arena, stream, column_opts, w.attn_q_proj);
         if (!st.ok()) return st;
-        st = load_matrix(collection, prefix + "self_attn.k_proj.weight", arena, stream, options.weights, w.attn_k_proj);
+        st = load_matrix(collection, prefix + "self_attn.k_proj.weight", arena, stream, column_opts, w.attn_k_proj);
         if (!st.ok()) return st;
-        st = load_matrix(collection, prefix + "self_attn.v_proj.weight", arena, stream, options.weights, w.attn_v_proj);
+        st = load_matrix(collection, prefix + "self_attn.v_proj.weight", arena, stream, column_opts, w.attn_v_proj);
         if (!st.ok()) return st;
-        st = load_matrix(collection, prefix + "self_attn.o_proj.weight", arena, stream, options.weights, w.attn_o_proj);
+        st = load_matrix(collection, prefix + "self_attn.o_proj.weight", arena, stream, row_opts, w.attn_o_proj);
         if (!st.ok()) return st;
         st = load_vector(collection, prefix + "self_attn.q_norm.weight", arena, stream, w.attn_q_norm_weight);
         if (!st.ok()) return st;

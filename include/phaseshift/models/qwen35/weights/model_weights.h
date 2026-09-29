@@ -64,9 +64,17 @@ struct Qwen35ModelWeights {
     Qwen35MtpWeights mtp;
 };
 
+struct Qwen35TensorShard {
+    ps::weights::MatrixShardSpec column;
+    ps::weights::MatrixShardSpec row;
+    bool full_attention = true;
+    bool linear_attention = false;
+};
+
 struct Qwen35LoadOptions {
     bool verify_quantized_payload_crc = false;
     ps::weights::WeightLoadOptions weights;
+    Qwen35TensorShard tensor_shard;
 };
 
 Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(

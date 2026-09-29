@@ -5,6 +5,7 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/io/safetensors_reader.h>
 #include <phaseshift/quantization/fpx/quantized_model_reader.h>
+#include <phaseshift/weights/matrix_shard.h>
 #include <phaseshift/weights/matrix_weight.h>
 #include <hip/hip_runtime.h>
 
@@ -53,6 +54,7 @@ Status validate_quantized_model(const quantization::fpx::QuantizedModelReader& r
 // property of the weight loading layer, not of any model family.
 struct WeightLoadOptions {
     bool preshuffle = true;
+    MatrixShardSpec shard;
 };
 
 Result<gpu::Tensor> load_bf16_tensor(
