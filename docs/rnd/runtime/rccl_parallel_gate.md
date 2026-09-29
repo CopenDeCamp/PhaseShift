@@ -260,7 +260,57 @@ TP_COLUMN_QUANTIZED: PASS
   rank0 / rank1 local GEMM の横方向 concat が **bit exact**
 - InputFeatures shard が `unsupported` で拒否されることを確認
 
-これで Gate TP1 の対象 format（BF16 / PSQ4 / PSQ8）が揃った。
+これで Gate TP1 の Column Parallel の対象 format が揃った。
+
+### PSQ4 / PSQ8 の Row Parallel
+
+InputFeatures は view で切れないと判断したうえで、repk 方式を実装した。
+packed buffer の K 範囲 `[ib0, ib0+nb_local)` は tile ごとに
+`tile_stride` ずつ離れているため、`Tensor::slice` では tile 間の gap が
+full のまま残り、`k_padded` (= local) から tile 間隔を再計算する kernel と
+ズレる。そこで次のように詰め直す。
+
+```cpp
+hipMemcpy2DAsync(dst_codes, local_tile_stride,      // dst pitch = 詰めた tile
+                 src_codes + ib0 * code_block_bytes, // K 範囲の開始
+                 full_tile_stride,                   // src pitch = full tile stride
+                 local_tile_stride,                  // 1 tile の幅
+                 tiles, DeviceToDevice, stream);
+```
+
+`scales` も同じ形で処理する。`code_block_bytes` は
+`codes_row_stride_bytes / nb_full` から導出する（PSQ4 = 256、PSQ8 = 512）。
+BF16 の InputFeatures shard である `copy_input_shard` が
+`hipMemcpy2DAsync` で row を詰めるのと同じ構造なので、
+repack も 1回の2D copy で済む。
+
+K 境界は 32 の倍数を要求する。scale が `(row, 32-elem block)` 単位のため、
+32 の倍数なら block をまたがず、値はそのまま使える。
+つまり repack は layout の移動だけで再量子化を伴わない。
+
+### 結果
+
+`test_qwen35_tp_row_quantized`（label `gpu1;required`）。
+
+```text
+PSQ4 row shard gemm (sum of partials): mismatches=68/192
+  max_abs=0.0078125 scale=1.82031 max_abs/scale=0.00429185
+PSQ8 row shard gemm (sum of partials): mismatches=73/192
+  max_abs=0.0078125 scale=1.63281 max_abs/scale=0.00478469
+TP_ROW_QUANTIZED: PASS
+```
+
+- shard した `codes` / `scales` が tile ごとに full の対応 K 範囲と
+  `memcmp` で完全一致する（repack の正しさ）
+- rank0 / rank1 の partial GEMM を足したものが full GEMM と
+  **出力 scale の 1% 以内**（0.43% / 0.48%）
+- `max_abs` は BF16 の1 ULP（0.0078125）。既存の BF16 Row Parallel test の
+  0.41% と同じ原因で、partial を BF16 に丸めてから足しているため
+  bit exact にはならない（Gate §35 の指摘どおり）
+- OutputFeatures shard が引き続き使えることも確認する
+
+これで Gate TP1 の対象 format（BF16 / PSQ4 / PSQ8）が
+Column / Row 両方で揃った。
 
 ## Gate TP2: standard attention の TP 化
 
@@ -567,9 +617,8 @@ required 129/129、rccl_2gpu 6/6、rccl_4gpu 2/2、multi_gpu 1/1 も PASS。
 
 ## 未解決
 
-- PSQ4 / PSQ8 の InputFeatures shard（Row Parallel）。OutputFeatures は
-  実装済みだが、K 範囲が tile ごとに `tile_stride` がずれるため view で
-  切れず、canonical から preshuffle をやり直す repack が必要
+- quantized Row Parallel を FP32 partial にして bit exact にするかの判断。
+  BF16 partial では既存の Row Parallel と同じ 1% 以内の差が出る
 - 本番 model（Qwen3.8-27B-PSQ）での Gate P0 計測と VRAM/GPU の report。
   external model が要る
 - Row / GDN の AllReduce を FP32 partial にして bit exact にするかの判断

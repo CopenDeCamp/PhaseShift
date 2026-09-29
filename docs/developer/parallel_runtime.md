@@ -257,10 +257,17 @@ quantized weight（PSQ4 / PSQ8）の shard は axis ごとに扱いが違う。
   rank 境界が 16 の倍数でないと tile が切れるため、
   `offset % 16 == 0 && extent % 16 == 0` を要求し、
   preshuffled なものだけを対象にする
-- InputFeatures: `unsupported` で拒否する。K 範囲が tile ごとに
-  `tile_stride` ずつ動くため単一の view で表せず repack が要る。
-  32 の倍数で切れば quant scale group をまたがないので再量子化は
-  不要だが、canonical から preshuffle をやり直す必要がある
+- InputFeatures: tile ごとに K 範囲を詰める `hipMemcpy2DAsync` で repack
+  する。`src_pitch` = full の tile stride、`dst_pitch` = local の tile stride、
+  `height` = tile 数で、1回の2D copy で全 tile を処理できる。
+  BF16 の InputFeatures shard（`copy_input_shard`）と同じ手法である。
+  K 境界は 32 の倍数を要求し、quant scale group をまたがないようにする。
+  32 の倍数で切れば値はそのまま使えるので再量子化は不要で、
+  repack は layout の移動だけを伴う
+
+`k_padded` と `codes_row_stride_bytes` / `storage_scale_stride_bytes` は
+shard に合わせて local の値へ更新する。dispatch 側が
+`sstride >= k_padded` を検検証するため、両方を同時に縮めないと通らない。
 
 `load_layer_quantized` も BF16 の `load_layer_bf16` と同じく、
 weight 種別ごとに column / row の opts を渡す。
