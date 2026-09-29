@@ -190,6 +190,11 @@ Status load_layer_bf16(
     const bool applies = shard_applies_to_layer(options, is_gdn);
     const auto column_opts = layer_matrix_options(options, applies, options.tensor_shard.column);
     const auto row_opts = layer_matrix_options(options, applies, options.tensor_shard.row);
+    const bool mlp_applies = options.tensor_shard.mlp;
+    const auto mlp_column_opts =
+        layer_matrix_options(options, mlp_applies, options.tensor_shard.column);
+    const auto mlp_row_opts =
+        layer_matrix_options(options, mlp_applies, options.tensor_shard.row);
 
     Status st = load_norm_vector(collection, prefix + "input_layernorm.weight", arena, stream,
                                  w.input_layernorm_weight);
@@ -197,11 +202,11 @@ Status load_layer_bf16(
     st = load_norm_vector(collection, prefix + "post_attention_layernorm.weight", arena, stream,
                           w.post_attention_layernorm_weight);
     if (!st.ok()) return st;
-    st = load_matrix(collection, prefix + "mlp.gate_proj.weight", arena, stream, column_opts, w.mlp_gate_proj);
+    st = load_matrix(collection, prefix + "mlp.gate_proj.weight", arena, stream, mlp_column_opts, w.mlp_gate_proj);
     if (!st.ok()) return st;
-    st = load_matrix(collection, prefix + "mlp.up_proj.weight", arena, stream, column_opts, w.mlp_up_proj);
+    st = load_matrix(collection, prefix + "mlp.up_proj.weight", arena, stream, mlp_column_opts, w.mlp_up_proj);
     if (!st.ok()) return st;
-    st = load_matrix(collection, prefix + "mlp.down_proj.weight", arena, stream, row_opts, w.mlp_down_proj);
+    st = load_matrix(collection, prefix + "mlp.down_proj.weight", arena, stream, mlp_row_opts, w.mlp_down_proj);
     if (!st.ok()) return st;
 
     if (is_gdn) {

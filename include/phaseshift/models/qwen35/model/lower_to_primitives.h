@@ -28,6 +28,8 @@ struct Qwen35LowerOptions {
     std::span<const uint32_t> hidden_taps;
     ModelPartition partition{};
     uint32_t pipeline_peer_rank = 0;
+    uint32_t tensor_parallel_size = 1;
+    uint32_t tensor_parallel_rank = 0;
 };
 
 Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(

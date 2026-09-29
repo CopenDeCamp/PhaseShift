@@ -69,6 +69,7 @@ struct Qwen35TensorShard {
     ps::weights::MatrixShardSpec row;
     bool full_attention = true;
     bool linear_attention = false;
+    bool mlp = false;
 };
 
 struct Qwen35LoadOptions {
