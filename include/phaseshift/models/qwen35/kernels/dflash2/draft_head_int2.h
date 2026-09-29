@@ -122,6 +122,42 @@ hipError_t launch_dflash2_psq8_candidate_rerank(
     uint32_t logits_row_stride,
     hipStream_t stream);
 
+inline constexpr uint32_t kDflash2RadixTopnThreads = 256u;
+inline constexpr uint32_t kDflash2RadixSortThreads = 128u;
+inline constexpr uint32_t kDflash2RadixTopnBins = 256u;
+inline constexpr uint32_t kDflash2RadixTopnPasses = 4u;
+inline constexpr uint32_t kDflash2RadixMaxPartitions = 128u;
+inline constexpr uint32_t kDflash2RadixTopnCrossoverPool = 64u;
+
+inline uint32_t dflash2_radix_default_partitions(uint32_t vocab) noexcept {
+    constexpr uint32_t kPerPartition =
+        kDflash2Int2TopnThreads * kDflash2Int2TopnPerThread;
+    uint32_t partitions = (vocab + kPerPartition - 1u) / kPerPartition;
+    if (partitions == 0u)
+        partitions = 1u;
+    if (partitions > kDflash2RadixMaxPartitions)
+        partitions = kDflash2RadixMaxPartitions;
+    return partitions;
+}
+
+std::size_t dflash2_radix_topn_scratch_bytes(uint32_t rows, uint32_t partitions,
+                                             uint32_t vocab);
+
+bool dflash2_radix_topn_preferred(uint32_t pool);
+
+hipError_t launch_dflash2_radix_topn(
+    const float* logits,
+    uint32_t rows,
+    uint32_t vocab,
+    uint32_t row_stride,
+    uint32_t pool,
+    int32_t* out_ids,
+    float* out_logits,
+    uint32_t partitions,
+    void* scratch,
+    std::size_t scratch_bytes,
+    hipStream_t stream);
+
 inline constexpr uint32_t kDflash2TargetProxyMaxPool = kDflash2Int2MaxPool;
 
 void dflash2_int2_build_error_table(

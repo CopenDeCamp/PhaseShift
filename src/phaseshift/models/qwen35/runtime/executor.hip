@@ -334,6 +334,9 @@ Status build_host_execution_context(
     ctx.constraint_masks = constraint_masks;
     ctx.constraint_mask_words = constraint_mask_words;
     ctx.lm_head_proxy = executor.lm_head_proxy.valid() ? &executor.lm_head_proxy : nullptr;
+    ctx.lm_head_shadow_pending = false;
+    ctx.lm_head_shadow_full = nullptr;
+    ctx.lm_head_shadow_rows = 0;
     ctx.min_visible_tokens = min_visible_tokens;
     ctx.max_visible_tokens = max_visible_tokens;
     return Status::make_ok();

@@ -114,6 +114,7 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/dflash2/topk_optimized.hip
     src/phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.hip
     src/phaseshift/models/qwen35/kernels/dflash2/coarse_topn.hip
+    src/phaseshift/models/qwen35/kernels/dflash2/radix_topn.hip
     src/phaseshift/models/qwen35/kernels/dflash2/swiglu.hip
     src/phaseshift/models/qwen35/kernels/dflash2/attention.hip
     src/phaseshift/models/qwen35/kernels/dflash2/kv_ring.hip

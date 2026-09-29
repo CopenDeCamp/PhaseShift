@@ -111,6 +111,8 @@ target_include_directories(test_dflash2_psq4_shapes PRIVATE "${CMAKE_SOURCE_DIR}
 phaseshift_add_test(NAME test_dflash2_int2_pack SOURCE unit/test_dflash2_int2_pack.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_int2_coarse_head SOURCE unit/test_dflash2_int2_coarse_head.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_coarse_topn SOURCE unit/test_dflash2_coarse_topn.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
+phaseshift_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
+phaseshift_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_psq8_rerank SOURCE unit/test_dflash2_psq8_rerank.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_error_bound SOURCE unit/test_target_lm_proxy_error_bound.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_upper_topn SOURCE unit/test_target_lm_proxy_upper_topn.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
@@ -126,6 +128,7 @@ target_include_directories(test_qwen35_mtp_kv_cache PRIVATE "${CMAKE_SOURCE_DIR}
 phaseshift_add_test(NAME test_qwen35_mtp_state SOURCE unit/test_qwen35_mtp_state.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
 target_include_directories(test_qwen35_mtp_state PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+phaseshift_add_test(NAME test_lm_head_proxy_path SOURCE unit/test_lm_head_proxy_path.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_decode_backend_contract SOURCE unit/test_decode_backend_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_qwen35_spec_transaction SOURCE unit/test_qwen35_spec_transaction.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
 target_include_directories(test_qwen35_spec_transaction PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -240,6 +243,7 @@ add_custom_target(
         test_dflash2_int2_pack
         test_dflash2_int2_coarse_head
         test_dflash2_coarse_topn
+        test_dflash2_radix_topn
         test_dflash2_psq8_rerank
         test_target_lm_proxy_error_bound
         test_target_lm_proxy_upper_topn
@@ -297,6 +301,7 @@ add_custom_target(
         test_qwen35_mtp_kv_cache
         test_qwen35_mtp_state
         test_qwen35_spec_verify
+        test_lm_head_proxy_path
         test_decode_backend_contract
         test_qwen35_spec_transaction
         test_architecture_boundaries

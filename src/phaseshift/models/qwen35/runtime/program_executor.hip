@@ -616,6 +616,18 @@ Status execute_program_range(
         }
         ++i;
     }
+    if (ctx.lm_head_shadow_pending) {
+        Status shadow_status = Status::make_ok();
+        if (ctx.lm_head_proxy != nullptr) {
+            shadow_status = ctx.lm_head_proxy->compare_shadow(
+                ctx.lm_head_shadow_full, ctx.lm_head_shadow_rows, stream);
+        }
+        ctx.lm_head_shadow_pending = false;
+        ctx.lm_head_shadow_full = nullptr;
+        ctx.lm_head_shadow_rows = 0;
+        if (!shadow_status.ok())
+            return shadow_status;
+    }
 #ifdef PHASESHIFT_HIP_GRAPH
     if (ctx.staging_pool != nullptr) {
         const int bidx = bucket_to_index(program.row_bucket);
