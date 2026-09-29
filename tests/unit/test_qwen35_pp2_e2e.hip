@@ -197,6 +197,33 @@ int main() {
     for (int32_t t : stage1_result.tokens) std::printf(" %d", t);
     std::printf("\n");
 
+    std::printf("weight bytes: full=%zu stage0=%zu stage1=%zu\n",
+                baseline.weight_bytes, stage0_result.weight_bytes,
+                stage1_result.weight_bytes);
+    std::printf("unowned layers empty: stage0=%d stage1=%d\n",
+                stage0_result.unowned_layers_empty ? 1 : 0,
+                stage1_result.unowned_layers_empty ? 1 : 0);
+    if (baseline.weight_bytes == 0) {
+        report("weight bytes baseline", "model weights are empty");
+        ++failures;
+    }
+    if (stage0_result.weight_bytes >= baseline.weight_bytes) {
+        report("stage0 weight bytes", "stage0 loaded no less than the full model");
+        ++failures;
+    }
+    if (stage1_result.weight_bytes >= baseline.weight_bytes) {
+        report("stage1 weight bytes", "stage1 loaded no less than the full model");
+        ++failures;
+    }
+    if (!stage0_result.unowned_layers_empty) {
+        report("stage0 unowned layers", "stage0 allocated weight for unowned layers");
+        ++failures;
+    }
+    if (!stage1_result.unowned_layers_empty) {
+        report("stage1 unowned layers", "stage1 allocated weight for unowned layers");
+        ++failures;
+    }
+
     if (!compare_steps("stage0 boundary vs baseline", baseline.tap_boundary,
                        stage0_result.tap_boundary))
         ++failures;

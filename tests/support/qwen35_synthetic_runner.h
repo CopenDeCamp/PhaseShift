@@ -57,6 +57,8 @@ struct SyntheticRunResult {
     std::vector<uint32_t> block_counts;
     std::size_t comm_count = 0;
     std::vector<uint64_t> step_us;
+    std::size_t weight_bytes = 0;
+    bool unowned_layers_empty = false;
 };
 
 class SyntheticRunner {
@@ -94,6 +96,41 @@ private:
         if (options.step_barrier != nullptr) options.step_barrier->arrive_and_wait();
     }
 
+    static std::size_t matrix_weight_bytes(const ps::weights::MatrixWeight& w) {
+        return w.bf16.allocation_bytes() + w.data.allocation_bytes() +
+               w.codes.allocation_bytes() + w.scales.allocation_bytes() +
+               w.compute_codes.allocation_bytes() + w.compute_scales_bf16.allocation_bytes();
+    }
+
+    static std::size_t layer_weight_bytes(const ::ps::qwen35::Qwen35LayerWeights& lw) {
+        return lw.input_layernorm_weight.allocation_bytes() +
+               lw.post_attention_layernorm_weight.allocation_bytes() +
+               matrix_weight_bytes(lw.mlp_gate_proj) + matrix_weight_bytes(lw.mlp_up_proj) +
+               matrix_weight_bytes(lw.mlp_down_proj) + matrix_weight_bytes(lw.attn_q_proj) +
+               matrix_weight_bytes(lw.attn_k_proj) + matrix_weight_bytes(lw.attn_v_proj) +
+               matrix_weight_bytes(lw.attn_o_proj) + lw.attn_q_norm_weight.allocation_bytes() +
+               lw.attn_k_norm_weight.allocation_bytes() +
+               matrix_weight_bytes(lw.attn_in_proj_a) + matrix_weight_bytes(lw.attn_in_proj_b) +
+               matrix_weight_bytes(lw.attn_in_proj_qkv) + matrix_weight_bytes(lw.attn_in_proj_z) +
+               lw.attn_conv1d_weight.allocation_bytes() +
+               matrix_weight_bytes(lw.attn_out_proj) + lw.attn_norm_weight.allocation_bytes() +
+               lw.attn_dt_bias.allocation_bytes() + lw.attn_A_log.allocation_bytes();
+    }
+
+    static std::size_t model_weight_bytes(const ::ps::qwen35::Qwen35ModelWeights& mw) {
+        std::size_t bytes = matrix_weight_bytes(mw.embed_tokens) +
+                            mw.final_norm_weight.allocation_bytes();
+        if (!mw.lm_head_tied) bytes += matrix_weight_bytes(mw.lm_head);
+        for (const auto& lw : mw.layers) bytes += layer_weight_bytes(lw);
+        if (mw.mtp.present) {
+            bytes += mw.mtp.pre_fc_norm_embedding_weight.allocation_bytes() +
+                     mw.mtp.pre_fc_norm_hidden_weight.allocation_bytes() +
+                     mw.mtp.final_norm_weight.allocation_bytes() +
+                     matrix_weight_bytes(mw.mtp.fc) + layer_weight_bytes(mw.mtp.layer);
+        }
+        return bytes;
+    }
+
     bool initialize(const SyntheticRunOptions& options, SyntheticRunResult& result) {
         auto arena_result = ::ps::gpu::GpuArena::create(options.device, options.arena_bytes);
         if (!arena_result.ok()) {
@@ -104,6 +141,7 @@ private:
 
         ::ps::qwen35::Qwen35LoadOptions load_options;
         load_options.tensor_shard = options.tensor_shard;
+        load_options.partition = options.partition;
         auto model_result = ::ps::qwen35::Qwen35Model::load_from_safetensors(
             options.model_dir, *arena_, stream_, load_options);
         if (!model_result.ok()) {
@@ -112,7 +150,25 @@ private:
         }
         model_ = std::make_unique<::ps::qwen35::Qwen35Model>(model_result.release());
 
+        result.weight_bytes = model_weight_bytes(model_->weights());
+
         const auto& tc = model_->text_config();
+        {
+            const auto partition = ::ps::qwen35::resolve_model_partition(
+                options.partition, static_cast<uint32_t>(tc.num_hidden_layers));
+            result.unowned_layers_empty = true;
+            const auto& layers = model_->weights().layers;
+            for (std::size_t l = 0; l < layers.size(); ++l) {
+                if (l >= partition.layer_begin && l < partition.layer_end) continue;
+                const auto& lw = layers[l];
+                if (lw.attn_q_proj.rows != 0 || lw.attn_k_proj.rows != 0 ||
+                    lw.attn_v_proj.rows != 0 || lw.attn_o_proj.rows != 0 ||
+                    lw.attn_in_proj_qkv.rows != 0 || lw.mlp_gate_proj.rows != 0 ||
+                    lw.mlp_up_proj.rows != 0 || lw.mlp_down_proj.rows != 0) {
+                    result.unowned_layers_empty = false;
+                }
+            }
+        }
         max_blocks_ = (max_seq_len_ + page_tokens_ - 1) / page_tokens_;
 
         auto slot_result =
@@ -125,8 +181,12 @@ private:
 
         const uint32_t gdn_tp =
             options.tp_linear_attention ? options.tensor_parallel_size : 1u;
+        const auto partition = ::ps::qwen35::resolve_model_partition(
+            options.partition, static_cast<uint32_t>(tc.layer_types.size()));
         auto gdn_result = ::ps::qwen35::GdnStatePool::create(
-            *arena_, 1, ::ps::qwen35::GdnStatePoolLayout::from_text_config(tc, gdn_tp));
+            *arena_, 1,
+            ::ps::qwen35::GdnStatePoolLayout::from_text_config(
+                tc, gdn_tp, partition.layer_begin, partition.layer_end));
         if (!gdn_result.ok()) {
             result.error = message("GdnStatePool::create", gdn_result.status());
             return false;
@@ -134,8 +194,9 @@ private:
         gdn_pool_ = std::make_unique<::ps::qwen35::GdnStatePool>(gdn_result.release());
 
         uint32_t attn_layers = 0;
-        for (const int t : tc.layer_types)
-            if (t == 1) ++attn_layers;
+        for (uint32_t i = partition.layer_begin;
+             i < partition.layer_end && i < tc.layer_types.size(); ++i)
+            if (tc.layer_types[i] == 1) ++attn_layers;
         auto kv_result = ::ps::qwen35::PagedKVPool::create(
             *arena_, max_blocks_ + 4, page_tokens_, attn_layers, tc.num_key_value_heads,
             tc.attention_head_dim, ::ps::qwen35::KVCacheDType::BF16);
