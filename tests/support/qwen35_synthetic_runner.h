@@ -38,6 +38,7 @@ struct SyntheticRunOptions {
     uint32_t tensor_parallel_rank = 0;
     bool tp_full_attention = true;
     bool tp_linear_attention = false;
+    bool tp_mlp = false;
     ::ps::qwen35::Qwen35TensorShard tensor_shard;
     uint64_t arena_bytes = 512ull * 1024ull * 1024ull;
 };
@@ -51,6 +52,7 @@ struct SyntheticRunResult {
     std::vector<std::vector<std::uint16_t>> tap_boundary;
     std::vector<uint32_t> positions;
     std::vector<uint32_t> block_counts;
+    std::size_t comm_count = 0;
 };
 
 class SyntheticRunner {
@@ -70,6 +72,7 @@ public:
         int completed = 0;
         if (runner.initialize(options, result)) {
             runner.execute(options, result, &completed);
+            runner.record_comm_count(result);
         }
         runner.cleanup();
         for (int i = completed; i < total_steps; ++i) arrive(options);
@@ -149,6 +152,7 @@ private:
         config.tensor_parallel_rank = options.tensor_parallel_rank;
         config.tp_full_attention = options.tp_full_attention;
         config.tp_linear_attention = options.tp_linear_attention;
+        config.tp_mlp = options.tp_mlp;
         for (uint32_t i = 0; i < options.hidden_taps.size() && i < max_taps; ++i)
             config.target_hidden_taps[i] = options.hidden_taps[i];
         config.target_hidden_tap_count =
@@ -174,6 +178,11 @@ private:
         sequence_ = std::make_unique<::ps::qwen35::PagedSequenceState>(
             sequence_result.release());
         return true;
+    }
+
+    void record_comm_count(SyntheticRunResult& result) {
+        if (executor_ == nullptr) return;
+        result.comm_count = executor_->program_set.programs[0].comms.size();
     }
 
     void execute(const SyntheticRunOptions& options, SyntheticRunResult& result,
