@@ -257,6 +257,94 @@ int main() {
     check(all_commit_ok, "commit from compact log is bit-exact vs sequential decode1");
     (void)all_hist_ok;
 
+    std::vector<float> serial16(state_n);
+    {
+        ps::gpu::discard_cleanup_result(
+            hipMemcpy(d.state, s0.data(), state_n * 4u, hipMemcpyHostToDevice));
+        bool sok = true;
+        for (uint32_t li = 0u; li < kStates && sok; ++li) {
+            ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
+            a.state_index = li;
+            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_decode1_serial(a, stream) !=
+                hipSuccess)
+                sok = false;
+        }
+        if (sok && hipStreamSynchronize(stream) != hipSuccess) sok = false;
+        if (sok)
+            sok = hipMemcpy(serial16.data(), d.state, state_n * 4u, hipMemcpyDeviceToHost) ==
+                  hipSuccess;
+        check(sok, "decode1_serial chain runs (multi-layer)");
+        size_t first = 0;
+        check(all_bits_equal(ref_traj[kRows], serial16, first),
+              "decode1_serial matches per-row decode1 chain (multi-layer)");
+    }
+
+    {
+        ps::gpu::discard_cleanup_result(
+            hipMemcpy(d.state, s0.data(), state_n * 4u, hipMemcpyHostToDevice));
+        ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+        c.compact_rows = kRows;
+        bool cok =
+            ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) == hipSuccess;
+        if (cok && hipStreamSynchronize(stream) != hipSuccess) cok = false;
+        std::vector<float> got(state_n);
+        if (cok)
+            cok = hipMemcpy(got.data(), d.state, state_n * 4u, hipMemcpyDeviceToHost) ==
+                  hipSuccess;
+        size_t first = 0;
+        if (cok && !all_bits_equal(serial16, got, first)) {
+            cok = false;
+            std::printf("  [serial-commit] first_bad=%zu ref=%.6g got=%.6g\n", first,
+                        (double)serial16[first], (double)got[first]);
+        }
+        check(cok, "commit reproduces decode1_serial state (multi-layer, rows=16)");
+    }
+
+    constexpr uint32_t kRowsExact = 8u;
+    std::vector<float> rows8(state_n);
+    {
+        ps::gpu::discard_cleanup_result(
+            hipMemcpy(d.state, s0.data(), state_n * 4u, hipMemcpyHostToDevice));
+        bool sok = true;
+        for (uint32_t li = 0u; li < kStates && sok; ++li) {
+            ::ps::kernel::GdnRecurrenceArgs a = make_args(d);
+            a.state_index = li;
+            a.actual_rows = kRowsExact;
+            if (::ps::kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(a, stream) !=
+                hipSuccess)
+                sok = false;
+        }
+        if (sok && hipStreamSynchronize(stream) != hipSuccess) sok = false;
+        if (sok)
+            sok = hipMemcpy(rows8.data(), d.state, state_n * 4u, hipMemcpyDeviceToHost) ==
+                  hipSuccess;
+        check(sok, "decode_rows_exact chain runs (multi-layer)");
+        size_t first = 0;
+        check(all_bits_equal(ref_traj[kRowsExact], rows8, first),
+              "decode_rows_exact matches per-row decode1 chain (multi-layer)");
+    }
+
+    {
+        ps::gpu::discard_cleanup_result(
+            hipMemcpy(d.state, s0.data(), state_n * 4u, hipMemcpyHostToDevice));
+        ::ps::kernel::GdnRecurrenceArgs c = make_args(d);
+        c.compact_rows = kRowsExact;
+        bool cok =
+            ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(c, stream) == hipSuccess;
+        if (cok && hipStreamSynchronize(stream) != hipSuccess) cok = false;
+        std::vector<float> got(state_n);
+        if (cok)
+            cok = hipMemcpy(got.data(), d.state, state_n * 4u, hipMemcpyDeviceToHost) ==
+                  hipSuccess;
+        size_t first = 0;
+        if (cok && !all_bits_equal(rows8, got, first)) {
+            cok = false;
+            std::printf("  [rows-commit] first_bad=%zu ref=%.6g got=%.6g\n", first,
+                        (double)rows8[first], (double)got[first]);
+        }
+        check(cok, "commit reproduces decode_rows_exact state (multi-layer, rows=8)");
+    }
+
     d.free_all();
     ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);

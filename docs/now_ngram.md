@@ -112,6 +112,48 @@ parity が成立すれば rerun 全廃による明確な高速化が期待でき
 
 ---
 
+## 追記（2026-09-30）: 候補1・2 の切り分け結果
+
+### 候補2: verify kernel の層対応（完了）
+
+`test_gdn_compact_log_commit` を 2 層に拡張し、verify で使う 3 経路すべてで検証した。
+
+- `decode1`（per-row chain）
+- `launch_gdn_recurrence_f32_wmma_decode1_serial`（rows=16）
+- `launch_gdn_recurrence_f32_wmma_decode_rows_exact`（rows=8）
+
+各経路の state と per-row decode1 chain、commit 結果が三者一致（bit-exact）。
+`state_index ∈ [0, num_gdn_states)` は dispatch で検証済みで、log 層との対応も正しい。
+テストは 8/8 PASS。
+
+### 候補1: conv 切り分け（完了）
+
+decoder 統合を再適用し、env で切り分けた（`..._COMPACT_FULL_HISTORY` /
+`..._COMPACT_USE_HISTORY_REC` / `..._COMPACT_COMPARE`）。correctness（GEN=128）での結果:
+
+| 構成 | parity |
+| --- | --- |
+| control（配線 + spill + snapshot、rec は history から復元） | **32/32** |
+| full-history conv + commit | 24/32 |
+| conv-only + commit | 24/32 |
+
+- control が 32/32 のため、conv の扱い・snapshot 併用・spill の追加は verify の数値結果に
+  影響しない（配線は健全）。
+- full-history と conv-only は同一。**conv は原因ではない**。
+- 残差は **rec commit のみ**。比較診断では commit と history の差は特定の層
+  （layer 1 / 3 / 43 など）に局在し、`max_abs` 1e-8〜3e-5、要素数 128〜768。
+  大半の accept は bit-exact。
+- kernel 単体では 3 経路すべて bit-exact だが、**実モデルのデータでのみ**微小差が出る。
+  `de0 = __expf(gval−gval)` を spill の k に掛ける実験は悪化した。
+
+### 状態
+
+- 確定: kernel 層（spill / commit / 層対応 / bit-exact テスト）と候補2。
+- 未確定: 実モデルデータ依存の rec 差の原因。decoder 統合は revert（作業ツリーには残さない）。
+- 詳細は `docs/rnd/gdn/compact_commit_poc.md` を参照。
+
+---
+
 ## 再現
 
 ```bash

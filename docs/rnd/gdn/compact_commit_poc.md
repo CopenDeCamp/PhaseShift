@@ -85,34 +85,56 @@ commit は decode1 と同一の state fragment / WMMA 順序を mirror する専
 1 launch でループし、`S ← a_i·S + k_i·δ_i^T` を `compact_rows` 回適用する。
 
 検証 `tests/kernels/optimized/test_gdn_compact_log_commit.hip`（27B geometry、2 層、
-rows=16）:
+rows=16、lossy 既定）:
 
 - sequential decode1 で各行・各層を回して spill と参照軌跡を取得
-- 各 m で `S_0` から commit し、参照 `S_m` と比較
-- 結果: **全 m・全層で bit-exact**
+- 各 m で `S_0` から commit し、参照 `S_m` と比較 → **全 m・全層で bit-exact**
+- `launch_gdn_recurrence_f32_wmma_decode1_serial`（rows=16）と
+  `launch_gdn_recurrence_f32_wmma_decode_rows_exact`（rows=8）についても、
+  それぞれの経路の state と per-row decode1 chain、commit 結果が三者一致（bit-exact）
+- verify で使う 3 経路すべてで、層インデックス（`state_index` ↔ log layer）対応が正しい
 
-## e2e 統合の試み（未完了）
+## e2e 統合の切り分け（2026-09-30）
 
-decoder に `PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT=1` で compact commit 経路を接続する
-実装を試した（conv は既存 history 機構を conv-only で併用、rec は snapshot + commit）。
+decoder に `PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT=1` で compact commit 経路を接続し、
+以下の env で切り分けた。
 
-- 最初の off-by-one（log 行数を `history_rows` で確保し、verify の `total_k+1` 行が
-  隣層の row 0 を上書き）を修正し、parity は 0/32 → 16/32 まで改善した。
-- しかし **kernel 単体では bit-exact であるにもかかわらず、e2e parity は content 依存で
-  約半数失敗**する（json512 / reasoning2048 は合格、code / json2048 / prose2048 は不合格）。
-- 原因は未特定。decoder 統合はいったん revert し、kernel 層（spill / commit / 層対応 /
-  bit-exact テスト）のみ確定した。
+- `..._COMPACT_FULL_HISTORY=1`: conv をフル history（conv+rec）と共有し、rec のみ commit
+- `..._COMPACT_USE_HISTORY_REC=1`: compact spill は行うが rec は history から復元（control）
+- `..._COMPACT_COMPARE=1`: commit 状態と history 状態を層ごとに比較
 
-次の調査候補: conv-only history の restore、snapshot 併用時の状態差、verify
-Decode1Serial と commit の層インデックス対応。
+correctness（GEN=128、Exact、既定 lossy）での結果:
+
+| 構成 | parity |
+| --- | --- |
+| control（配線 + spill + snapshot、rec は history） | **32/32** |
+| full-history conv + commit | 24/32 |
+| conv-only + commit | 24/32 |
+
+- **control が 32/32**: conv の扱い、snapshot 併用、compact view/spill の追加は
+  verify の数値結果に影響しない（配線は健全）。
+- **full-history と conv-only は同一**: conv をフル history と共有しても結果は変わらず、
+  **conv は原因ではない**（候補1の結論）。
+- 残る差は **rec commit のみ**。比較診断では commit と history の差は特定の層
+  （例: layer 1 / 3 / 43）に局在し、`max_abs` 1e-8〜3e-5、要素数 128〜768。
+  大半の accept では bit-exact。
+- 一方 kernel 単体（上記テスト）では decode1 / decode1_serial / decode_rows_exact の
+  いずれに対しても commit は bit-exact。**実モデルのデータでのみ**微小差が生じる。
+- `de0 = __expf(gval−gval)` を spill の k に掛ける実験は逆に差を拡大した（悪化）。
+
+原因は未特定。e2e 統合は revert し、kernel 層（spill / commit / 層対応 / bit-exact
+テスト）のみ確定した。
 
 ## 次の作業
 
 1. 本番 recurrence kernel に compact log の optional spill を追加する。→ **完了**（層対応含む）
-2. spill した log からの逐次 replay が bit-exact かを確認。→ **完了**（2 層、bit-exact）
-3. verify rows を増やして target parity を測る。→ **未完了**（e2e 統合で content 依存の
-   残差を確認、原因調査が必要）
-4. commit を次回 GDN kernel へ fusion できるか設計する（pending prefix commit）。
+2. spill した log からの逐次 replay が bit-exact かを確認。→ **完了**
+   （decode1 / decode1_serial / decode_rows_exact の 3 経路、全層）
+3. verify rows を増やして target parity を測る。→ **未完了**（配線は健全、conv も無関係。
+   rec commit の実モデルデータ依存の微小差が残る）
+4. 実モデルデータ依存の rec 差の原因究明。候補: `de0` スケーリング、bf16 分解の
+   境界値、`dval` の edge case、history capture 同時実行時の codegen。
+5. commit を次回 GDN kernel へ fusion できるか設計する（pending prefix commit）。
 
 ## 再現
 
@@ -121,3 +143,15 @@ cmake --build build-gfx1201 --target test_gdn_compact_commit_poc test_gdn_compac
 HIP_VISIBLE_DEVICES=0 ./build-gfx1201/tests/test_gdn_compact_commit_poc
 HIP_VISIBLE_DEVICES=0 ./build-gfx1201/tests/test_gdn_compact_log_commit
 ```
+
+e2e 切り分け（要: target/draft model、GPU）:
+
+```bash
+HIP_VISIBLE_DEVICES=0 PHASESHIFT_TARGET_LM_HEAD_PROXY=0 \
+  PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT=1 \
+  PHASESHIFT_DFLASH2_GDN_COMPACT_FULL_HISTORY=1 \
+  PHASESHIFT_DFLASH2_GDN_COMPACT_USE_HISTORY_REC=1 \
+  PHASESHIFT_NGRAM_TAIL_GATE2_MODE=correctness PHASESHIFT_NGRAM_TAIL_GATE2_GEN=128 \
+  ./build-gfx1201/tests/test_dflash2_ngram_tail_gate2
+```
+（注: 統合コードは未コミット。再現には decoder への再配線が必要。）
