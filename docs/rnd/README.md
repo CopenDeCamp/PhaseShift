@@ -32,6 +32,7 @@
 - [mtp/mtp.md](mtp/mtp.md) — MTP（内蔵 drafter）の Gate 記録（正本）
 - [spec_decode/ngram_tail_gate1.md](spec_decode/ngram_tail_gate1.md) — NgramTail Gate 1（committed-history tail extension の候補品質検証と Gate 2 推奨）
 - [spec_decode/ngram_tail_gate2.md](spec_decode/ngram_tail_gate2.md) — NgramTail Gate 2（DFlash2 + NgramTail live composite の正しさと break-even 測定）
+- [spec_decode/ngram_tail_gate3.md](spec_decode/ngram_tail_gate3.md) — NgramTail Gate 3（production 統合、opt-in 判定と history guard / lm_head proxy の決定）
 
 ## Qwen4Exp (Qwen3.8-Flash-Next)
 

@@ -26,6 +26,8 @@
 --seed N               sampling seed (default 0)
 --dflash2-model-dir PATH  DFlash2 draft model directory（指定で DFlash mode）
 --dflash2-drafts N     speculative draft tokens per round (default 7)
+--dflash2-ngram-tail N NgramTail extension length per round (default 0 = disabled)
+--dflash2-ngram-n N    NgramTail n-gram size (default 0 = disabled)
 --dflash2-stats 0|1    print speculative decode statistics (default 1)
 --serve-stdio          serve JSON Lines generation requests on stdin/stdout
 --help                 show this help
@@ -54,6 +56,33 @@ backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation は�
 - `--constraint-tokenizer-info`
 - `--prefix-cache-capacity-tokens > 0`
 - `--dflash2-drafts` が `block_size - 1` を超える
+- `--dflash2-drafts` と `--dflash2-ngram-tail` の合計が verify capacity 64 行
+  （draft 63）を超える
+- `--dflash2-ngram-tail` と `--dflash2-ngram-n` のどちらか一方だけが 0
+  （両方 0 で NgramTail 無効、両方正の値で有効）
+- `--dflash2-model-dir` なしでの `--dflash2-ngram-tail` / `--dflash2-ngram-n` 指定
+
+### NgramTail extension（opt-in）
+
+`--dflash2-ngram-tail` / `--dflash2-ngram-n` は**既定 0（無効）**である。両方が正の値の
+ときだけ有効になり、片方だけ 0 なら model load 前に exit 2 で拒否される。
+Gate 2 の推奨構成は `--dflash2-ngram-tail 8 --dflash2-ngram-n 5`（window 2048、
+Exact verify）である。
+
+- 有効時も target verify は `rows <= 16`（draft 15 + anchor 1）に収まり、既存の R16
+  verify 経路を維持する。
+- GDN history は `K + T` row を確保する（T=8 で 2.15 GiB）。guard は 1.5 GiB →
+  2.25 GiB（rows ≤ 15）。超過は decoder create で明示 error。
+- 効果は workload 依存（[../rnd/spec_decode/ngram_tail_gate3.md](../rnd/spec_decode/ngram_tail_gate3.md)）。
+  反復構造の workload では改善し、非反復では verify 幅増で悪化するため、
+  利用可否は workload で判断する。
+- ngram lookup は committed token のみを対象とする CPU linear scan で、
+  proposal token は seed にだけ使う（future leakage なし）。
+- `--dflash2-stats 1` は `DFLASH2_NGRAM_*` と `DFLASH2_GDN_MODE` 行も出力する。
+
+target の lm_head proxy（`PHASESHIFT_TARGET_LM_HEAD_PROXY`）は DFlash2 有効時に
+未指定なら `0`（proxy 停止）として起動する。明示指定した場合はその値を使う。
+理由は [../developer/dflash2.md](../developer/dflash2.md) の verify 数値契約を参照。
 
 `--serve-stdio` と `--kv-cache-dtype psq4` は併用できる。serve mode では
 `temperature > 0` / `grammar` / `structural_tag` / `prefix_cache_checkpoint_position`

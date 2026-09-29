@@ -348,6 +348,11 @@ int main() {
         (mode_env != nullptr && mode_env[0] != '\0') ? mode_env : "correctness";
     const bool perf_mode = mode == "perf";
 
+    const char* proxy_env = std::getenv("PHASESHIFT_TARGET_LM_HEAD_PROXY");
+    if (proxy_env == nullptr || proxy_env[0] == '\0') {
+        setenv("PHASESHIFT_TARGET_LM_HEAD_PROXY", "0", 1);
+    }
+
     const char* corpus_env = std::getenv("PHASESHIFT_NGRAM_TAIL_GATE2_CORPUS");
     std::string corpus_dir = (corpus_env != nullptr && corpus_env[0] != '\0') ? corpus_env : "";
     if (corpus_dir.empty()) {
@@ -400,6 +405,7 @@ int main() {
         all_configs.push_back({"k1_t6", 1u, 6u, false});
         all_configs.push_back({"k3_t4", 3u, 4u, false});
         all_configs.push_back({"k7_t0", 7u, 0u, false});
+        all_configs.push_back({"k7_t8", 7u, 8u, false});
     }
     std::vector<CaseConfig> configs;
     const std::vector<std::string> case_filter =
@@ -647,7 +653,7 @@ int main() {
                         DFlash2SpecDecoderConfig decoder_cfg;
                         decoder_cfg.num_drafts = slot.config.k;
                         decoder_cfg.verify_numeric_mode = ps::runtime::VerifyNumericMode::Exact;
-                        decoder_cfg.ngram_n = ngram_n;
+                        decoder_cfg.ngram_n = slot.config.tail > 0u ? ngram_n : 0u;
                         decoder_cfg.ngram_max_tail = slot.config.tail;
                         decoder_cfg.ngram_window = ngram_window;
                         auto decoder_result = ps::qwen35::runtime::create_dflash2_spec_decoder(

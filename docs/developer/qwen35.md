@@ -306,6 +306,10 @@ Auto モードでは `execute_program` が `lm_head_proxy`、単体 launcher の
 - `mode` は `PHASESHIFT_TARGET_LM_HEAD_PROXY`。**未指定時は Verify のみ Fast、
  Decode は off**（既存挙動を維持する）。`=0` で proxy 完全停止、`=1` で Fast、
  `=2` で Decode だけ Shadow。
+ 例外として `phaseshift-compute` は DFlash2 有効時に未指定・空文字のときだけ `0` を
+ 設定して起動する（verify の proxy は decode と logits が一致せず、DFlash2 の生成列が
+ target-only greedy から分岐するため。[dflash2.md](dflash2.md) を参照）。
+ 明示指定した値は DFlash2 有効時でも尊重する。
 - constraint（`constraint_masks` / `constraint_mask_words`）がある経路は常に off。
 - pool は `PHASESHIFT_TARGET_LM_HEAD_PROXY_POOL`（既定 32、`kDflash2Int2MaxPool` まで）。
 - Top-N は `dflash2_radix_topn_preferred(pool)` で legacy / radix を選ぶ。

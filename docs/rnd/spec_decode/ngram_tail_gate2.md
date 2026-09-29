@@ -519,10 +519,13 @@ C8 では tail 受容分だけ rerun prefix が長くなる）。
 2. **json PP512（反復構造）を対象に Gate 3（production 統合）へ進む**。
    推奨 parameter は `DFlash2 K=7 + NgramTail T=8 / n=5`（n=8 も候補）、window 2048、
    Exact、`PHASESHIFT_TARGET_LM_HEAD_PROXY=0` のまま。T = 16 以上は採用しない。
+   → **統合済み**。経緯と計測は [ngram_tail_gate3.md](ngram_tail_gate3.md)。
 3. **composite seed の改善を検討する**（次 Gate）。K を減らす（K=3 + T=16 のような構成）と
    seed に committed token が混じって hit が増えるが、`E/round` が下がるトレードオフが
    ある。Gate 2A の `k3_t4`（json PP512 で hit 29/61 round、tail 81 token）は有望。
 4. production CLI 追加は行わない（§59）。DIRECT GO でも production contract は Gate 3 で決める。
+   → Gate 3 で `--dflash2-ngram-tail` / `--dflash2-ngram-n` を追加したが、
+   既定は 0（opt-in）。理由は [ngram_tail_gate3.md](ngram_tail_gate3.md)。
 
 ## 10. artifacts と再現手順
 

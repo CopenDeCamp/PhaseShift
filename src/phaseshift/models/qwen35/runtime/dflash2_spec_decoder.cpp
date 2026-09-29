@@ -130,6 +130,11 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
             "create_dflash2_spec_decoder: num_drafts out of range", __FILE__, __LINE__);
     }
     const bool ngram_enabled = config.ngram_n > 0u && config.ngram_max_tail > 0u;
+    if ((config.ngram_n > 0u) != (config.ngram_max_tail > 0u)) {
+        return Status::invalid_argument(
+            "create_dflash2_spec_decoder: ngram_n and ngram_max_tail must be set together",
+            __FILE__, __LINE__);
+    }
     if (ngram_enabled && config.ngram_window == 0u) {
         return Status::invalid_argument(
             "create_dflash2_spec_decoder: ngram_window must be positive", __FILE__, __LINE__);
@@ -214,9 +219,9 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
             static_cast<std::size_t>(pool_view.recurrent_slot_stride) * sizeof(float);
         const std::size_t history_bytes =
             static_cast<std::size_t>(history_rows) * per_row_bytes;
-        if (history_bytes > (3ull * 1024ull * 1024ull * 1024ull) / 2ull) {
+        if (history_bytes > kDFlash2SpecHistoryBytesMax) {
             return Status::insufficient_memory(
-                "create_dflash2_spec_decoder: GDN history exceeds the 1.5 GiB guard",
+                "create_dflash2_spec_decoder: GDN history exceeds the 2.25 GiB guard",
                 __FILE__, __LINE__);
         }
         auto history_result = create_gdn_spec_history(arena, gdn_pool, history_rows);

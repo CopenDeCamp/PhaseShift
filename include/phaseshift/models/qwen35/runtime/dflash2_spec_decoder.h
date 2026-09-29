@@ -22,6 +22,7 @@ namespace ps::qwen35::runtime {
 
 constexpr uint32_t kDFlash2SpecMaxVerifyRows = 64u;
 constexpr uint32_t kDFlash2SpecMaxVerifyDrafts = kDFlash2SpecMaxVerifyRows - 1u;
+constexpr uint64_t kDFlash2SpecHistoryBytesMax = (9ull * 1024ull * 1024ull * 1024ull) / 4ull;
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
