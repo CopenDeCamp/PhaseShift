@@ -250,9 +250,20 @@ struct MatrixShardSpec {
 `validate()` は `rank < world_size` と、分割軸の全長が `world_size` で割り切れることを
 要求する。BF16 以外の encoding は `unsupported` で拒否する。
 
-quantized weight の shard はまだ実装していない。K 方向の shard は
-quant scale group の境界と一致させる必要があるため、pack format の実装を
-読んだうえで loader / packer 側で行う。
+quantized weight（PSQ4 / PSQ8）の shard は axis ごとに扱いが違う。
+
+- OutputFeatures: native layout の最外次元が 16-row tile なので
+  `codes` / `scales` を dim0 で `slice` するだけで view で済む。
+  rank 境界が 16 の倍数でないと tile が切れるため、
+  `offset % 16 == 0 && extent % 16 == 0` を要求し、
+  preshuffled なものだけを対象にする
+- InputFeatures: `unsupported` で拒否する。K 範囲が tile ごとに
+  `tile_stride` ずつ動くため単一の view で表せず repack が要る。
+  32 の倍数で切れば quant scale group をまたがないので再量子化は
+  不要だが、canonical から preshuffle をやり直す必要がある
+
+`load_layer_quantized` も BF16 の `load_layer_bf16` と同じく、
+weight 種別ごとに column / row の opts を渡す。
 
 ## Tensor parallel の lowering
 
