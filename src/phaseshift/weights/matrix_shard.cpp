@@ -94,6 +94,88 @@ Result<MatrixWeight> shard_quantized_rows(const MatrixWeight& full,
     return out;
 }
 
+Result<MatrixWeight> shard_quantized_columns(const MatrixWeight& full,
+                                             const MatrixShardSpec& spec,
+                                             gpu::GpuArena& arena,
+                                             hipStream_t stream) {
+    if (!full.preshuffled)
+        return Status::unsupported("quantized column sharding requires the preshuffled layout",
+                                   __FILE__, __LINE__);
+    if (full.codes.ndim() != 2 || full.scales.ndim() != 2)
+        return Status::invalid_argument("quantized weight needs 2D codes and scales",
+                                        __FILE__, __LINE__);
+    if (full.k_padded % 32u != 0u)
+        return Status::invalid_argument("quantized k_padded must be a multiple of 32",
+                                        __FILE__, __LINE__);
+    const uint32_t local_kp = full.k_padded / spec.world_size;
+    const uint32_t local_k = full.cols / spec.world_size;
+    const uint32_t offset_kp = local_kp * spec.rank;
+    if (local_kp % 32u != 0u || offset_kp % 32u != 0u)
+        return Status::invalid_argument(
+            "quantized column shard must align to the 32-elem scale group", __FILE__, __LINE__);
+    if (local_kp < local_k || offset_kp + local_kp > full.k_padded)
+        return Status::out_of_range("quantized column shard exceeds the packed k range",
+                                    __FILE__, __LINE__);
+    const uint32_t nb_full = full.k_padded / 32u;
+    const uint32_t nb_local = local_kp / 32u;
+    const uint32_t ib0 = offset_kp / 32u;
+    if (nb_full == 0u || full.codes_row_stride_bytes % nb_full != 0u ||
+        full.storage_scale_stride_bytes % nb_full != 0u)
+        return Status::invalid_argument("quantized tile strides do not divide into k blocks",
+                                        __FILE__, __LINE__);
+    const uint32_t code_block_bytes = full.codes_row_stride_bytes / nb_full;
+    const uint32_t scale_block_bytes = full.storage_scale_stride_bytes / nb_full;
+    const uint32_t local_code_stride = nb_local * code_block_bytes;
+    const uint32_t local_scale_stride = nb_local * scale_block_bytes;
+
+    const std::size_t tiles = full.codes.dim(0);
+    auto dst_codes = arena.allocate_aligned(tiles * local_code_stride, 16);
+    if (!dst_codes.ok()) return dst_codes.status();
+    auto dst_scales = arena.allocate_aligned(tiles * local_scale_stride, 16);
+    if (!dst_scales.ok()) return dst_scales.status();
+
+    const auto* codes_src =
+        static_cast<const std::byte*>(full.codes.data<const std::byte>()) +
+        static_cast<std::size_t>(ib0) * code_block_bytes;
+    hipError_t err =
+        hipMemcpy2DAsync(dst_codes.value().data(), local_code_stride, codes_src,
+                         full.codes_row_stride_bytes, local_code_stride, tiles,
+                         hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess)
+        return Status::hip_error("hipMemcpy2DAsync quantized codes shard",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+
+    const auto* scales_src =
+        static_cast<const std::byte*>(full.scales.data<const std::byte>()) +
+        static_cast<std::size_t>(ib0) * scale_block_bytes;
+    err = hipMemcpy2DAsync(dst_scales.value().data(), local_scale_stride, scales_src,
+                           full.storage_scale_stride_bytes, local_scale_stride, tiles,
+                           hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess)
+        return Status::hip_error("hipMemcpy2DAsync quantized scales shard",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+
+    std::vector<std::size_t> codes_shape{tiles, local_code_stride};
+    std::vector<std::size_t> codes_strides{local_code_stride, 1};
+    auto codes_tensor =
+        gpu::Tensor::create<std::uint8_t>(dst_codes.release(), codes_shape, codes_strides);
+    if (!codes_tensor.ok()) return codes_tensor.status();
+    std::vector<std::size_t> scales_shape{tiles, local_scale_stride};
+    std::vector<std::size_t> scales_strides{local_scale_stride, 1};
+    auto scales_tensor =
+        gpu::Tensor::create<std::uint8_t>(dst_scales.release(), scales_shape, scales_strides);
+    if (!scales_tensor.ok()) return scales_tensor.status();
+
+    MatrixWeight out = full;
+    out.codes = codes_tensor.release();
+    out.scales = scales_tensor.release();
+    out.cols = local_k;
+    out.k_padded = local_kp;
+    out.codes_row_stride_bytes = local_code_stride;
+    out.storage_scale_stride_bytes = local_scale_stride;
+    return out;
+}
+
 Result<MatrixWeight> shard_matrix_weight(const MatrixWeight& full,
                                         const MatrixShardSpec& spec,
                                         gpu::GpuArena& arena,
@@ -102,8 +184,11 @@ Result<MatrixWeight> shard_matrix_weight(const MatrixWeight& full,
     if (!vs.ok()) return vs;
     if (!spec.enabled()) return full;
 
-    if (full.encoding == MatrixEncoding::Psq4 || full.encoding == MatrixEncoding::Psq8)
+    if (full.encoding == MatrixEncoding::Psq4 || full.encoding == MatrixEncoding::Psq8) {
+        if (spec.axis == ShardAxis::InputFeatures)
+            return shard_quantized_columns(full, spec, arena, stream);
         return shard_quantized_rows(full, spec);
+    }
 
     if (full.encoding != MatrixEncoding::Bf16)
         return Status::unsupported(
