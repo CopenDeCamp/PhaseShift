@@ -216,6 +216,58 @@ FP32 partial を出す launcher が要る。次 Gate で判断する。
 - Gate C1 / C2（PP2 × TP2）
 - Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）
 
+## Gate TP2: standard attention の TP 化
+
+### KV head offset の導入
+
+`AttentionShapeKey` に `kv_head_offset` を加え、
+`DispatchBinding` に `kv_heads`（local）と `kv_head_offset` を載せた。
+KV pool はまだ full の head 数のままなので（Gate §28 の方針）、
+rank は `offset` から始まる head 範囲だけを読み書きする。
+
+- `exec_kv_append` / `exec_paged_attention` の入力側は local head 番号
+- pool 側の index（`blocks_per_token`、`elems_per_token` 等）は full のまま、
+  head の開始位置だけ offset を足す
+- GQA の group は `num_q / local_kv_heads` で計算する。pool の head 数で
+  計算すると rank ごとに group が変わり head 対応がずれる
+
+`bf16` の KV append は従来 head 単位ではなく `elems_per_token` 全体を
+memcpy していた。local head になったため、head 単位のコピーへ変更した。
+
+### 抓到了 bug: offset = 0 の rank で local が full に戻る
+
+最初の実装は `local_kv_heads = kv.kv_heads - b.kv_head_offset` と導出していた。
+`kv_head_offset == 0` の rank（tp_rank = 0）ではこれが **pool の full head 数**に
+なってしまい、入力の `features` と不一致になって `INVALID_BINDING` になる。
+その rank が AllReduce に到達しないため他 rank が待ち、E2E は hang した。
+local head 数を導出ではなく明示的に渡す形へ変更して解消した。
+
+### 結果
+
+`full_attention_interval = 2` の synthetic model（GDN / attention / GDN / attention）で、
+attention のみ sharded、GDN と MLP は replicated にした。
+
+```text
+baseline tokens: 44 44 44 44 44
+tp2 rank0 tokens: 44 44 44 44 44
+tp2 rank1 tokens: 44 44 44 44 44
+tp2 vs 1GPU logits: mismatches=248/320
+  max_abs=0.0078125  scale=1.78906  max_abs/scale=0.00436681
+TP2_ATTENTION: PASS
+```
+
+- 両 TP rank の sampled token と logits が完全一致
+- 1GPU との logits 差は **出力 scale の 0.44%**。Gate TP1 の Row Parallel と同じ
+  原因（partial を BF16 に丸めてから AllReduce）で、BF16 の1 ULP と同オーダー
+- RCCL error 0、deadlock 0
+
+### optimized path は未対応
+
+`kv_append_dispatch.hip` / `paged_attention_dispatch.hip` はまだ
+`kv_head_offset` を受け取らないため、`features != kv_heads*head_dim` で
+reject する。この Gate は `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` で
+固定して検証した。optimized への対応は Gate TP4 で行う。
+
 ## 現在への影響
 
 - parallel runtime の contract は `docs/developer/parallel_runtime.md`。
@@ -226,8 +278,8 @@ FP32 partial を出す launcher が要る。次 Gate で判断する。
 ## 未解決
 
 - Gate PP2（stage-local weight / state の割当）
-- Gate TP2（Standard Attention one layer の TP 化）
-- Gate TP3（GDN one layer の TP 化）
-- Gate TP4（全 layer の TP 化と collective 数の照合）
+- Gate TP3（GDN one layer の TP 化。GDN の conv / recurrence state にも
+  head offset が必要になる）
+- Gate TP4（全 layer の TP 化と collective 数の照合、optimized path の対応）
 - Gate C1 / C2（PP2 × TP2）
 - Gate P0（1GPU / PP2 / TP2 / PP2TP2 の比較計測）

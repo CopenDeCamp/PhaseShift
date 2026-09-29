@@ -220,6 +220,64 @@ quantized weight の shard はまだ実装していない。K 方向の shard �
 quant scale group の境界と一致させる必要があるため、pack format の実装を
 読んだうえで loader / packer 側で行う。
 
+## Tensor parallel の lowering
+
+`Qwen35LoadOptions::tensor_shard` が shard を指示する。
+
+```cpp
+struct Qwen35TensorShard {
+    MatrixShardSpec column;   // OutputFeatures 方向に分割する weight
+    MatrixShardSpec row;      // InputFeatures 方向に分割する weight
+    bool full_attention;      // standard attention 層
+    bool linear_attention;    // GDN 層
+    bool mlp;
+};
+```
+
+対象を `false` にした weight は分割されない。これにより各 Gate で
+attention / GDN / MLP を独立に有効化できる。
+
+`Qwen35LowerOptions::tensor_parallel_size` / `tensor_parallel_rank` は
+lowering 側の設定で、次のことを決める。
+
+- `q_heads % tp_size == 0` と `kv_heads % tp_size == 0` を geometry 検証で要求する
+- `AttentionShapeKey` の head 数を **local な値**にする
+- `AttentionShapeKey::kv_head_offset = tp_rank * (kv_heads / tp_size)`
+- standard attention の `o_proj` の後に `COMM_ALL_REDUCE` を置く
+
+MLP と GDN を分割しない場合、`intermediate_size` や GDN の shape は
+config のままなので lowering の側の変更は不要である。
+
+## KV head offset
+
+KV pool はまだ **full の head 数**を確保している（Gate §28 の
+「full-size pool で local head 範囲だけ使う」段階）。
+したがって rank は自分の local head 範囲を
+`kv_head_offset` から始まる位置に読み書きする。
+
+- `DispatchBinding::kv_heads` = local head 数
+- `DispatchBinding::kv_head_offset` = pool 内の開始 head
+- `local + offset <= pool kv_heads` を検証し、越えていれば `INVALID_BINDING`
+
+`exec_kv_append` と `exec_paged_attention` は pool の layout（`blocks_per_token`、
+`elems_per_token` 等）を full の `kv_heads` で計算したまま、head の開始位置だけ
+offset をずらす。入力側は local head 番号をそのまま使う。
+
+GQA の group 比は `num_q / local_kv_heads` で計算する。pool の head 数では
+計算すると rank ごとに group が変わり head 対応がずれる。
+
+optimized path（`kv_append_dispatch.hip` / `paged_attention_dispatch.hip`）は
+まだ offset を受け取っていないため、tensor parallel の実行は
+`PHASESHIFT_QWEN35_KERNEL_MODE=correctness` を前提にしている。
+
+## Program の collective
+
+`KernelId::COMM_ALL_REDUCE` は `CommOperation::AllReduceSum` の
+`CommDescriptor` を伴い、`Program::dispatch_comm` から解決される。
+partial を入力、reduced 結果を出力に持つ（arity は 1 in / 1 out）。
+send / recv と同じく physical kernel ではなく
+`HostExecutionContext::comm_launch` 経由で RCCL を enqueue する。
+
 ## Tests
 
 | test | label | 内容 |
@@ -232,6 +290,7 @@ quant scale group の境界と一致させる必要があるため、pack format
 | `test_qwen35_pp2_e2e` | `gpu2;rccl;rccl_2gpu` | PP2 と 1GPU の一致比較 |
 | `test_qwen35_tp_column_linear` | `gpu2;multi_gpu` | Column Parallel LINEAR の一致比較 |
 | `test_qwen35_tp_row_linear` | `gpu2;rccl;rccl_2gpu` | Row Parallel LINEAR の AllReduce と精度 |
+| `test_qwen35_tp2_attention` | `gpu2;rccl;rccl_2gpu` | standard attention の TP 化と 1GPU との比較 |
 
 synthetic model は `tests/support/synthetic_qwen35_model.h` が
 `config.json` と `model.safetensors` を書き出し、通常の
