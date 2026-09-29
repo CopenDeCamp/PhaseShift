@@ -107,7 +107,7 @@ RankOutput run_rank(int device, std::uint32_t rank, const HostMatrix& weight_hos
     spec.axis = w8::ShardAxis::InputFeatures;
     spec.rank = rank;
     spec.world_size = 2;
-    auto shard = w8::shard_bf16_weight(full, spec, arena, stream);
+    auto shard = w8::shard_matrix_weight(full, spec, arena, stream);
     if (!shard.ok()) {
         out.error = shard.status().message();
         free_matrix(input);
