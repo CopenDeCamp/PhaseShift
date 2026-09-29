@@ -349,6 +349,10 @@ kernel へ切り替える。
     `PHASESHIFT_GDN_RECURRENCE_EXACT=1` で exact）。verify-exact の lossy 時は geometry に
     応じて decode1 系（`decode1_serial`、条件が合えば multi-row 版）、lossy off 時は
     `wmma_serial` を選ぶ。どちらの serial path も GDN spec history を capture する。
+    decode attention は M=1 decode と同じ split 経路（`max_visible_tokens >= 2048` で S=16）
+    を使う。split と非 split は f32 丸めが一致しないため、verify rows が split の
+    partial workspace（`kDecodeAttnPartialBytes`）に収まる必要がある。workspace は R64 の
+    最大 verify rows（64）まで split を維持できる大きさにする。
 
 `SpecDecoderConfig::verify_numeric_mode` の既定は `Fast` である。`create_spec_decoder`
 は環境変数 `PHASESHIFT_VERIFY_EXACT=1` が設定されているときだけ `Exact` へ上書きする。

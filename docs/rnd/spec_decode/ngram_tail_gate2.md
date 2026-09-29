@@ -162,19 +162,36 @@ target parity が崩れる。
 効果（`C9` = K7 + T9、max rows 17）: 修正前 NO → 修正後 **parity 恢復**。
 rows 18..24（`C16` / `C32`）には別要因が残り、それは §3.9 で扱う。
 
-### 3.9 GDN recurrence lossy と exact history capture（R64 gap の 2 つ目）
+### 3.9 R64 gap の残り: attention split fallback
 
-bf16 GEMM 修正後も rerun mode で残った rows ≥ 17 の divergence は GDN recurrence の
-lossy 経路に由来する。`PHASESHIFT_GDN_RECURRENCE_EXACT=1` を与えると parity が恢復する
-（例: prose PP2048, GEN=128 の C13/C14）。したがって `VerifyNumericMode::Exact` で
-rows > 16 を測る場合は GDN recurrence も exact（`PHASESHIFT_GDN_RECURRENCE_EXACT=1`）
-にする必要がある。既定は lossy のまま据え置く。
+bf16 GEMM 修正後も rerun mode で rows ≥ 17 の divergence が残った。原因は decode
+attention の split fallback である。
 
-この exact 経路には別の不具合があった。lossy off では `gdn_recurrence_decode1_supported()`
-が false になり verify variant が `WmmaSerial` へ変わるが、GDN spec history の capture は
-decode1 kernel の `row_override >= 0` 条件付きブロックにのみ実装されていた。`WmmaSerial`
-は `row_override` を設定しないため history が書かれず、history mode（Gate 2A）では
-restore が未初期化行を読んで generation が崩壊した（parity 0/24）。
+decode attention は `max_visible_tokens >= 2048` で S=16 の split カーネルを使うが、
+partial workspace が 8 MiB 固定のため必要量
+`rows×kv_heads×16×q_per_kv×(2+256)×4B` を超えると旧カーネルへ fallback する。
+27B geometry（kv_heads=4, q_per_kv=6, head_dim=256）では **rows > 21** がこれに当たる。
+split と旧カーネルは f32 丸めが一致せず（softmax 計算順序差）、verify だけ旧カーネルに
+落ちると M=1 decode（split）と target parity が崩れる。
+
+- context 512（split 無効）では rows 40 まで parity OK、context 2048 では rows ≥ 22 で NG。
+- `runtime::kDecodeAttnPartialBytes` を 8 MiB → **32 MiB** に拡張（rows 64 まで split 維持）。
+- 効果: 既定 lossy のまま `A / C8 / C16 / C32` が全 6 workload で parity 合格
+  （4 config × 6 workload × 2 phase = **48/48**、`failed=0`）。
+- 詳細は `docs/rnd/attention/optimization_history.md` §7.99。
+
+注意: 当初 GDN recurrence の lossy 経路を原因と誤認したが、bf16 修正と本 attention 修正を
+入れると **既定 lossy のままで parity が回復**する。`PHASESHIFT_GDN_RECURRENCE_EXACT=1` は
+parity には不要である（exact のコストは §6.5）。
+
+#### 参考: exact 経路の GDN history capture 欠落（別件）
+
+`PHASESHIFT_GDN_RECURRENCE_EXACT=1` を使う場合には別の不具合があった。lossy off では
+`gdn_recurrence_decode1_supported()` が false になり verify variant が `WmmaSerial` へ
+変わるが、GDN spec history の capture は decode1 kernel の `row_override >= 0` 条件付き
+ブロックにのみ実装されていた。`WmmaSerial` は `row_override` を設定しないため history が
+書かれず、history mode（Gate 2A）では restore が未初期化行を読んで generation が崩壊した
+（parity 0/24）。
 
 修正として `gdn_recurrence_wmma_body<kLossy, kSerialRows>` の serial chunk 終端で
 state 更新後の `Sacc` を history 行 `ci` へ書く（条件・レイアウトは
@@ -328,6 +345,13 @@ Gate 2 が初めて rows 17..40 の verify を通したため、この gap が�
 GDN history mode では 1.5 GiB guard（rows ≤ 10）により wide rows をそもそも作れないため、
 この問題は rerun mode でのみ観測される（§3.6）。
 
+**2026-09-29 追記（R64 gap 解消）**: 上記 C16 / C32 の hard stop は §3.8 / §3.9 で解消した。
+内訳は (a) bf16 GEMM の exact rows 上限（§3.8）と (b) attention split fallback（§3.9）である。
+**既定 lossy のまま** `A / C8 / C16 / C32` が全 6 workload で target parity に合格する
+（4 config × 6 workload × 2 phase = 48/48）。したがって **T = 16 / 32 の性能値は再測定により
+有効化できる**（本節の旧値は破棄のまま）。`PHASESHIFT_GDN_RECURRENCE_EXACT=1` は parity には
+不要である。
+
 ### 6.3 性能（parity が成立する C8 のみ有効）
 
 paired median（A に対する tok/s 比）:
@@ -379,7 +403,8 @@ primary 終了後に n=8 で json PP512 のみ追加測定（`artifacts/ngram_ta
 
 ### 6.5 GDN recurrence exact のコスト（参考計測）
 
-`PHASESHIFT_GDN_RECURRENCE_EXACT=1` の有無を A_k7_t0 で同一条件測定
+parity には不要だが、`PHASESHIFT_GDN_RECURRENCE_EXACT=1` を選ぶ場合のコストを
+A_k7_t0 で同一条件測定した
 （TG512、n=5、6 workload、`artifacts/ngram_tail_gate2/gdn_exact_timing/`）。
 
 | 指標 | lossy 既定 | exact | 差 |
@@ -438,6 +463,8 @@ recurrence コストは verify の **+約 7 ms/round（+17%）**である。pref
 2. **T = 16 / 32 は測定不能（hard stop）**。verify rows > 16 の R64 bucket で
    target parity が崩れるため、§54 に従い性能値を破棄した。
    Gate 1 が示した「tail 32 まで伸ばす」価値は、この gap が解消するまで検証できない。
+   → **2026-09-29 解消**（§3.9 / §6.2 追記）。既定 lossy のまま C16 / C32 が parity に
+   合格し、T = 16 / 32 の性能値を再測定できる。再測定は未実施。
 
 NO-GO 条件（§57）には該当しない（json PP512 で改善があり、
 `emitted_per_round` gain は +21〜23%）。
@@ -465,6 +492,9 @@ C8 では tail 受容分だけ rerun prefix が長くなる）。
    `rows > 16` の verify が M=1 decode と一致しないため、T ≥ 9 の評価ができない。
    scope は `docs/rnd/mtp/optimization_history.md` §7.64 / §7.65 の続編として
    verify role の exact 保証を R64 bucket まで広げること。
+   → **2026-09-29 解消**（§3.8 / §3.9）。bf16 GEMM exact rows を 64 へ拡張し、
+   attention split partials を 32 MiB へ拡張する。既定 lossy のままで parity が成立し、
+   T = 16 / 32 の性能再測定は次の作業。
 2. **json PP512（反復構造）を対象に Gate 3（production 統合）へ進む**。
    推奨 parameter は `DFlash2 K=7 + NgramTail T=8 / n=5`（n=8 も候補）、window 2048、
    Exact、`PHASESHIFT_TARGET_LM_HEAD_PROXY=0` のまま。

@@ -740,3 +740,40 @@ gfx12 には fp8 WMMA（`__builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12`�
 
 Q の E4M3 量子化による score 誤差が softmax で増幅され、bf16 QK（f32 比 1.5e-2）に対して
 約 10× の誤差になる。2 項 fp8 でも許容に届かず不採用。
+
+---
+
+## 7.99 decode attention split partials を R64 verify まで拡張（2026-09-29）
+
+### 背景
+
+§7.48 の decode split（S=16）は partial workspace を **8 MiB 固定**
+（`runtime::kDecodeAttnPartialBytes`）とし、必要量
+`rows×kv_heads×16×q_per_kv×(2+256)×4B` を超えると旧カーネル（非 split）へ
+自動 fallback していた。27B geometry（kv_heads=4, q_per_kv=6, head_dim=256）では
+**rows > 21** で fallback する。
+
+split カーネルと旧カーネルは f32 丸めが一致しない（softmax 計算順序差、
+max_abs ≈ 4.3e-6）。通常 decode では許容だが、**Exact verify の target parity** では
+verify の attention が M=1 decode（`max_visible_tokens >= 2048` で split）と
+bit-exact である必要がある。verify rows が 22 以上になると verify だけ旧カーネルへ
+落ち、parity が崩れる（NgramTail Gate 2 の R64 gap）。
+
+### 変更
+
+`runtime::kDecodeAttnPartialBytes` を **8 MiB → 32 MiB**。
+
+- 27B geometry の必要量は `rows × 396288 B` で、32 MiB は **rows = 64** まで
+  split 経路を維持できる（64 rows = 24.2 MiB）。
+- `max_visible_tokens >= 2048` の split 判定は変えず、rows 上限だけを R64 へ広げる。
+- 追加メモリは 24 MiB（arena 比 0.1% 未満）。
+
+### 効果
+
+NgramTail Gate 2 の C16 / C32（verify rows 24 / 40）が、**既定 lossy のまま** target
+parity に合格する（A / C8 / C16 / C32 × 6 workload × 2 phase = 48/48、`failed=0`）。
+attention 側はこの修正のみで足りる（GDN mode は parity に無関係）。
+
+split カーネルは row ごとに独立・決定的であり、rows=1（M=1 decode）と
+rows=2..64（verify）で同一 row の出力が bit-exact であることは C8（rows 16）まで
+従来から成立していた。
