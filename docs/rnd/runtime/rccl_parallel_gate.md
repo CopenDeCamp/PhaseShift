@@ -210,11 +210,57 @@ FP32 partial を出す launcher が要る。次 Gate で判断する。
 
 
 
-- PP2 の E2E 一致確認（harness 修正後の再実行）
-- Gate PP2（stage-local weight / state の割当）
-- Gate TP1-TP4（Column/Row Parallel LINEAR、Attention、GDN、全 layer）
 - 本番 model での Gate P0 計測（external model が要る）
 - Row / GDN の AllReduce を FP32 partial にして bit exact にするかの判断
+
+### PSQ4 / PSQ8 の Column Parallel
+
+Gate TP1 の対象 format は BF16 / PSQ4 / PSQ8 とされていたが、
+shard は当初 BF16 のみ実装され、quantized は
+`quantized matrix sharding requires pack level support` で拒否されていた。
+
+pack format を読んだ結果、次の判明を得た。
+
+- scale は `(row, K-block)` ごとで block = 32 elem（`weight_scale_group = 32`）。
+  K 分割境界は 32 の倍数なら scale をまたがないので再量子化は不要
+- PSQ4 は block 内で `j` と `j+16` が同一 byte に詰まるため 16 単位の
+  K 分割は nibble を跨ぎ、`% 32` 検証にも反して実質不可
+- native（preshuffled）layout の最外次元は 16-row tile で tile は連続領域。
+  kernel index が `base + (o>>4)*tile_stride` 形式で row offset 引数を持たない
+  ため、出発点をずらす手段は base を tile 数だけ進める = `Tensor::slice` のみ
+- 逆に K 範囲は tile ごとに `tile_stride` がずれ、`ib` を常に 0 から走らせる
+  kernel には局部 K を表す引数が無い → 単一 view で表せず repack が要る
+
+したがって次の実装になった。
+
+- `shard_matrix_weight`（`shard_bf16_weight` から rename）が
+  `MatrixEncoding::Psq4` / `Psq8` を受け付ける
+- OutputFeatures は `codes` / `scales` を dim0 で slice。
+  `offset % 16 == 0 && extent % 16 == 0` と `preshuffled` を要求
+- InputFeatures は `unsupported: quantized input feature sharding requires a repack`
+  で fail-closed を維持
+- `load_layer_quantized` は BF16 の `load_layer_bf16` と同じ形に改め、
+  weight 種別ごとに column / row の opts を渡す
+
+### 結果
+
+`test_qwen35_tp_column_quantized`（label `gpu1;required`）で PSQ4 / PSQ8 を検証した。
+
+```text
+PSQ4 column shard gemm: mismatches=0/192 max_abs=0 max_rel=0
+PSQ4 input shard rejected: unsupported: quantized input feature sharding requires a repack
+PSQ8 column shard gemm: mismatches=0/192 max_abs=0 max_rel=0
+PSQ8 input shard rejected: unsupported: quantized input feature sharding requires a repack
+TP_COLUMN_QUANTIZED: PASS
+```
+
+- shard した `codes` / `scales` の bytes が native の対応 tile 範囲と
+  `memcmp` で完全一致することを確認する（pack shard の正しさ）
+- dequantize した weight に対する full GEMM と
+  rank0 / rank1 local GEMM の横方向 concat が **bit exact**
+- InputFeatures shard が `unsupported` で拒否されることを確認
+
+これで Gate TP1 の対象 format（BF16 / PSQ4 / PSQ8）が揃った。
 
 ## Gate TP2: standard attention の TP 化
 
@@ -521,8 +567,9 @@ required 129/129、rccl_2gpu 6/6、rccl_4gpu 2/2、multi_gpu 1/1 も PASS。
 
 ## 未解決
 
-- PSQ4 / PSQ8 の quantized weight shard。quant scale group の境界と
-  shard 境界の一致を pack format の実装を読んでから決める
+- PSQ4 / PSQ8 の InputFeatures shard（Row Parallel）。OutputFeatures は
+  実装済みだが、K 範囲が tile ごとに `tile_stride` がずれるため view で
+  切れず、canonical から preshuffle をやり直す repack が必要
 - 本番 model（Qwen3.8-27B-PSQ）での Gate P0 計測と VRAM/GPU の report。
   external model が要る
 - Row / GDN の AllReduce を FP32 partial にして bit exact にするかの判断
