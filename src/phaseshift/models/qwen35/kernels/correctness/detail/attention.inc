@@ -75,11 +75,12 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
     const bool fp8 = env.qwen_state->kv_dtype == 1u;
     if (env.qwen_state->kv_dtype == 3u) {
         const auto& kv = env.qwen_state->kv_psq4;
+        const uint32_t local_kv_heads = b.kv_heads;
         if (layer >= kv.num_attention_layers || kv.k_code_pool == nullptr ||
             kv.v_code_pool == nullptr || kv.k_scale_pool == nullptr ||
             kv.v_scale_pool == nullptr || kv.page_tokens == 0u || kv.blocks_per_head == 0u ||
-            k_in.features != kv.kv_heads * kv.head_dim ||
-            v_in.features != kv.kv_heads * kv.head_dim)
+            local_kv_heads == 0u || b.kv_head_offset >= kv.kv_heads || local_kv_heads + b.kv_head_offset > kv.kv_heads || k_in.features != local_kv_heads * kv.head_dim ||
+            v_in.features != local_kv_heads * kv.head_dim)
             return ProgramStatus::INVALID_BINDING;
         const uint32_t bph = kv.blocks_per_head;
         const uint32_t blocks_per_token = kv.kv_heads * bph;
@@ -97,9 +98,10 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
                              static_cast<size_t>(row) * k_in.row_stride;
             const auto* vs = reinterpret_cast<const bf16*>(v_in.ptr) +
                              static_cast<size_t>(row) * v_in.row_stride;
-            for (uint32_t h = 0u; h < kv.kv_heads; ++h) {
-                const bf16* kh = ks + static_cast<size_t>(h) * kv.head_dim;
-                const bf16* vh = vs + static_cast<size_t>(h) * kv.head_dim;
+            for (uint32_t lh = 0u; lh < local_kv_heads; ++lh) {
+                const uint32_t h = b.kv_head_offset + lh;
+                const bf16* kh = ks + static_cast<size_t>(lh) * kv.head_dim;
+                const bf16* vh = vs + static_cast<size_t>(lh) * kv.head_dim;
                 const uint64_t token_block_base =
                     ((static_cast<uint64_t>(layer) * kv.num_pages + page) * kv.page_tokens + off)
                     * blocks_per_token + static_cast<uint64_t>(h) * bph;
@@ -134,11 +136,12 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
     }
     if (env.qwen_state->kv_dtype == 4u) {
         const auto& kv = env.qwen_state->kv_psq8;
+        const uint32_t local_kv_heads = b.kv_heads;
         if (layer >= kv.num_attention_layers || kv.k_code_pool == nullptr ||
             kv.v_code_pool == nullptr || kv.k_scale_pool == nullptr ||
             kv.v_scale_pool == nullptr || kv.page_tokens == 0u || kv.blocks_per_head == 0u ||
-            k_in.features != kv.kv_heads * kv.head_dim ||
-            v_in.features != kv.kv_heads * kv.head_dim)
+            local_kv_heads == 0u || b.kv_head_offset >= kv.kv_heads || local_kv_heads + b.kv_head_offset > kv.kv_heads || k_in.features != local_kv_heads * kv.head_dim ||
+            v_in.features != local_kv_heads * kv.head_dim)
             return ProgramStatus::INVALID_BINDING;
         const uint32_t bph = kv.blocks_per_head;
         const uint32_t blocks_per_token = kv.kv_heads * bph;
@@ -156,9 +159,10 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
                              static_cast<size_t>(row) * k_in.row_stride;
             const auto* vs = reinterpret_cast<const bf16*>(v_in.ptr) +
                              static_cast<size_t>(row) * v_in.row_stride;
-            for (uint32_t h = 0u; h < kv.kv_heads; ++h) {
-                const bf16* kh = ks + static_cast<size_t>(h) * kv.head_dim;
-                const bf16* vh = vs + static_cast<size_t>(h) * kv.head_dim;
+            for (uint32_t lh = 0u; lh < local_kv_heads; ++lh) {
+                const uint32_t h = b.kv_head_offset + lh;
+                const bf16* kh = ks + static_cast<size_t>(lh) * kv.head_dim;
+                const bf16* vh = vs + static_cast<size_t>(lh) * kv.head_dim;
                 const uint64_t token_block_base =
                     ((static_cast<uint64_t>(layer) * kv.num_pages + page) * kv.page_tokens + off)
                     * blocks_per_token + static_cast<uint64_t>(h) * bph;
@@ -189,9 +193,10 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
     }
     if (fp8) {
         const auto& kv = env.qwen_state->kv_fp8;
+        const uint32_t local_kv_heads = b.kv_heads;
         if (layer >= kv.num_attention_layers || kv.k_pool == nullptr || kv.v_pool == nullptr ||
             kv.k_scale_pool == nullptr || kv.v_scale_pool == nullptr || kv.page_tokens == 0 ||
-            k_in.features != kv.kv_heads * kv.head_dim)
+            local_kv_heads == 0u || b.kv_head_offset >= kv.kv_heads || local_kv_heads + b.kv_head_offset > kv.kv_heads || k_in.features != local_kv_heads * kv.head_dim)
             return ProgramStatus::INVALID_BINDING;
         for (uint32_t row = global_tid(env); row < rows; row += global_stride(env)) {
             if (env.context->row_sequence_slots[row] >= bt.max_sequences)
@@ -210,9 +215,10 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
                              static_cast<size_t>(row) * k_in.row_stride;
             const auto* vs = static_cast<const bf16*>(v_in.ptr) +
                              static_cast<size_t>(row) * v_in.row_stride;
-            for (uint32_t h = 0; h < kv.kv_heads; ++h) {
-                const bf16* kh = ks + static_cast<size_t>(h) * kv.head_dim;
-                const bf16* vh = vs + static_cast<size_t>(h) * kv.head_dim;
+            for (uint32_t lh = 0; lh < local_kv_heads; ++lh) {
+                const uint32_t h = b.kv_head_offset + lh;
+                const bf16* kh = ks + static_cast<size_t>(lh) * kv.head_dim;
+                const bf16* vh = vs + static_cast<size_t>(lh) * kv.head_dim;
                 float k_amax = 0.f, v_amax = 0.f;
                 for (uint32_t i = 0; i < kv.head_dim; ++i) {
                     const float kf = __bfloat162float(kh[i]);
@@ -246,8 +252,11 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
         return ProgramStatus::COMPLETE;
     }
     const auto& kv = env.qwen_state->kv_bf16;
+    const uint32_t local_kv_heads = b.kv_heads;
     if (layer >= kv.num_attention_layers || kv.k_pool == nullptr || kv.v_pool == nullptr ||
-        kv.page_tokens == 0 || k_in.features != kv.kv_heads * kv.head_dim)
+        kv.page_tokens == 0 || local_kv_heads == 0u ||
+        b.kv_head_offset >= kv.kv_heads || local_kv_heads + b.kv_head_offset > kv.kv_heads ||
+        k_in.features != local_kv_heads * kv.head_dim)
         return ProgramStatus::INVALID_BINDING;
     for (uint32_t row = global_tid(env); row < rows; row += global_stride(env)) {
         if (env.context->row_sequence_slots[row] >= bt.max_sequences)
@@ -268,11 +277,16 @@ __device__ __forceinline__ ProgramStatus exec_kv_append(
                          static_cast<size_t>(row) * v_in.row_stride;
         auto* kd = reinterpret_cast<bf16*>(kv.k_pool) + base;
         auto* vd = reinterpret_cast<bf16*>(kv.v_pool) + base;
-        const auto* ksp = reinterpret_cast<const bf16*>(ks);
-        const auto* vsp = reinterpret_cast<const bf16*>(vs);
-        for (uint32_t e = 0; e < kv.elems_per_token; ++e) {
-            kd[e] = ksp[e];
-            vd[e] = vsp[e];
+        for (uint32_t lh = 0; lh < local_kv_heads; ++lh) {
+            const uint32_t h = b.kv_head_offset + lh;
+            bf16* kdst = kd + static_cast<size_t>(h) * kv.head_dim;
+            bf16* vdst = vd + static_cast<size_t>(h) * kv.head_dim;
+            const bf16* ksrc = ks + static_cast<size_t>(lh) * kv.head_dim;
+            const bf16* vsrc = vs + static_cast<size_t>(lh) * kv.head_dim;
+            for (uint32_t e = 0; e < kv.head_dim; ++e) {
+                kdst[e] = ksrc[e];
+                vdst[e] = vsrc[e];
+            }
         }
     }
     return ProgramStatus::COMPLETE;
@@ -319,9 +333,12 @@ __device__ __forceinline__ ProgramStatus exec_paged_attention(
         kv_heads = env.qwen_state->kv_bf16.kv_heads;
         kv_head_dim = env.qwen_state->kv_bf16.head_dim;
     }
-    if (kv_heads == 0u || num_q % kv_heads != 0u || kv_head_dim != head_dim)
+    const uint32_t local_kv_heads = b.kv_heads;
+    if (kv_heads == 0u || local_kv_heads == 0u || b.kv_head_offset >= kv_heads ||
+        local_kv_heads + b.kv_head_offset > kv_heads || num_q % local_kv_heads != 0u ||
+        kv_head_dim != head_dim)
         return ProgramStatus::INVALID_BINDING;
-    const uint32_t group = num_q / kv_heads;
+    const uint32_t group = num_q / local_kv_heads;
     if (bt.block_tables == nullptr || bt.block_table_stride == 0)
         return ProgramStatus::INVALID_BINDING;
     const size_t total = static_cast<size_t>(rows) * num_q;
@@ -331,7 +348,7 @@ __device__ __forceinline__ ProgramStatus exec_paged_attention(
         if (env.context->row_sequence_slots[row] >= bt.max_sequences)
             return ProgramStatus::INVALID_BINDING;
         const uint32_t slot = env.context->row_sequence_slots[row];
-        const uint32_t kv_head = h / group;
+        const uint32_t kv_head = b.kv_head_offset + h / group;
         const uint32_t visible = env.context->row_positions[row] + 1u;
         const uint32_t* block_table =
             bt.block_tables + static_cast<size_t>(slot) * bt.block_table_stride;

@@ -50,6 +50,8 @@ struct ExecutorConfig {
     runtime::DecodeBackend backend = runtime::DecodeBackend::Host;
     ModelPartition partition{};
     uint32_t pipeline_peer_rank = 0;
+    uint32_t tensor_parallel_size = 1;
+    uint32_t tensor_parallel_rank = 0;
 };
 
 struct DispatchStagingPool {

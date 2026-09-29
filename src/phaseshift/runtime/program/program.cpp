@@ -500,6 +500,8 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                                PrimitiveStateKind::KV_CACHE, n.state_index) +
                 1;
             b.group_size = n.attention.head_dim;
+            b.kv_heads = n.attention.kv_heads;
+            b.kv_head_offset = n.attention.kv_head_offset;
             b.input_slots[0] = node.inputs[0].id;
             b.input_slots[1] = node.inputs[1].id;
             b.input_count = 2;
@@ -516,6 +518,8 @@ Status emit_node(Ctx& c, const PrimitiveGraphNode& node) {
                                n.state_index) +
                 1;
             b.group_size = n.attention.head_dim;
+            b.kv_heads = n.attention.kv_heads;
+            b.kv_head_offset = n.attention.kv_head_offset;
             b.input_slots[0] = node.inputs[0].id;
             b.input_count = 1;
             auto po = c.produce(node.outputs[0]);

@@ -82,6 +82,7 @@ struct AttentionShapeKey {
     std::uint32_t kv_heads = 0;
     std::uint32_t head_dim = 0;
     std::uint32_t rotary_dim = 0;
+    std::uint32_t kv_head_offset = 0;
     auto operator<=>(const AttentionShapeKey&) const = default;
 };
 

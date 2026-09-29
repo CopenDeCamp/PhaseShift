@@ -1873,6 +1873,8 @@ Result<Executor> create_model_executor(
             ex.config.target_hidden_taps.data(), ex.config.target_hidden_tap_count);
         lower_options.partition = ex.config.partition;
         lower_options.pipeline_peer_rank = ex.config.pipeline_peer_rank;
+        lower_options.tensor_parallel_size = ex.config.tensor_parallel_size;
+        lower_options.tensor_parallel_rank = ex.config.tensor_parallel_rank;
         auto lower_res =
             lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
         if (!lower_res.ok()) {

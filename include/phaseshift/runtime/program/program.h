@@ -78,6 +78,8 @@ struct DispatchBinding {
     uint32_t parameter_index0 = kNoParameter;
     uint32_t parameter_index1 = kNoParameter;
     uint32_t group_size = 0;
+    uint32_t kv_heads = 0;
+    uint32_t kv_head_offset = 0;
     uint32_t flags = 0;
     uint32_t compute_spec = 0;
     uint32_t activation_kp = 0;
