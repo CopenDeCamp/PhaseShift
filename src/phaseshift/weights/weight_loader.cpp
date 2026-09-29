@@ -164,10 +164,6 @@ Result<MatrixWeight> load_quantized_matrix_impl(
     hipStream_t stream,
     const WeightLoadOptions& options)
 {
-    if (options.shard.enabled())
-        return Status::unsupported(
-            "quantized matrix sharding requires pack level support", __FILE__, __LINE__);
-
     auto view_result = reader.resolve(name);
     if (!view_result.ok()) return view_result.status();
     const QuantizedTensorView& v = view_result.value();
@@ -690,7 +686,7 @@ Result<MatrixWeight> load_bf16_matrix(
     auto raw = load_bf16_matrix_raw(collection, name, arena, stream);
     if (!raw.ok()) return raw;
     if (!options.shard.enabled()) return raw;
-    return shard_bf16_weight(raw.value(), options.shard, arena, stream);
+    return shard_matrix_weight(raw.value(), options.shard, arena, stream);
 }
 
 Result<MatrixWeight> load_quantized_matrix(
@@ -700,7 +696,10 @@ Result<MatrixWeight> load_quantized_matrix(
     hipStream_t stream,
     const WeightLoadOptions& options)
 {
-    return load_quantized_matrix_impl(reader, name, arena, stream, options);
+    auto raw = load_quantized_matrix_impl(reader, name, arena, stream, options);
+    if (!raw.ok()) return raw;
+    if (!options.shard.enabled()) return raw;
+    return shard_matrix_weight(raw.value(), options.shard, arena, stream);
 }
 
 Result<gpu::Tensor> load_quantized_small(

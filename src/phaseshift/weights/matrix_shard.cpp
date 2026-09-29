@@ -58,16 +58,57 @@ Status MatrixShardSpec::validate(uint32_t rows, uint32_t cols) const {
     return validate_spec(*this, rows, cols);
 }
 
-Result<MatrixWeight> shard_bf16_weight(const MatrixWeight& full,
-                                       const MatrixShardSpec& spec,
-                                       gpu::GpuArena& arena,
-                                       hipStream_t stream) {
-    if (full.encoding != MatrixEncoding::Bf16)
-        return Status::unsupported("matrix sharding is only implemented for BF16 weights",
+Result<MatrixWeight> shard_quantized_rows(const MatrixWeight& full,
+                                          const MatrixShardSpec& spec) {
+    if (spec.axis != ShardAxis::OutputFeatures)
+        return Status::unsupported(
+            spec.axis == ShardAxis::InputFeatures
+                ? "quantized input feature sharding requires a repack"
+                : "quantized sharding requires an output feature axis",
+            __FILE__, __LINE__);
+    if (!full.preshuffled)
+        return Status::unsupported("quantized row sharding requires the preshuffled layout",
                                    __FILE__, __LINE__);
+    if (full.codes.ndim() != 2 || full.scales.ndim() != 2)
+        return Status::invalid_argument("quantized weight needs 2D codes and scales",
+                                        __FILE__, __LINE__);
+    const uint32_t extent = full.rows / spec.world_size;
+    const uint32_t offset = extent * spec.rank;
+    if ((offset % 16u) != 0u || (extent % 16u) != 0u)
+        return Status::invalid_argument(
+            "quantized row shard must align to the 16-row native tile", __FILE__, __LINE__);
+    const std::size_t tile_offset = offset / 16u;
+    const std::size_t tile_extent = extent / 16u;
+    if (full.codes.dim(0) < tile_offset + tile_extent ||
+        full.scales.dim(0) < tile_offset + tile_extent)
+        return Status::invalid_argument("quantized tile count does not cover the shard",
+                                        __FILE__, __LINE__);
+    auto codes = full.codes.slice(0, tile_offset, tile_extent);
+    if (!codes.ok()) return codes.status();
+    auto scales = full.scales.slice(0, tile_offset, tile_extent);
+    if (!scales.ok()) return scales.status();
+    MatrixWeight out = full;
+    out.codes = codes.release();
+    out.scales = scales.release();
+    out.rows = extent;
+    return out;
+}
+
+Result<MatrixWeight> shard_matrix_weight(const MatrixWeight& full,
+                                        const MatrixShardSpec& spec,
+                                        gpu::GpuArena& arena,
+                                        hipStream_t stream) {
     Status vs = validate_spec(spec, full.rows, full.cols);
     if (!vs.ok()) return vs;
     if (!spec.enabled()) return full;
+
+    if (full.encoding == MatrixEncoding::Psq4 || full.encoding == MatrixEncoding::Psq8)
+        return shard_quantized_rows(full, spec);
+
+    if (full.encoding != MatrixEncoding::Bf16)
+        return Status::unsupported(
+            "matrix sharding is only implemented for BF16 and PSQ weights",
+            __FILE__, __LINE__);
     if (full.bf16.ndim() != 2)
         return Status::invalid_argument("matrix weight must be rank 2", __FILE__, __LINE__);
 

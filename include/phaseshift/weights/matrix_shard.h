@@ -28,7 +28,7 @@ struct MatrixShardSpec {
     Status validate(uint32_t rows, uint32_t cols) const;
 };
 
-Result<MatrixWeight> shard_bf16_weight(const MatrixWeight& full,
+Result<MatrixWeight> shard_matrix_weight(const MatrixWeight& full,
                                        const MatrixShardSpec& spec,
                                        gpu::GpuArena& arena,
                                        hipStream_t stream);
