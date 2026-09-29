@@ -212,10 +212,16 @@ Status validate_mtp_geometry(
 Status validate_mlp_shapes(
     const Qwen35LayerWeights& weights,
     std::uint32_t hidden_size,
-    std::uint32_t intermediate_size) {
+    std::uint32_t intermediate_size,
+    std::uint32_t tensor_parallel) {
 
-    const RT::MatrixwiseShapeKey gate{intermediate_size, hidden_size};
-    const RT::MatrixwiseShapeKey down{hidden_size, intermediate_size};
+    if (tensor_parallel > 1 && intermediate_size % tensor_parallel != 0) {
+        return Status::invalid_argument(
+            "intermediate size is not divisible by the tensor parallel size",
+            __FILE__, __LINE__);
+    }
+    const RT::MatrixwiseShapeKey gate{intermediate_size / tensor_parallel, hidden_size};
+    const RT::MatrixwiseShapeKey down{hidden_size, intermediate_size / tensor_parallel};
 
     auto status = validate_matrix(weights.mlp_gate_proj, gate, "invalid MLP gate projection");
     if (!status.ok()) return status;
@@ -373,7 +379,8 @@ Status validate_geometry(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
     std::uint32_t tp_full_attention,
-    std::uint32_t tp_linear_attention) {
+    std::uint32_t tp_linear_attention,
+    std::uint32_t tp_mlp) {
 
     std::uint32_t hidden_size = 0;
     std::uint32_t intermediate_size = 0;
@@ -424,7 +431,7 @@ Status validate_geometry(
             is_gdn = config_is_gdn;
         }
 
-        status = validate_mlp_shapes(layer_weights, hidden_size, intermediate_size);
+        status = validate_mlp_shapes(layer_weights, hidden_size, intermediate_size, tp_mlp);
         if (!status.ok()) return status;
 
         if (is_gdn) {
@@ -547,7 +554,10 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         options.tensor_parallel_size > 1 && options.tp_linear_attention
             ? options.tensor_parallel_size
             : 1u;
-    auto geometry_status = validate_geometry(config, weights, tp_attn, tp_gdn);
+    const uint32_t tp_mlp =
+        options.tensor_parallel_size > 1 && options.tp_mlp ? options.tensor_parallel_size
+                                                           : 1u;
+    auto geometry_status = validate_geometry(config, weights, tp_attn, tp_gdn, tp_mlp);
     if (!geometry_status.ok()) return geometry_status;
 
     ModelPartition partition = options.partition;
@@ -999,9 +1009,10 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         name_last("mlp_gate");
         RT::ValueId v_mlp_up = em.linear(w_up, lw_idx.mlp_up, post_norm);
         name_last("mlp_up");
-        RT::ValueId v_swiglu = em.value(static_cast<uint32_t>(config.intermediate_size));
+        const uint32_t local_intermediate = config.intermediate_size / tp_mlp;
+        RT::ValueId v_swiglu = em.value(local_intermediate);
         {
-            RT::SwiGluNode sn{RT::RowwiseShapeKey{static_cast<uint32_t>(config.intermediate_size)}};
+            RT::SwiGluNode sn{RT::RowwiseShapeKey{local_intermediate}};
             em.emit(RT::PrimitiveNode{sn}, {v_mlp_gate, v_mlp_up}, {v_swiglu});
             name_last("mlp_swiglu");
         }
@@ -1009,6 +1020,15 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                                        imatrix_tag(static_cast<uint32_t>(li),
                                                    ImatrixSite::MlpDownInput));
         name_last("mlp_down");
+        if (tp_mlp > 1) {
+            RT::ValueId reduced = em.value(hidden_size);
+            RT::CommAllReduceNode ar;
+            ar.group = RT::CommGroup::Tensor;
+            ar.dtype = RT::ValueDType::BF16;
+            em.emit(RT::PrimitiveNode{ar}, {v_down}, {reduced});
+            name_last("mlp_down_all_reduce");
+            v_down = reduced;
+        }
 
         RT::ValueId layer_output{0};
         {

@@ -54,6 +54,7 @@ struct ExecutorConfig {
     uint32_t tensor_parallel_rank = 0;
     bool tp_full_attention = true;
     bool tp_linear_attention = false;
+    bool tp_mlp = false;
 };
 
 struct DispatchStagingPool {

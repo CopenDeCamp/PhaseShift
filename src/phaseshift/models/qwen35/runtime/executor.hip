@@ -1878,6 +1878,7 @@ Result<Executor> create_model_executor(
         lower_options.tensor_parallel_rank = ex.config.tensor_parallel_rank;
         lower_options.tp_full_attention = ex.config.tp_full_attention;
         lower_options.tp_linear_attention = ex.config.tp_linear_attention;
+        lower_options.tp_mlp = ex.config.tp_mlp;
         auto lower_res =
             lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
         if (!lower_res.ok()) {
