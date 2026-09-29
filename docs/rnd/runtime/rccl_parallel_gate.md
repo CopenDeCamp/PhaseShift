@@ -315,6 +315,57 @@ sampled token は 1GPU と一致しているため argmax には影響してい�
 FP32 partial + FP32 AllReduce に変えると改善する見込みで、
 attention と同じく次 Gate の判断事項とする。
 
+## Gate PP2: stage-local weight / state
+
+### weight の ownership
+
+`ModelPartition` を `model_partition.h` へ切り出し、
+`Qwen35LoadOptions::partition` として weight loader にも渡すようにした。
+stage は所有する layer と embedding / lm_head / final norm のみをロードし、
+`ModelWeights.layers` は full-size のまま残して所有しない layer を空 slot にする。
+
+連動して修正したのは次の3箇所。
+
+- `validate_qwen35_weights`: partition 外の layer を検証しない。
+  embedding / lm_head / final norm は ownership のある側だけを検証する。
+  `hidden_size` は embedding が無い側では config から取る
+- `validate_geometry`: 同様に partition 範囲のみ。
+  weight 表への登録も partition 範囲に限定し、所有しない layer の
+  weight を `add_weight` しない
+- state pool: GDN と KV とも partition 内の layer のみで
+  `num_gdn_states` / attention layer 数を数える。
+  lowering が割り当てる state index は partition 内で 0 から連続するため
+  pool 幾何と一致する
+
+tied embedding のモデルは `lm_head` の実体が `embed_tokens` なので、
+stage1 は `owns_lm_head` である限り embedding もロードする。
+重複するのはこの tied weight のみ。
+
+### 測定方法
+
+当初は `hipMemGetInfo` の load 前後の差分で測ろうとしたが、
+`GpuArena` が事前にまとめて `hipMalloc` しているため差分が 0 になった。
+weight の allocation bytes を全フィールドから合計する方式へ変更した。
+synthetic model では view が無いため二重計上が起きない。
+
+### 結果
+
+`test_qwen35_pp2_e2e`（synthetic model 4層、hidden 128、vocab 64、tied embedding）。
+
+```text
+weight bytes: full=816160 stage0=416144 stage1=416400
+unowned layers empty: stage0=1 stage1=1
+QWEN35_PP2_E2E: PASS
+```
+
+- stage0 = **51.0%**、stage1 = **51.0%** に削減された
+- `stage0 + stage1 - full = 16384` は `vocab 64 * hidden 128 * 2 B`
+  すなわち tied embedding の size と一致し、重複分が
+  tied weight だけである裏付けになる
+- 所有しない layer の weight bytes が 0（`unowned layers empty = 1`）で、
+  Gate §54 の「unowned layer の VRAM allocation は禁止」を満たす
+- correctness は従来の PP1 と同じで、1GPU と bit exact
+
 ## Gate C1: PP2 × TP2 topology
 
 `test_rccl_topology`（4 GPU、label `gpu4;rccl;rccl_4gpu`）が該当する。
@@ -431,8 +482,6 @@ bytes が3回の計測で完全に同一であること、理論値と一致す�
 
 ## 未解決
 
-- Gate PP2（stage-local weight / state の割当）。現状は PP2 の各 stage が
-  full model をロードしており、VRAM 分散が効いていない
 - optimized path の `kv_head_offset` 対応。`kv_append_dispatch.hip` /
   `paged_attention_dispatch.hip` が受け取らないため、tensor parallel の実行は
   `PHASESHIFT_QWEN35_KERNEL_MODE=correctness` 固定のまま

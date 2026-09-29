@@ -195,10 +195,35 @@ weight のロードは次の通り。
 
 - tensor parallel の rank は `Qwen35LoadOptions::tensor_shard` で
   自分に割り当たった分だけ `GpuArena` に載せる
-- pipeline parallel の stage は現在 **両方とも full model をロードする**。
-  `ModelPartition` は lowering が組む Program の範囲だけを切り、
-  weight の読み込み範囲は切り分けていない。つまり PP2 はまだ
-  VRAM を分散していない。
+- pipeline parallel の stage は `Qwen35LoadOptions::partition` で、
+  自分が所有する layer と embedding / lm_head / final norm **だけ**をロードする。
+  `ModelPartition` は `model_partition.h` に定義され、weight loader と
+  lowering の両方が同じ型を使う
+
+`ModelPartition` は次の2通りで解決される。
+
+- loader: `resolve_model_partition(options.partition, num_hidden_layers)`
+  (`layer_end == 0` は全層を意味する)
+- lowering: 同じ関数を `validate_geometry` と Program 生成の両方で呼ぶ
+
+`ModelWeights.layers` は全層分のメタデータを full-size で持つが、
+所有しない layer は weight を一切持たない。
+`validate_qwen35_weights` と `validate_geometry` は partition の範囲だけ
+shape を検証し、embedding / lm_head / final norm は ownership のある側だけを検証する。
+
+tied embedding (`tie_word_embeddings`) のモデルでは `lm_head` の実体が
+`embed_tokens` そのものなので、stage1 は `owns_lm_head` である限り
+embedding weight もロードする。重複するのはこの tied weight だけである。
+
+state pool も partition に合わせて作る。
+
+- `GdnStatePoolLayout::from_text_config(tc, tp, layer_begin, layer_end)`
+  は partition 内の GDN layer 数だけ `num_gdn_states` を作る
+- `PagedKVPool::create` の attention layer 数も partition 内だけを数える
+- `create_model_executor` の両方の幾何検証も同じ partition で計算する
+
+lowering が割り当てる state index は partition 内で 0 から連続するので、
+pool の幾何と一致する。
 
 ## Tensor Parallel の weight shard
 
@@ -343,6 +368,10 @@ send / recv と同じく physical kernel ではなく
 | `test_qwen35_tp4_e2e` | `gpu2;rccl;rccl_2gpu` | 全 layer の TP 化と collective 数の照合 |
 | `test_qwen35_pp2_tp2_e2e` | `gpu4;rccl;rccl_4gpu` | PP2 × TP2 の同時実行 |
 | `test_qwen35_parallel_bench` | `gpu4;rccl;perf` | 構成間の時間と通信 bytes の計測 |
+
+`test_qwen35_pp2_e2e` は stage-owned の weight/state を検証する。
+所有しない layer に weight が無いこと、stage ごとの weight bytes が
+full model より小さいことを確認する。
 
 synthetic model は `tests/support/synthetic_qwen35_model.h` が
 `config.json` と `model.safetensors` を書き出し、通常の
