@@ -61,7 +61,8 @@ struct GdnStatePoolLayout {
         };
     }
 
-    static GdnStatePoolLayout from_text_config(const Qwen35TextConfig& tc) {
+    static GdnStatePoolLayout from_text_config(const Qwen35TextConfig& tc,
+                                               uint32_t tensor_parallel = 1) {
         uint32_t gdn_layers = 0;
         for (uint32_t t : tc.layer_types) {
             if (t == 0) ++gdn_layers;
@@ -73,8 +74,12 @@ struct GdnStatePoolLayout {
         const uint32_t vhd = tc.linear_value_head_dim != 0 ? tc.linear_value_head_dim : 128;
         uint32_t kern = tc.linear_conv_kernel_dim != 0 ? tc.linear_conv_kernel_dim : 4;
         if (kern == 0) kern = 4;
+        const uint32_t tp = tensor_parallel == 0 ? 1 : tensor_parallel;
+        const uint32_t kh_local = kh / tp;
+        const uint32_t vh_local = vh / tp;
+        if (kh_local == 0 || vh_local == 0) return GdnStatePoolLayout{};
         return make(
-            gdn_layers, 2 * kh * khd + vh * vhd, kern - 1, vh, khd, vhd);
+            gdn_layers, 2 * kh_local * khd + vh_local * vhd, kern - 1, vh_local, khd, vhd);
     }
 
     static GdnStatePoolLayout qwen35_0_8b() {

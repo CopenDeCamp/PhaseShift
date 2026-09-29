@@ -36,6 +36,8 @@ struct SyntheticRunOptions {
     std::barrier<>* step_barrier = nullptr;
     uint32_t tensor_parallel_size = 1;
     uint32_t tensor_parallel_rank = 0;
+    bool tp_full_attention = true;
+    bool tp_linear_attention = false;
     ::ps::qwen35::Qwen35TensorShard tensor_shard;
     uint64_t arena_bytes = 512ull * 1024ull * 1024ull;
 };
@@ -115,7 +117,9 @@ private:
         slot_pool_ = std::make_unique<::ps::qwen35::SequenceSlotPool>(slot_result.release());
 
         auto gdn_result = ::ps::qwen35::GdnStatePool::create(
-            *arena_, 1, ::ps::qwen35::GdnStatePoolLayout::from_text_config(tc));
+            *arena_, 1,
+            ::ps::qwen35::GdnStatePoolLayout::from_text_config(
+                tc, options.tensor_parallel_size));
         if (!gdn_result.ok()) {
             result.error = message("GdnStatePool::create", gdn_result.status());
             return false;
@@ -143,6 +147,8 @@ private:
         config.pipeline_peer_rank = options.pipeline_peer_rank;
         config.tensor_parallel_size = options.tensor_parallel_size;
         config.tensor_parallel_rank = options.tensor_parallel_rank;
+        config.tp_full_attention = options.tp_full_attention;
+        config.tp_linear_attention = options.tp_linear_attention;
         for (uint32_t i = 0; i < options.hidden_taps.size() && i < max_taps; ++i)
             config.target_hidden_taps[i] = options.hidden_taps[i];
         config.target_hidden_tap_count =

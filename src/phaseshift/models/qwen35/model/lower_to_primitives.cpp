@@ -301,7 +301,8 @@ Status validate_full_attention_shapes(
 Status validate_gdn_shapes(
     const Qwen35LayerWeights& weights,
     const Qwen35TextConfig& config,
-    std::uint32_t hidden_size) {
+    std::uint32_t hidden_size,
+    std::uint32_t tensor_parallel) {
 
     std::uint32_t qk_features = 0;
     std::uint32_t value_features = 0;
@@ -317,6 +318,16 @@ Status validate_gdn_shapes(
         "invalid GDN value geometry",
         value_features);
     if (!status.ok()) return status;
+    if (tensor_parallel > 1) {
+        if (config.linear_num_key_heads % tensor_parallel != 0 ||
+            config.linear_num_value_heads % tensor_parallel != 0) {
+            return Status::invalid_argument(
+                "GDN head counts are not divisible by the tensor parallel size",
+                __FILE__, __LINE__);
+        }
+        qk_features /= tensor_parallel;
+        value_features /= tensor_parallel;
+    }
     if (qk_features > (std::numeric_limits<std::uint32_t>::max() - value_features) / 2) {
         return Status::out_of_range("invalid GDN convolution geometry", __FILE__, __LINE__);
     }
@@ -330,6 +341,10 @@ Status validate_gdn_shapes(
     if (!status.ok()) return status;
     status = checked_u32(config.linear_num_key_heads, "invalid GDN key heads", key_heads);
     if (!status.ok()) return status;
+    if (tensor_parallel > 1) {
+        value_heads /= tensor_parallel;
+        key_heads /= tensor_parallel;
+    }
     status = checked_u32(config.linear_key_head_dim, "invalid GDN key head dimension", key_head_dim);
     if (!status.ok()) return status;
     status = checked_u32(config.linear_value_head_dim, "invalid GDN value head dimension", value_head_dim);
@@ -357,7 +372,8 @@ Status validate_gdn_shapes(
 Status validate_geometry(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
-    std::uint32_t tensor_parallel) {
+    std::uint32_t tp_full_attention,
+    std::uint32_t tp_linear_attention) {
 
     std::uint32_t hidden_size = 0;
     std::uint32_t intermediate_size = 0;
@@ -412,10 +428,11 @@ Status validate_geometry(
         if (!status.ok()) return status;
 
         if (is_gdn) {
-            status = validate_gdn_shapes(layer_weights, config, hidden_size);
+            status = validate_gdn_shapes(layer_weights, config, hidden_size,
+                                         tp_linear_attention);
         } else {
             status = validate_full_attention_shapes(layer_weights, config, hidden_size,
-                                                    tensor_parallel);
+                                                    tp_full_attention);
         }
         if (!status.ok()) return status;
     }
@@ -522,7 +539,15 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                                         __LINE__);
     if (options.tensor_parallel_rank >= options.tensor_parallel_size)
         return Status::out_of_range("tensor parallel rank out of range", __FILE__, __LINE__);
-    auto geometry_status = validate_geometry(config, weights, options.tensor_parallel_size);
+    const uint32_t tp_attn =
+        options.tensor_parallel_size > 1 && options.tp_full_attention
+            ? options.tensor_parallel_size
+            : 1u;
+    const uint32_t tp_gdn =
+        options.tensor_parallel_size > 1 && options.tp_linear_attention
+            ? options.tensor_parallel_size
+            : 1u;
+    auto geometry_status = validate_geometry(config, weights, tp_attn, tp_gdn);
     if (!geometry_status.ok()) return geometry_status;
 
     ModelPartition partition = options.partition;
@@ -676,7 +701,6 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
 
     Emitter em{pg};
 
-    const uint32_t tensor_parallel = options.tensor_parallel_size;
     const uint32_t tensor_rank = options.tensor_parallel_rank;
     const uint32_t hidden_size = static_cast<uint32_t>(config.hidden_size);
     const RT::RowwiseShapeKey hidden_key{hidden_size};
@@ -725,17 +749,19 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
 
         RT::ValueId block_out{0};
         if (lw.is_gdn) {
+            const uint32_t local_key_heads = key_heads / tp_gdn;
+            const uint32_t local_value_heads = value_heads / tp_gdn;
             const MW& w_qkv = *weight_pointers[lw_idx.gdn_qkv];
             const MW& w_z = *weight_pointers[lw_idx.gdn_z];
             const MW& w_b = *weight_pointers[lw_idx.gdn_b];
             const MW& w_a = *weight_pointers[lw_idx.gdn_a];
             const MW& w_out = *weight_pointers[lw_idx.gdn_out];
 
-            uint32_t qk_features = key_heads * key_head_dim;
-            uint32_t value_features = value_heads * value_head_dim;
+            uint32_t qk_features = local_key_heads * key_head_dim;
+            uint32_t value_features = local_value_heads * value_head_dim;
             uint32_t conv_features = 2 * qk_features + value_features;
-            RT::GdnShapeKey gdn_key{key_heads, value_heads, key_head_dim, value_head_dim,
-                                    conv_kernel};
+            RT::GdnShapeKey gdn_key{local_key_heads, local_value_heads, key_head_dim,
+                                    value_head_dim, conv_kernel};
 
             RT::ValueId v_qkv = em.linear(w_qkv, lw_idx.gdn_qkv, normed, RT::ValueDType::BF16,
                                           imatrix_tag(static_cast<uint32_t>(li),
@@ -827,14 +853,23 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                                   imatrix_tag(static_cast<uint32_t>(li),
                                               ImatrixSite::GdnOutputInput));
             name_last("gdn_out");
+            if (tp_gdn > 1) {
+                RT::ValueId reduced = em.value(hidden_size);
+                RT::CommAllReduceNode ar;
+                ar.group = RT::CommGroup::Tensor;
+                ar.dtype = RT::ValueDType::BF16;
+                em.emit(RT::PrimitiveNode{ar}, {block_out}, {reduced});
+                name_last("gdn_out_all_reduce");
+                block_out = reduced;
+            }
         } else {
-            const uint32_t local_q_heads = q_heads / tensor_parallel;
-            const uint32_t local_kv_heads = kv_heads / tensor_parallel;
+            const uint32_t local_q_heads = q_heads / tp_attn;
+            const uint32_t local_kv_heads = kv_heads / tp_attn;
             uint32_t q_features = local_q_heads * head_dim;
             uint32_t kv_features = local_kv_heads * head_dim;
             uint32_t q_proj_features = 2 * q_features;
             RT::AttentionShapeKey attn_key{local_q_heads, local_kv_heads, head_dim, rotary_dim,
-                                           tensor_rank * local_kv_heads};
+                                           tp_attn > 1 ? tensor_rank * local_kv_heads : 0u};
 
             const MW& w_q = *weight_pointers[lw_idx.attn_q];
             const MW& w_k = *weight_pointers[lw_idx.attn_k];
@@ -925,7 +960,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                                   imatrix_tag(static_cast<uint32_t>(li),
                                               ImatrixSite::FullAttnOInput));
             name_last("o_proj");
-            if (tensor_parallel > 1) {
+            if (tp_attn > 1) {
                 RT::ValueId reduced = em.value(hidden_size);
                 RT::CommAllReduceNode ar;
                 ar.group = RT::CommGroup::Tensor;

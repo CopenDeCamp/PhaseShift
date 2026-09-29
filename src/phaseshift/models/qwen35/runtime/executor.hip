@@ -1639,7 +1639,8 @@ Result<Executor> create_model_executor(
 
     const Qwen35TextConfig& tc = model.text_config();
     {
-        const auto expected_gdn = GdnStatePoolLayout::from_text_config(tc);
+        const auto expected_gdn =
+            GdnStatePoolLayout::from_text_config(tc, config.tensor_parallel_size);
         const auto& actual_gdn = gdn_state_pool.layout();
         if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
             actual_gdn.conv_dim != expected_gdn.conv_dim ||
@@ -1875,6 +1876,8 @@ Result<Executor> create_model_executor(
         lower_options.pipeline_peer_rank = ex.config.pipeline_peer_rank;
         lower_options.tensor_parallel_size = ex.config.tensor_parallel_size;
         lower_options.tensor_parallel_rank = ex.config.tensor_parallel_rank;
+        lower_options.tp_full_attention = ex.config.tp_full_attention;
+        lower_options.tp_linear_attention = ex.config.tp_linear_attention;
         auto lower_res =
             lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
         if (!lower_res.ok()) {

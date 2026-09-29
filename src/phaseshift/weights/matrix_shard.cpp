@@ -83,4 +83,25 @@ Result<MatrixWeight> shard_bf16_weight(const MatrixWeight& full,
     return out;
 }
 
+Status shard_head_tensor(gpu::Tensor& tensor, const MatrixShardSpec& spec) {
+    if (!spec.enabled()) return Status::make_ok();
+    if (spec.axis != ShardAxis::OutputFeatures)
+        return Status::unsupported("head tensors are split along the output axis",
+                                   __FILE__, __LINE__);
+    if (tensor.ndim() == 0 || tensor.ndim() > 2)
+        return Status::invalid_argument("head tensor must have one or two dimensions",
+                                        __FILE__, __LINE__);
+    const auto full = static_cast<uint32_t>(tensor.dim(0));
+    if (full % spec.world_size != 0)
+        return Status::invalid_argument("head count is not divisible by the shard world size",
+                                        __FILE__, __LINE__);
+    const uint32_t extent = full / spec.world_size;
+    if (extent == 0)
+        return Status::invalid_argument("shard extent must be non-zero", __FILE__, __LINE__);
+    auto sliced = tensor.slice(0, static_cast<std::size_t>(extent) * spec.rank, extent);
+    if (!sliced.ok()) return sliced.status();
+    tensor = sliced.release();
+    return Status::make_ok();
+}
+
 }

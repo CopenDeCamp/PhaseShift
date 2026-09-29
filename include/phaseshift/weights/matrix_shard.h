@@ -33,4 +33,6 @@ Result<MatrixWeight> shard_bf16_weight(const MatrixWeight& full,
                                        gpu::GpuArena& arena,
                                        hipStream_t stream);
 
+Status shard_head_tensor(gpu::Tensor& tensor, const MatrixShardSpec& spec);
+
 }

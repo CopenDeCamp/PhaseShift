@@ -220,14 +220,30 @@ Status load_layer_bf16(
         if (!st.ok()) return st;
         st = load_vector(collection, prefix + "linear_attn.conv1d.weight", arena, stream, w.attn_conv1d_weight);
         if (!st.ok()) return st;
+        if (applies) {
+            st = ps::weights::shard_head_tensor(w.attn_conv1d_weight, options.tensor_shard.column);
+            if (!st.ok()) return st;
+        }
         st = load_matrix(collection, prefix + "linear_attn.out_proj.weight", arena, stream, row_opts, w.attn_out_proj);
         if (!st.ok()) return st;
         st = load_vector(collection, prefix + "linear_attn.norm.weight", arena, stream, w.attn_norm_weight);
         if (!st.ok()) return st;
+        if (applies) {
+            st = ps::weights::shard_head_tensor(w.attn_norm_weight, options.tensor_shard.column);
+            if (!st.ok()) return st;
+        }
         st = load_vector(collection, prefix + "linear_attn.dt_bias", arena, stream, w.attn_dt_bias);
         if (!st.ok()) return st;
+        if (applies) {
+            st = ps::weights::shard_head_tensor(w.attn_dt_bias, options.tensor_shard.column);
+            if (!st.ok()) return st;
+        }
         st = load_vector(collection, prefix + "linear_attn.A_log", arena, stream, w.attn_A_log);
         if (!st.ok()) return st;
+        if (applies) {
+            st = ps::weights::shard_head_tensor(w.attn_A_log, options.tensor_shard.column);
+            if (!st.ok()) return st;
+        }
     } else {
         st = load_matrix(collection, prefix + "self_attn.q_proj.weight", arena, stream, column_opts, w.attn_q_proj);
         if (!st.ok()) return st;

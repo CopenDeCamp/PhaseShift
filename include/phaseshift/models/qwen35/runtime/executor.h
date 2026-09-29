@@ -52,6 +52,8 @@ struct ExecutorConfig {
     uint32_t pipeline_peer_rank = 0;
     uint32_t tensor_parallel_size = 1;
     uint32_t tensor_parallel_rank = 0;
+    bool tp_full_attention = true;
+    bool tp_linear_attention = false;
 };
 
 struct DispatchStagingPool {
