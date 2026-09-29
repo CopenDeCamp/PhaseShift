@@ -18,6 +18,7 @@
 
 - [quantization/kernel_optimization_history.md](quantization/kernel_optimization_history.md) — PSQ / GEMM / preshuffle / scale / codebook / iMatrix / FP8・MXFP4 の検証履歴
 - [gdn/optimization_history.md](gdn/optimization_history.md) — GDN recurrence / conv / chunked scan / WMMA 数値挙動
+- [gdn/compact_commit_poc.md](gdn/compact_commit_poc.md) — GDN compact-log commit の PoC（full state snapshot / rerun の置き換え検証）
 - [attention/optimization_history.md](attention/optimization_history.md) — paged attention decode / prefill、KV split/reduce
 - [runtime/execution_overhead.md](runtime/execution_overhead.md) — prefill・decode コスト内訳、kernel gap、HIP Graph / keep-alive
 - [kernel/optimization_history.md](kernel/optimization_history.md) — RoPE 等の単独 kernel
