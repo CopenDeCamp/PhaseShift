@@ -46,6 +46,18 @@ boundary == 0:
 
 1 request で 2 つの GDN snapshot を持たないため、明示 boundary 時は terminal を抑制する。
 
+### DFlash2 有効時
+
+DFlash2 経路では prompt-boundary checkpoint を ring 付きで保存する。`PrefixCheckpoint` は
+`dflash` / `dflash_slot` / `dflash_length` / `dflash_next_position` を持ち、save / restore で
+`DFlash2ContextState` の `k_ring` / `v_ring` を D2D copy する。target KV と DFlash ring の
+どちらか一方だけを復元すると `context.length` が 0 のままになるため、
+ring の無い checkpoint に対して DFlash session の restore を要求した場合は
+fail-closed な error にする。
+
+ring pool は serve 開始時に `PrefixCache::enable_dflash_ring()` で作られ、
+`max_entries` × ring bytes を arena から取る。
+
 ## Storage model
 
 cache は active request の pool と分離した専用 pool を持つ。
@@ -72,6 +84,7 @@ total arena usage
   + active GDN pool
   + prefix KV pool
   + prefix GDN pool
+  + prefix dflash ring pool（DFlash2 有効時）
   + executor scratch
 ```
 

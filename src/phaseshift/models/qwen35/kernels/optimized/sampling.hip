@@ -20,6 +20,7 @@ __device__ __forceinline__ SamplingConstraint make_sampling_constraint(
     if ((p.reserved[0] & 1u) != 0u && masks != nullptr) {
         constraint.active = true;
         constraint.mask = masks + static_cast<std::size_t>(row) * words;
+        constraint.allow_empty = (p.reserved[0] & 2u) != 0u;
     }
     return constraint;
 }

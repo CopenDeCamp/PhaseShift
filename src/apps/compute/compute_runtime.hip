@@ -284,6 +284,24 @@ Result<uint64_t> Qwen35ComputeRuntime::submit_structural_tag(
                             prefix_cache_checkpoint_position);
 }
 
+Result<std::unique_ptr<qwen35::runtime::TokenConstraintState>>
+Qwen35ComputeRuntime::create_constraint_state(const std::string& grammar,
+                                              const std::string& structural_tag) {
+    if (grammar.empty() && structural_tag.empty()) {
+        return std::unique_ptr<qwen35::runtime::TokenConstraintState>();
+    }
+    if (constraint_compiler_ == nullptr) {
+        return Status::unsupported(
+            "constrained generation is not enabled: "
+            "--constraint-tokenizer-info was not provided",
+            __FILE__, __LINE__);
+    }
+    if (grammar.empty()) {
+        return constraint_compiler_->create_structural_tag_state(structural_tag);
+    }
+    return constraint_compiler_->create_gbnf_state(grammar);
+}
+
 Result<qwen35::runtime::StepResult> Qwen35ComputeRuntime::step() {
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);

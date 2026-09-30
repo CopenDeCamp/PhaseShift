@@ -174,8 +174,11 @@ host-side request objectは解放しない。
   両者は serve 中アドレスを安定させる。serve 終了時に `dflash2_executor_shutdown()` し、
   その後 `Qwen35ComputeRuntime::shutdown()` する。
 - `max_concurrent_requests` は 1。`temperature > 0` / `grammar` / `structural_tag` /
-  `prefix_cache_checkpoint_position` を含む request は error event で拒否する
-  （fail-closed、unconstrained へは fallback しない）。
+  `prefix_cache_checkpoint_position` は request ごとに受け付け、constraint state は
+  `DFlashServeSession` が所有して decoder へ渡す。constraint の配線は
+  `Qwen35ComputeRuntime::create_constraint_state()` を経由する。
+- DFlash の prefix cache checkpoint は prompt boundary（prompt 全体）で保存する。
+  `prefix_cache_checkpoint_position` は保存位置の指定としては使われない。
 - `prefix_cache_checkpoint_position` は prefix cache が有効なときだけ backend から送る。
   無効時は 0 である。
 

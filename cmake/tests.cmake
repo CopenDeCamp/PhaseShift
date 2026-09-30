@@ -141,6 +141,7 @@ phaseshift_add_test(NAME test_qwen35_spec_transaction SOURCE unit/test_qwen35_sp
 target_include_directories(test_qwen35_spec_transaction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES phaseshift_qwen35_state)
 phaseshift_add_test(NAME test_constraint_mask SOURCE unit/test_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
+phaseshift_add_test(NAME test_dflash2_constraint_mask SOURCE unit/test_dflash2_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_structural_tool_constraint SOURCE unit/test_structural_tool_constraint.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_composite_structural_constraint SOURCE unit/test_composite_structural_constraint.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_xgrammar_cxx20 SOURCE compile/test_xgrammar_cxx20.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_xgrammar)
@@ -329,6 +330,7 @@ add_custom_target(
         test_dispatch_staging_size
         test_gpu_arena_vmm
         test_constraint_mask
+        test_dflash2_constraint_mask
         test_structural_tool_constraint
         test_composite_structural_constraint
         test_xgrammar_cxx20

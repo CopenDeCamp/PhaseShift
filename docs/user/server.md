@@ -118,11 +118,11 @@ NgramTail を有効化する option は server に無く、`phaseshift-compute` 
 
 指定時の挙動:
 
-- `--prefix-cache-capacity-tokens 0` を強制する（target prefix cache は非対応）。
 - `--max-concurrent-requests 1` を強制する。
-- Structured Output（GBNF / json_schema）と tool calling は**利用できない**。
-  該当する request は gRPC `INVALID_ARGUMENT` で拒否する。
-- `temperature > 0` の request は拒否する（greedy のみ）。
+- Structured Output（GBNF / json_schema）、tool calling、prefix cache は
+  DFlash2 経路でも利用できる。constraint は target verify の各行に適用され、
+  generate される token 列は grammar 準拠である。
+- prefix cache の checkpoint は prompt boundary（prompt 全体）で保存する。
 
 起動ログの `Capabilities` はこれらを反映して表示する。
 
@@ -131,7 +131,7 @@ NgramTail を有効化する option は server に無く、`phaseshift-compute` 
     --model-dir models/Jackrong/Qwopus3.8-27B-Flash-V2-PSQ \
     --port 8001 \
     --device 1 \
-    --arena-gib 26 \
+    --arena-gib 31 \
     --max-seq-len 512 \
     --kv-cache-dtype psq4 \
     --max-concurrent-requests 1 \

@@ -20,8 +20,7 @@
 -h, --help                 show this help message and exit
 ```
 
-`--dflash2-model-dir` 指定時のみ DFlash2 経路に入る。greedy のみ
-（`--temperature` は 0 固定）で、`--prefix-cache-capacity-tokens` とは併用できない。
+`--dflash2-model-dir` 指定時のみ DFlash2 経路に入る。
 spec decode の構成は `phaseshift-compute` の既定（`--dflash2-drafts 7`、
 NgramTail 無効）を使う。NgramTail を有効化する場合は `phaseshift-compute` を直接起動し、
 `--dflash2-ngram-tail 8 --dflash2-ngram-n 5` を指定する（cli は ngram option を転送しない）。

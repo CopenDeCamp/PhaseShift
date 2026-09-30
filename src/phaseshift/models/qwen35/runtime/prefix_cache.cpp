@@ -178,6 +178,32 @@ void PrefixCache::release_checkpoint(PrefixCheckpoint& entry) noexcept {
         free_state_slots_.push_back(entry.cache_state_slot);
         entry.cache_state_slot = kInvalidSlot;
     }
+    if (entry.dflash) {
+        free_ring_slots_.push_back(entry.dflash_slot);
+        entry.dflash = false;
+    }
+}
+
+Status PrefixCache::enable_dflash_ring(const dflash2::DFlash2Config& config,
+                                       gpu::GpuArena& arena) {
+    if (dflash_ring_enabled()) return Status::make_ok();
+    if (max_entries_ == 0) {
+        return Status::invalid_state("prefix cache has no entries", __FILE__, __LINE__);
+    }
+    for (uint32_t i = 0; i < max_entries_; ++i) {
+        auto ring = dflash2::create_dflash2_context_state(config, arena, 0u);
+        if (!ring.ok()) {
+            dflash_ring_pool_.clear();
+            free_ring_slots_.clear();
+            dflash_ring_bytes_ = 0;
+            return ring.status();
+        }
+        dflash_ring_pool_.push_back(ring.release());
+        free_ring_slots_.push_back(i);
+    }
+    dflash_ring_bytes_ =
+        dflash_ring_pool_.front().k_ring.allocation_bytes() * 2u;
+    return Status::make_ok();
 }
 
 void PrefixCache::evict_lru() {
@@ -206,7 +232,8 @@ Status PrefixCache::save(
     const PagedKVPool& kv_pool,
     std::vector<int32_t> tokens,
     hipStream_t stream,
-    bool prompt_boundary) {
+    bool prompt_boundary,
+    const dflash2::DFlash2ContextState* dflash_context) {
     if (!enabled()) return Status::make_ok();
     if (!sequence.is_usable()) {
         return Status::invalid_state("prefix save: sequence not usable", __FILE__, __LINE__);
@@ -252,11 +279,15 @@ Status PrefixCache::save(
         return Status::make_ok();
     }
 
-    while ((cache_kv_pool_->num_free_pages() < pages || free_state_slots_.empty()) &&
+    const bool dflash_needed = dflash_context != nullptr && dflash_ring_enabled();
+
+    while ((cache_kv_pool_->num_free_pages() < pages || free_state_slots_.empty() ||
+            (dflash_needed && free_ring_slots_.empty())) &&
            !entries_.empty()) {
         evict_lru();
     }
-    if (cache_kv_pool_->num_free_pages() < pages || free_state_slots_.empty()) {
+    if (cache_kv_pool_->num_free_pages() < pages || free_state_slots_.empty() ||
+        (dflash_needed && free_ring_slots_.empty())) {
         ++stats_.skipped_too_large;
         if (trace_enabled()) {
             std::fprintf(stderr,
@@ -305,6 +336,34 @@ Status PrefixCache::save(
         return gdn_st;
     }
 
+    if (dflash_needed) {
+        const uint32_t ring_slot = free_ring_slots_.back();
+        free_ring_slots_.pop_back();
+        checkpoint.dflash = true;
+        checkpoint.dflash_slot = ring_slot;
+        checkpoint.dflash_length = dflash_context->length;
+        checkpoint.dflash_next_position = dflash_context->next_position;
+        dflash2::DFlash2ContextState& dst = dflash_ring_pool_[ring_slot];
+        const std::size_t ring_bytes = dflash_context->k_ring.allocation_bytes();
+        const hipError_t ring_err = hipMemcpyAsync(
+            dst.k_ring.data<void>(), dflash_context->k_ring.data<void>(), ring_bytes,
+            hipMemcpyDeviceToDevice, stream);
+        if (ring_err == hipSuccess) {
+            const hipError_t v_err = hipMemcpyAsync(
+                dst.v_ring.data<void>(), dflash_context->v_ring.data<void>(), ring_bytes,
+                hipMemcpyDeviceToDevice, stream);
+            if (v_err != hipSuccess) {
+                release_checkpoint(checkpoint);
+                return Status::hip_error("prefix cache dflash ring copy",
+                                         hipGetErrorString(v_err), __FILE__, __LINE__);
+            }
+        } else {
+            release_checkpoint(checkpoint);
+            return Status::hip_error("prefix cache dflash ring copy",
+                                     hipGetErrorString(ring_err), __FILE__, __LINE__);
+        }
+    }
+
     const std::size_t per_page = kv_page_bytes(kv_pool) * kv_pool.num_attention_layers() * 2u
         + kv_page_scale_bytes(kv_pool) * kv_pool.num_attention_layers() * 2u;
     stats_.save_d2d_bytes +=
@@ -334,7 +393,8 @@ Status PrefixCache::restore(
     GdnStatePool& gdn_pool,
     PagedKVPool& kv_pool,
     const PrefixCheckpoint& checkpoint,
-    hipStream_t stream) {
+    hipStream_t stream,
+    dflash2::DFlash2ContextState* dflash_context) {
     if (!enabled()) {
         return Status::invalid_state("prefix restore: cache disabled", __FILE__, __LINE__);
     }
@@ -380,6 +440,36 @@ Status PrefixCache::restore(
         sequence.slot, *cache_gdn_pool_, checkpoint.cache_state_slot, stream);
     if (!gdn_st.ok()) return gdn_st;
 
+    if (dflash_context != nullptr) {
+        if (!checkpoint.dflash) {
+            return Status::invalid_state(
+                "prefix restore: checkpoint has no dflash ring", __FILE__, __LINE__);
+        }
+        if (checkpoint.dflash_slot >= dflash_ring_pool_.size()) {
+            return Status::invalid_state("prefix restore: dflash ring slot out of range",
+                                         __FILE__, __LINE__);
+        }
+        const dflash2::DFlash2ContextState& src =
+            dflash_ring_pool_[checkpoint.dflash_slot];
+        const std::size_t ring_bytes = src.k_ring.allocation_bytes();
+        const hipError_t k_err = hipMemcpyAsync(
+            dflash_context->k_ring.data<void>(), src.k_ring.data<void>(), ring_bytes,
+            hipMemcpyDeviceToDevice, stream);
+        if (k_err != hipSuccess) {
+            return Status::hip_error("prefix restore dflash ring copy",
+                                     hipGetErrorString(k_err), __FILE__, __LINE__);
+        }
+        const hipError_t v_err = hipMemcpyAsync(
+            dflash_context->v_ring.data<void>(), src.v_ring.data<void>(), ring_bytes,
+            hipMemcpyDeviceToDevice, stream);
+        if (v_err != hipSuccess) {
+            return Status::hip_error("prefix restore dflash ring copy",
+                                     hipGetErrorString(v_err), __FILE__, __LINE__);
+        }
+        dflash_context->length = checkpoint.dflash_length;
+        dflash_context->next_position = checkpoint.dflash_next_position;
+    }
+
     auto commit_st = commit_sequence_append(sequence, handle, checkpoint.position);
     if (!commit_st.ok()) return commit_st;
 
@@ -405,6 +495,10 @@ void PrefixCache::clear() noexcept {
         for (uint32_t i = 0; i < cache_gdn_pool_->max_sequences(); ++i) {
             free_state_slots_.push_back(i);
         }
+    }
+    free_ring_slots_.clear();
+    for (std::size_t i = 0; i < dflash_ring_pool_.size(); ++i) {
+        free_ring_slots_.push_back(static_cast<uint32_t>(i));
     }
 }
 

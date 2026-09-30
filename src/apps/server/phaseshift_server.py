@@ -285,10 +285,6 @@ def main() -> int:
             _log(f"dflash2 model directory not found: {dflash2_dir}")
             return 2
         opts.dflash2_model_dir = str(dflash2_dir)
-        if opts.prefix_cache_capacity_tokens > 0:
-            _log("--dflash2-model-dir disables the prefix cache "
-                 "(target prefix cache is unsupported with speculative decoding)")
-            opts.prefix_cache_capacity_tokens = 0
         if opts.max_concurrent_requests != 1:
             _log(f"--dflash2-model-dir forces --max-concurrent-requests 1 "
                  f"(requested {opts.max_concurrent_requests})")
@@ -417,13 +413,8 @@ def main() -> int:
     _log("Capabilities:")
     _log("  Chat:         yes")
     _log("  Streaming:    yes")
-    if opts.dflash2_model_dir:
-        _log("  Tool calling: no (DFlash2 speculative decoding)")
-        _log("  Structured:   no (DFlash2 speculative decoding)")
-        _log("  Greedy only:  yes (temperature must be 0)")
-    else:
-        _log("  Tool calling: yes")
-        _log("  Structured:   fail-closed (Chat + Responses)")
+    _log("  Tool calling: yes")
+    _log("  Structured:   fail-closed (Chat + Responses)")
     _log("  Responses API:yes")
     _log("  Reasoning:    yes (opt-in)")
     _log("")

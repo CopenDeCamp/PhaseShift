@@ -512,7 +512,8 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
                      unsigned long dflash2_ngram_tail,
                      unsigned long dflash2_ngram_n,
                      int dflash2_stats,
-                     const std::string& kv_cache_dtype) {
+                     const std::string& kv_cache_dtype,
+                     const ps::qwen35::runtime::SamplingConfig& sampling) {
     auto& executor = runtime.executor();
     const auto& model = runtime.model();
     auto& slot_pool = runtime.slot_pool();
@@ -605,6 +606,7 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
     ps::qwen35::runtime::DFlash2SpecDecoder decoder = decoder_result.release();
     ps::qwen35::runtime::DFlash2SpecTiming timing;
     decoder.timing = &timing;
+    ps::qwen35::runtime::dflash2_spec_decoder_set_sampling(decoder, sampling);
 
     std::vector<int32_t> generated;
     uint32_t decode_tokens = 0u;
@@ -805,6 +807,7 @@ struct DFlashServeSession {
     std::unique_ptr<ps::qwen35::PagedSequenceState> sequence;
     std::unique_ptr<ps::qwen35::dflash2::DFlash2ContextState> context;
     std::unique_ptr<ps::qwen35::runtime::DFlash2SpecDecoder> decoder;
+    std::unique_ptr<ps::qwen35::runtime::TokenConstraintState> constraint;
     ps::qwen35::runtime::DFlash2SpecTiming timing{};
     int32_t pending_token = 0;
     bool ready = false;
@@ -820,6 +823,8 @@ struct ServeGeneration {
     ps::qwen35::runtime::FinishReason finish_reason =
         ps::qwen35::runtime::FinishReason::None;
     uint32_t prompt_tokens = 0;
+    uint32_t restored_tokens = 0;
+    uint32_t cache_checkpoint_tokens = 0;
     std::vector<int32_t> generated;
     std::unique_ptr<DFlashServeSession> dflash_session;
 };
@@ -921,9 +926,12 @@ void serve_emit_done(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
         done["generated_ids"] = generation.generated;
         done["finish_reason"] = finish_reason_name(generation.finish_reason);
         done["prompt_tokens"] = generation.prompt_tokens;
-        done["restored_tokens"] = 0;
-        done["prefill_tokens"] = generation.prompt_tokens;
-        done["cache_checkpoint_tokens"] = 0;
+        done["restored_tokens"] = generation.restored_tokens;
+        done["prefill_tokens"] =
+            generation.prompt_tokens >= generation.restored_tokens
+                ? generation.prompt_tokens - generation.restored_tokens
+                : 0;
+        done["cache_checkpoint_tokens"] = generation.cache_checkpoint_tokens;
     } else if (request != nullptr) {
         done["generated_ids"] = request->generated;
         done["finish_reason"] = finish_reason_name(request->finish_reason);
@@ -948,6 +956,25 @@ void serve_emit_done(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
 void serve_dflash_close_session(ServeGeneration& generation, hipStream_t stream) {
     if (generation.dflash_session == nullptr) return;
     if (generation.dflash_session->ready) {
+        const char* stats_env = std::getenv("PHASESHIFT_DFLASH2_SERVE_STATS");
+        if (stats_env != nullptr && stats_env[0] != '\0' && stats_env[0] != '0') {
+            const auto& t = generation.dflash_session->timing;
+            const float rounds = static_cast<float>(t.rounds);
+            const float mean = t.rounds > 0u
+                ? static_cast<float>(t.accepted_drafts) / rounds : 0.0f;
+            const float full_rate = t.rounds > 0u
+                ? static_cast<float>(t.full_accepts) / rounds : 0.0f;
+            const float emitted = t.rounds > 0u
+                ? static_cast<float>(t.generated_tokens) / rounds : 0.0f;
+            fprintf(stderr, "DFLASH2_ROUNDS=%u\n", t.rounds);
+            fprintf(stderr, "DFLASH2_ACCEPTED_DRAFTS=%u\n", t.accepted_drafts);
+            fprintf(stderr, "DFLASH2_MEAN_ACCEPTED=%.3f\n", mean);
+            fprintf(stderr, "DFLASH2_FULL_ACCEPT_RATE=%.3f\n", full_rate);
+            fprintf(stderr, "DFLASH2_EMITTED_PER_ROUND=%.3f\n", emitted);
+            fprintf(stderr, "DFLASH2_GENERATED_TOKENS=%u\n", t.generated_tokens);
+            fprintf(stderr, "DFLASH2_ROUND_MS=%.3f\n", t.round_ms);
+            fflush(stderr);
+        }
         (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(
             *generation.dflash_session->decoder);
         (void)ps::qwen35::dflash2::dflash2_context_shutdown(
@@ -1143,7 +1170,10 @@ bool serve_cancel_one(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
 ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
                                      ps::app::Qwen35ComputeRuntime& runtime,
                                      ServeGeneration& generation,
-                                     const std::vector<int32_t>& input_ids) {
+                                     const std::vector<int32_t>& input_ids,
+                                     const std::string& grammar,
+                                     const std::string& structural_tag,
+                                     const ps::qwen35::runtime::SamplingConfig& sampling) {
     auto& slot_pool = runtime.slot_pool();
     auto& gdn_pool = runtime.gdn_pool();
     auto& kv_pool = runtime.kv_pool();
@@ -1160,6 +1190,16 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     session->sequence =
         std::make_unique<ps::qwen35::PagedSequenceState>(sequence_result.release());
 
+    auto* prefix_cache = runtime.mutable_prefix_cache();
+    const ps::qwen35::runtime::PrefixCheckpoint* checkpoint = nullptr;
+    if (prefix_cache != nullptr && prefix_cache->enabled()) {
+        const ps::qwen35::runtime::PrefixCheckpoint* found =
+            prefix_cache->find_longest(input_ids, true);
+        if (found != nullptr && found->tokens.size() < input_ids.size()) {
+            checkpoint = found;
+        }
+    }
+
     auto context_result =
         ps::qwen35::dflash2::create_dflash2_context_state(dflash.config, arena, 0u);
     if (!context_result.ok()) {
@@ -1169,6 +1209,19 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     session->context =
         std::make_unique<ps::qwen35::dflash2::DFlash2ContextState>(
             context_result.release());
+
+    uint32_t restored_tokens = 0u;
+    if (checkpoint != nullptr) {
+        const ps::Status restore_st = prefix_cache->restore(
+            *session->sequence, gdn_pool, kv_pool, *checkpoint, stream,
+            session->context.get());
+        if (!restore_st.ok()) {
+            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
+            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
+            return restore_st;
+        }
+        restored_tokens = checkpoint->position;
+    }
 
     ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = dflash.drafts;
@@ -1188,15 +1241,53 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
         std::make_unique<ps::qwen35::runtime::DFlash2SpecDecoder>(
             decoder_result.release());
     session->decoder->timing = &session->timing;
+    ps::qwen35::runtime::dflash2_spec_decoder_set_sampling(*session->decoder, sampling);
+
+    if (!grammar.empty() || !structural_tag.empty()) {
+        auto constraint_result = runtime.create_constraint_state(grammar, structural_tag);
+        if (!constraint_result.ok()) {
+            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
+            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
+            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
+            return constraint_result.status();
+        }
+        session->constraint = constraint_result.release();
+        const auto* compiler = runtime.constraint_compiler();
+        const uint32_t mask_words = compiler != nullptr ? compiler->mask_words() : 0u;
+        const ps::Status wired = ps::qwen35::runtime::dflash2_spec_decoder_set_constraint(
+            *session->decoder, session->constraint.get(), mask_words, &arena);
+        if (!wired.ok()) {
+            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
+            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
+            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
+            return wired;
+        }
+    }
 
     auto prefill_result = ps::qwen35::runtime::dflash2_spec_prefill(
-        *session->decoder, input_ids.data(), static_cast<uint32_t>(input_ids.size()));
+        *session->decoder, input_ids.data(), static_cast<uint32_t>(input_ids.size()),
+        restored_tokens);
     if (!prefill_result.ok()) {
         (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
         (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
         (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
         return prefill_result.status();
     }
+
+    if (prefix_cache != nullptr && prefix_cache->enabled()) {
+        std::vector<int32_t> boundary(input_ids.begin(), input_ids.end());
+        const ps::Status save_st = prefix_cache->save(
+            *session->sequence, gdn_pool, kv_pool, std::move(boundary), stream, true,
+            session->context.get());
+        if (!save_st.ok()) {
+            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
+            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
+            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
+            return save_st;
+        }
+        generation.cache_checkpoint_tokens = static_cast<uint32_t>(input_ids.size());
+    }
+    generation.restored_tokens = restored_tokens;
 
     const int32_t pending = prefill_result.value().pending_token;
     session->pending_token = pending;
@@ -1363,27 +1454,9 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
     generation.prompt_tokens = static_cast<uint32_t>(input_ids.size());
 
     if (dflash.enabled) {
-        if (sampling.temperature > 0.0f) {
-            emit_error(request_id,
-                       "dflash2 speculative decoding supports greedy only: "
-                       "temperature must be 0");
-            return false;
-        }
-        if (has_constraint) {
-            emit_error(request_id,
-                       "dflash2 speculative decoding does not support grammar or "
-                       "structural_tag constraints");
-            return false;
-        }
-        if (prefix_cache_checkpoint_position > 0) {
-            emit_error(request_id,
-                       "dflash2 speculative decoding does not support "
-                       "prefix_cache_checkpoint_position");
-            return false;
-        }
         generation.dflash = true;
-        const ps::Status open_status =
-            serve_dflash_open_session(dflash, runtime, generation, input_ids);
+        const ps::Status open_status = serve_dflash_open_session(
+            dflash, runtime, generation, input_ids, grammar, structural_tag, sampling);
         if (!open_status.ok()) {
             emit_error_with_code(request_id, constraint_error_code(open_status.code()),
                                  open_status.message());
@@ -1521,6 +1594,18 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         fprintf(stderr, "DFLASH2_ENABLED=1\n");
         fprintf(stderr, "DFLASH2_DRAFTS=%u\n", dflash.drafts);
         fprintf(stderr, "DFLASH2_BLOCK_SIZE=%zu\n", dflash.config.block_size);
+        if (auto* prefix_cache = runtime.mutable_prefix_cache();
+            prefix_cache != nullptr && prefix_cache->enabled()) {
+            const ps::Status ring_st =
+                prefix_cache->enable_dflash_ring(dflash.config, runtime.arena());
+            if (!ring_st.ok()) {
+                fprintf(stderr, "dflash2 prefix cache ring failed: %s\n",
+                        ring_st.message().c_str());
+                return 1;
+            }
+            fprintf(stderr, "PREFIX_CACHE_DFLASH_RING_BYTES=%zu\n",
+                    prefix_cache->dflash_ring_bytes());
+        }
     }
     if (const auto* prefix_cache = runtime.prefix_cache(); prefix_cache != nullptr) {
         fprintf(stderr, "PREFIX_CACHE_ENABLED=1\n");
@@ -1751,24 +1836,8 @@ int main(int argc, char** argv) {
         if (proxy_env == nullptr || proxy_env[0] == '\0') {
             setenv("PHASESHIFT_TARGET_LM_HEAD_PROXY", "0", 1);
         }
-        if (sampling.temperature > 0.0f) {
-            fprintf(stderr,
-                    "dflash2 speculative decoding supports greedy only: --temperature must be 0 (got %g)\n",
-                    static_cast<double>(sampling.temperature));
-            return 2;
-        }
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");
-            return 2;
-        }
-        if (!constraint_tokenizer_info.empty()) {
-            fprintf(stderr,
-                    "dflash2 speculative decoding does not support --constraint-tokenizer-info\n");
-            return 2;
-        }
-        if (prefix_cache_capacity_tokens > 0) {
-            fprintf(stderr,
-                    "dflash2 speculative decoding does not support --prefix-cache-capacity-tokens\n");
             return 2;
         }
     }
@@ -1896,7 +1965,7 @@ int main(int argc, char** argv) {
     if (dflash_enabled) {
         return run_dflash2_shot(*runtime, prompt_ids, max_new_tokens, dflash_config,
                                 dflash2_model_dir, dflash2_drafts, dflash2_ngram_tail,
-                                dflash2_ngram_n, dflash2_stats, kv_cache_dtype);
+                                dflash2_ngram_n, dflash2_stats, kv_cache_dtype, sampling);
     }
     return run_single_shot(*runtime, prompt_ids, max_new_tokens, sampling,
                            kv_cache_dtype, dump_logits_path);

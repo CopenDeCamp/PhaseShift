@@ -7,7 +7,11 @@ MTP の sampling とは別物で、target LM の logits から次 token を決�
 
 - 対象: target logits → greedy / temperature / top-k / top-p → next token
 - 対象外: top-k 以外の truncation（min-p / typical-p）、penalty 系、beam search、
-  DFlash2 CandidateSelector、stochastic speculative decoding
+  DFlash2 CandidateSelector
+- DFlash2 verify は `SamplingConfig` と `sample_index` を `ScheduledRequest` に渡す。
+  stochastic の verify は target の sample 結果と draft を比較する sample-and-compare
+  で、round ごとに行消費 row 数だけ `sample_index` を進める
+  （[dflash2.md](dflash2.md) を参照）。
 
 ## SamplingConfig
 

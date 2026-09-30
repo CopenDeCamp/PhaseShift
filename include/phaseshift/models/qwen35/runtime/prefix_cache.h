@@ -3,6 +3,7 @@
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
+#include <phaseshift/models/qwen35/dflash2/context_state.h>
 #include <phaseshift/core/memory/arena.h>
 #include <phaseshift/core/status.h>
 #include <hip/hip_runtime.h>
@@ -13,6 +14,11 @@
 namespace ps {
 namespace qwen35 {
 
+namespace dflash2 {
+struct DFlash2ContextState;
+struct DFlash2Config;
+}  // namespace dflash2
+
 namespace runtime {
 
 struct PrefixCheckpoint {
@@ -21,6 +27,11 @@ struct PrefixCheckpoint {
     std::vector<PageId> cache_pages;
     SequenceSlotId cache_state_slot = kInvalidSlot;
     uint64_t last_used = 0;
+
+    bool dflash = false;
+    uint32_t dflash_slot = 0u;
+    uint32_t dflash_length = 0u;
+    uint32_t dflash_next_position = 0u;
 };
 
 struct PrefixCacheStats {
@@ -76,6 +87,14 @@ class PrefixCache {
         return static_cast<uint32_t>(free_state_slots_.size());
     }
 
+    Status enable_dflash_ring(const dflash2::DFlash2Config& config, gpu::GpuArena& arena);
+
+    bool dflash_ring_enabled() const noexcept {
+        return !dflash_ring_pool_.empty();
+    }
+
+    std::size_t dflash_ring_bytes() const noexcept { return dflash_ring_bytes_; }
+
     const PrefixCheckpoint* find_longest(
         const std::vector<int32_t>& tokens,
         bool strictly_shorter = false);
@@ -86,14 +105,16 @@ class PrefixCache {
         const PagedKVPool& kv_pool,
         std::vector<int32_t> tokens,
         hipStream_t stream,
-        bool prompt_boundary = false);
+        bool prompt_boundary = false,
+        const dflash2::DFlash2ContextState* dflash_context = nullptr);
 
     Status restore(
         PagedSequenceState& sequence,
         GdnStatePool& gdn_pool,
         PagedKVPool& kv_pool,
         const PrefixCheckpoint& checkpoint,
-        hipStream_t stream);
+        hipStream_t stream,
+        dflash2::DFlash2ContextState* dflash_context = nullptr);
 
     void clear() noexcept;
 
@@ -110,6 +131,9 @@ class PrefixCache {
 
     std::optional<PagedKVPool> cache_kv_pool_;
     std::optional<GdnStatePool> cache_gdn_pool_;
+    std::vector<dflash2::DFlash2ContextState> dflash_ring_pool_;
+    std::vector<uint32_t> free_ring_slots_;
+    std::size_t dflash_ring_bytes_ = 0;
 
     uint32_t capacity_tokens_ = 0;
     uint32_t max_entries_ = 0;

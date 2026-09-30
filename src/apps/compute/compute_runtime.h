@@ -70,6 +70,9 @@ class Qwen35ComputeRuntime {
         const std::string& structural_tag,
         uint32_t prefix_cache_checkpoint_position = 0);
 
+    Result<std::unique_ptr<qwen35::runtime::TokenConstraintState>> create_constraint_state(
+        const std::string& grammar, const std::string& structural_tag);
+
     Result<qwen35::runtime::StepResult> step();
 
     bool has_pending() const;
@@ -117,6 +120,10 @@ class Qwen35ComputeRuntime {
     }
 
     const qwen35::runtime::PrefixCache* prefix_cache() const noexcept {
+        return prefix_cache_ ? &*prefix_cache_ : nullptr;
+    }
+
+    qwen35::runtime::PrefixCache* mutable_prefix_cache() noexcept {
         return prefix_cache_ ? &*prefix_cache_ : nullptr;
     }
 

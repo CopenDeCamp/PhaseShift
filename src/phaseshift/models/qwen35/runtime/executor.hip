@@ -566,7 +566,9 @@ Result<PendingBatch> submit_co_batch(
             staging[i].sampling.top_k = sampling.top_k;
             staging[i].sampling.seed = sampling.seed;
             staging[i].sampling.sample_index = sampling.sample_index;
-            staging[i].sampling.reserved[0] = req.token_constraint ? 1u : 0u;
+            staging[i].sampling.reserved[0] =
+                static_cast<uint32_t>(req.token_constraint ? 1u : 0u) |
+                static_cast<uint32_t>(req.constraint_allow_empty ? 2u : 0u);
             uint32_t oc = req.num_output_rows ? req.num_output_rows : 1u;
             staging[i].output_count = static_cast<uint8_t>(oc < 255u ? oc : 255u);
             staging[i].output_index = output_count;
