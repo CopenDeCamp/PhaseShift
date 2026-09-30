@@ -30,6 +30,15 @@ class TokenConstraintState {
   virtual bool accept_token(int32_t token_id) = 0;
   virtual bool is_terminated() const = 0;
 
+  virtual Status fill_draft_tree_masks(const int32_t* draft_tokens, uint32_t draft_count,
+                                       uint32_t* mask_rows, uint32_t word_count) {
+    (void)draft_tokens;
+    (void)draft_count;
+    (void)mask_rows;
+    (void)word_count;
+    return Status::unsupported("draft tree masks are not supported", __FILE__, __LINE__);
+  }
+
  protected:
   TokenConstraintState() = default;
 };

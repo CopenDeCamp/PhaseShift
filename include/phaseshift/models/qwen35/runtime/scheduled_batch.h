@@ -32,6 +32,7 @@ struct ScheduledRequest {
     uint64_t sampling_index = 0;
 
     bool token_constraint = false;
+    bool constraint_allow_empty = false;
     uint32_t num_output_rows = 1;
 };
 

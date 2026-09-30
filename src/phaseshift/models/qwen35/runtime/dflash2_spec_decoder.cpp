@@ -39,7 +39,11 @@ ScheduledBatch make_prefill_batch(
     uint32_t num_tokens,
     uint32_t prefix_tokens,
     bool compute_logits,
-    ::ps::runtime::VerifyNumericMode numeric_mode) {
+    ::ps::runtime::VerifyNumericMode numeric_mode,
+    const uint32_t* mask = nullptr,
+    uint32_t mask_words = 0u,
+    const SamplingConfig* sampling = nullptr,
+    uint64_t sampling_index = 0u) {
     ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
@@ -51,6 +55,11 @@ ScheduledBatch make_prefill_batch(
     req.compute_logits = compute_logits;
     req.sample = compute_logits;
     req.num_output_rows = 1u;
+    req.token_constraint = mask != nullptr;
+    if (sampling != nullptr) {
+        req.sampling = *sampling;
+        req.sampling_index = sampling_index;
+    }
     requests.clear();
     requests.push_back(req);
 
@@ -64,7 +73,38 @@ ScheduledBatch make_prefill_batch(
     batch.num_prefill_requests = num_tokens == 1u ? 0u : 1u;
     batch.speculative_verify = false;
     batch.verify_numeric_mode = numeric_mode;
+    batch.constraint_masks = mask;
+    batch.constraint_mask_words = mask != nullptr ? mask_words : 0u;
     return batch;
+}
+
+bool mask_row_is_empty(const uint32_t* row, uint32_t word_count) {
+    for (uint32_t w = 0u; w < word_count; ++w) {
+        if (row[w] != 0u) return false;
+    }
+    return true;
+}
+
+Status build_constraint_masks(DFlash2SpecDecoder& decoder, const int32_t* drafts,
+                              uint32_t draft_count) {
+    if (decoder.constraint == nullptr) return Status::make_ok();
+    if (decoder.constraint_mask_words == 0u || decoder.constraint_mask_host.empty()) {
+        return Status::invalid_state("dflash2 constraint mask buffer is not sized", __FILE__,
+                                     __LINE__);
+    }
+    uint32_t* rows = decoder.constraint_mask_host.data();
+    const uint32_t words = decoder.constraint_mask_words;
+    Status st = draft_count == 0u
+                    ? decoder.constraint->fill_next_mask(rows, words)
+                    : decoder.constraint->fill_draft_tree_masks(drafts, draft_count, rows,
+                                                                words);
+    if (!st.ok()) return st;
+    if (mask_row_is_empty(rows, words)) {
+        return Status::invalid_state(
+            "constraint allows no token at the current generation position", __FILE__,
+            __LINE__);
+    }
+    return Status::make_ok();
 }
 
 }  // namespace
@@ -280,6 +320,39 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     return decoder;
 }
 
+void dflash2_spec_decoder_set_sampling(DFlash2SpecDecoder& decoder,
+                                       const SamplingConfig& sampling) {
+    decoder.sampling = sampling;
+    decoder.sample_index = 0u;
+}
+
+Status dflash2_spec_decoder_set_constraint(DFlash2SpecDecoder& decoder,
+                                           TokenConstraintState* state,
+                                           uint32_t mask_words,
+                                           gpu::GpuArena* arena) {
+    decoder.constraint = nullptr;
+    decoder.constraint_mask_words = 0u;
+    decoder.constraint_mask_host.clear();
+    decoder.proposal_mask_device = nullptr;
+    if (state == nullptr) return Status::make_ok();
+    if (mask_words == 0u) {
+        return Status::invalid_argument("constraint mask words is zero", __FILE__, __LINE__);
+    }
+    if (arena == nullptr) {
+        return Status::invalid_argument("constraint arena is null", __FILE__, __LINE__);
+    }
+    auto mask_alloc = arena->allocate_aligned(
+        static_cast<std::size_t>(kDFlash2SpecMaxVerifyRows) * mask_words * sizeof(uint32_t),
+        256u);
+    if (!mask_alloc.ok()) return mask_alloc.status();
+    decoder.proposal_mask_device = static_cast<uint32_t*>(mask_alloc.release().data());
+    decoder.constraint = state;
+    decoder.constraint_mask_words = mask_words;
+    decoder.constraint_mask_host.assign(
+        static_cast<std::size_t>(kDFlash2SpecMaxVerifyRows) * mask_words, 0u);
+    return Status::make_ok();
+}
+
 Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept {
     Status first_error = Status::make_ok();
     auto destroy_event = [&](hipEvent_t& event, const char* tag) noexcept {
@@ -300,6 +373,10 @@ Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept {
     decoder.device_token_bridge = false;
     decoder.host_proposal_visibility = false;
     decoder.token_history.clear();
+    decoder.constraint = nullptr;
+    decoder.constraint_mask_words = 0u;
+    decoder.constraint_mask_host.clear();
+    decoder.proposal_mask_device = nullptr;
     decoder.gdn_conv_snapshot = nullptr;
     decoder.gdn_rec_snapshot = nullptr;
     decoder.gdn_conv_bytes = 0u;
@@ -335,7 +412,8 @@ Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept {
 Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
-    uint32_t prompt_count) {
+    uint32_t prompt_count,
+    uint32_t restored_tokens) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_prefill: not initialized", __FILE__,
                                      __LINE__);
@@ -343,6 +421,14 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     if (prompt_tokens == nullptr || prompt_count == 0u) {
         return Status::invalid_argument("dflash2_spec_prefill: empty prompt", __FILE__,
                                         __LINE__);
+    }
+    if (restored_tokens > prompt_count) {
+        return Status::invalid_argument("dflash2_spec_prefill: restored tokens overflow",
+                                        __FILE__, __LINE__);
+    }
+    if (restored_tokens != 0u && decoder.context->next_position != restored_tokens) {
+        return Status::invalid_state("dflash2_spec_prefill: restored position mismatch",
+                                     __FILE__, __LINE__);
     }
     const uint32_t chunk_limit = decoder.target->config.max_scheduled_tokens;
     if (chunk_limit == 0u) {
@@ -357,13 +443,21 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
 
     DFlash2PrefillOutput out;
     std::vector<ScheduledRequest> requests;
-    uint32_t offset = 0u;
+    uint32_t offset = restored_tokens;
     while (offset < prompt_count) {
         const uint32_t n = std::min(chunk_limit, prompt_count - offset);
         const bool final_chunk = (offset + n == prompt_count);
+        const bool masked = final_chunk && decoder.constraint != nullptr;
+        if (masked) {
+            Status mask_st = build_constraint_masks(decoder, nullptr, 0u);
+            if (!mask_st.ok()) return mask_st;
+        }
         ScheduledBatch batch = make_prefill_batch(
             *decoder.sequence, requests, prompt_tokens + offset, n, offset, final_chunk,
-            decoder.config.verify_numeric_mode);
+            decoder.config.verify_numeric_mode,
+            masked ? decoder.constraint_mask_host.data() : nullptr,
+            decoder.constraint_mask_words,
+            final_chunk ? &decoder.sampling : nullptr, decoder.sample_index);
         auto executed = execute_batch(*decoder.target, batch, decoder.stream);
         if (!executed.ok()) return executed.status();
         BatchExecutionOutput output = executed.release();
@@ -385,6 +479,17 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
                 return Status::hip_error("dflash2_spec_prefill sample copy",
                                          hipGetErrorString(err), __FILE__, __LINE__);
             }
+            if (out.pending_token < 0) {
+                return Status::invalid_state("dflash2_spec_prefill produced no token",
+                                             __FILE__, __LINE__);
+            }
+            if (decoder.constraint != nullptr &&
+                !decoder.constraint->accept_token(out.pending_token)) {
+                return Status::invalid_state(
+                    "constraint matcher rejected the first generated token", __FILE__,
+                    __LINE__);
+            }
+            decoder.sample_index += 1u;
         }
         offset += n;
     }
@@ -433,7 +538,11 @@ ScheduledBatch make_verify_batch(
     uint32_t output_rows,
     bool speculative_verify,
     ::ps::runtime::VerifyNumericMode numeric_mode,
-    TokenIdsLocation token_location = TokenIdsLocation::Host) {
+    TokenIdsLocation token_location = TokenIdsLocation::Host,
+    const uint32_t* mask = nullptr,
+    uint32_t mask_words = 0u,
+    const SamplingConfig* sampling = nullptr,
+    uint64_t sampling_index = 0u) {
     ScheduledRequest req;
     req.sequence = &sequence;
     req.handle = sequence.request_handle();
@@ -445,6 +554,12 @@ ScheduledBatch make_verify_batch(
     req.compute_logits = true;
     req.sample = true;
     req.num_output_rows = output_rows;
+    req.token_constraint = mask != nullptr;
+    req.constraint_allow_empty = true;
+    if (sampling != nullptr) {
+        req.sampling = *sampling;
+        req.sampling_index = sampling_index;
+    }
     requests.clear();
     requests.push_back(req);
 
@@ -459,6 +574,8 @@ ScheduledBatch make_verify_batch(
     batch.num_prefill_requests = num_tokens == 1u ? 0u : 1u;
     batch.speculative_verify = speculative_verify;
     batch.verify_numeric_mode = numeric_mode;
+    batch.constraint_masks = mask;
+    batch.constraint_mask_words = mask != nullptr ? mask_words : 0u;
     return batch;
 }
 
@@ -478,9 +595,15 @@ Status run_single_target(
     const uint32_t position = decoder.sequence->position;
     std::vector<ScheduledRequest> requests;
     int32_t single = token;
+    Status mask_st = build_constraint_masks(decoder, nullptr, 0u);
+    if (!mask_st.ok()) return mask_st;
+    const uint32_t* mask = decoder.constraint != nullptr
+                               ? decoder.constraint_mask_host.data()
+                               : nullptr;
     ScheduledBatch batch = make_verify_batch(
         *decoder.sequence, requests, &single, 1u, position, 1u, false,
-        ::ps::runtime::VerifyNumericMode::Fast);
+        ::ps::runtime::VerifyNumericMode::Fast, TokenIdsLocation::Host, mask,
+        decoder.constraint_mask_words, &decoder.sampling, decoder.sample_index);
     auto executed = execute_batch(*decoder.target, batch, decoder.stream);
     if (!executed.ok()) return executed.status();
     BatchExecutionOutput output = executed.release();
@@ -492,6 +615,14 @@ Status run_single_target(
         return Status::hip_error("dflash2 single decode sample copy", hipGetErrorString(err),
                                  __FILE__, __LINE__);
     }
+    if (sampled < 0) {
+        return Status::invalid_state("constraint left no allowed token", __FILE__, __LINE__);
+    }
+    if (decoder.constraint != nullptr && !decoder.constraint->accept_token(sampled)) {
+        return Status::invalid_state("constraint matcher rejected sampled token", __FILE__,
+                                     __LINE__);
+    }
+    decoder.sample_index += 1u;
     std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps{};
     collect_target_taps(*decoder.target, taps);
     Status st = dflash2::dflash2_append_target_taps(
@@ -592,9 +723,31 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             }
             draft_events_recorded = true;
         }
+        const uint32_t* proposal_mask = nullptr;
+        if (decoder.constraint != nullptr &&
+            env_flag_enabled("PHASESHIFT_DFLASH2_CONSTRAINT_PROPOSAL", true)) {
+            Status cst = build_constraint_masks(decoder, nullptr, 0u);
+            if (!cst.ok()) return cst;
+            const uint32_t words = decoder.constraint_mask_words;
+            uint32_t* host = decoder.constraint_mask_host.data();
+            for (uint32_t r = 1u; r < dflash_k; ++r) {
+                for (uint32_t w = 0u; w < words; ++w) {
+                    host[static_cast<std::size_t>(r) * words + w] = host[w];
+                }
+            }
+            const hipError_t mask_err = hipMemcpyAsync(
+                decoder.proposal_mask_device, host,
+                static_cast<std::size_t>(dflash_k) * words * sizeof(uint32_t),
+                hipMemcpyHostToDevice, decoder.stream);
+            if (mask_err != hipSuccess) {
+                return Status::hip_error("dflash2 proposal mask upload",
+                                         hipGetErrorString(mask_err), __FILE__, __LINE__);
+            }
+            proposal_mask = decoder.proposal_mask_device;
+        }
         Status st = dflash2::dflash2_propose_cached(
             *decoder.draft, *decoder.context, pending_token, dflash_k, proposal_device,
-            decoder.stream);
+            decoder.stream, proposal_mask, decoder.constraint_mask_words);
         if (!st.ok()) return st;
         if (bridge) {
             const hipError_t relay_err = hipMemcpyAsync(
@@ -616,7 +769,8 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         }
     }
 
-    const bool need_host_seed = ngram_enabled || decoder.host_proposal_visibility;
+    const bool need_host_seed =
+        ngram_enabled || decoder.host_proposal_visibility || decoder.constraint != nullptr;
     if (!bridge || need_host_seed) {
         ScopedTimer t(want_timing ? &tm->draft_d2h_ms : nullptr);
         {
@@ -704,6 +858,12 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     }
 
     std::vector<ScheduledRequest> requests;
+    Status mask_st = build_constraint_masks(decoder, drafts.data(), total_k);
+    if (!mask_st.ok()) return mask_st;
+    const uint32_t* mask =
+        decoder.constraint != nullptr ? decoder.constraint_mask_host.data() : nullptr;
+    const uint64_t round_sample_index = decoder.sample_index;
+    decoder.sample_index += static_cast<uint64_t>(total_k) + 1u;
     {
         ScopedTimer t(want_timing ? &tm->verify_ms : nullptr);
         ScheduledBatch batch;
@@ -711,13 +871,16 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             batch = make_verify_batch(
                 *decoder.sequence, requests, decoder.verify_token_ids_device, total_k + 1u,
                 position, total_k + 1u, true, decoder.config.verify_numeric_mode,
-                TokenIdsLocation::Device);
+                TokenIdsLocation::Device, mask, decoder.constraint_mask_words,
+                &decoder.sampling, round_sample_index);
         } else {
             verify_host[0] = pending_token;
             for (uint32_t i = 0; i < total_k; ++i) verify_host[i + 1u] = drafts[i];
             batch = make_verify_batch(
                 *decoder.sequence, requests, verify_host.data(), total_k + 1u, position,
-                total_k + 1u, true, decoder.config.verify_numeric_mode);
+                total_k + 1u, true, decoder.config.verify_numeric_mode,
+                TokenIdsLocation::Host, mask, decoder.constraint_mask_words,
+                &decoder.sampling, round_sample_index);
         }
         ExecuteBatchOptions options;
         if (decoder.gdn_history_enabled) {
@@ -833,6 +996,9 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     }
 
     SpecVerifyResult result;
+    if (decoder.constraint != nullptr && sampled[0] < 0) {
+        return Status::invalid_state("constraint left no allowed token", __FILE__, __LINE__);
+    }
     Status accept = spec_greedy_accept(drafts.data(), total_k, sampled.data(), true, result);
     if (!accept.ok()) return accept;
     const uint32_t accepted = result.num_accepted_drafts;
@@ -842,12 +1008,37 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     for (uint32_t i = 0; i < out.emitted_count; ++i) {
         out.emitted[i] = result.emitted_tokens[i];
     }
+    if (decoder.constraint != nullptr) {
+        uint32_t constrained = 0u;
+        for (uint32_t i = 0; i < out.emitted_count; ++i) {
+            if (out.emitted[i] < 0) {
+                if (!decoder.constraint->is_terminated()) {
+                    return Status::invalid_state(
+                        "constraint produced an invalid token", __FILE__, __LINE__);
+                }
+                break;
+            }
+            if (!decoder.constraint->accept_token(out.emitted[i])) {
+                return Status::invalid_state("constraint matcher rejected sampled token",
+                                             __FILE__, __LINE__);
+            }
+            ++constrained;
+        }
+        out.emitted_count = constrained;
+    }
     if (result.correction_valid) {
         out.pending_token = result.correction_token;
     } else if (result.bonus_token_valid) {
         out.pending_token = result.bonus_token;
     } else {
         out.pending_token = -1;
+    }
+    if (decoder.constraint != nullptr && out.pending_token < 0) {
+        if (!decoder.constraint->is_terminated()) {
+            return Status::invalid_state("constraint produced an invalid token", __FILE__,
+                                         __LINE__);
+        }
+        out.pending_token = decoder.config.eos_token;
     }
 
     const uint32_t page_tokens = decoder.sequence->kv_pool()->page_tokens();

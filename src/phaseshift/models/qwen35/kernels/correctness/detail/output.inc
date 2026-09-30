@@ -59,6 +59,8 @@ __device__ __forceinline__ ProgramStatus exec_gather_or_sample(
             constraint.mask = env.context->constraint_masks +
                               static_cast<std::size_t>(row) *
                                   env.context->constraint_mask_words;
+            constraint.allow_empty =
+                (env.context->output_sampling_params[row].reserved[0] & 2u) != 0u;
         }
         const float* row_logits =
             logits + static_cast<size_t>(row) * in.row_stride;

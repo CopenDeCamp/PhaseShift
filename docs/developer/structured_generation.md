@@ -76,7 +76,9 @@ tokenizer metadata の EOS は使わない。両者が異なることは検証�
 - maskはoutput row単位で `[rows][ceil(vocab_size/32)]` のuint32。
 - sampling kernelは `DeviceSamplingParams.reserved[0]` のconstraint flagとmask base pointerを読む。
 - 追加D2H、追加hipStreamSynchronize、requestごとのHIP streamは無い。
-- constrained requestはMTP / speculative decodeを使わない（現行serve pathではMTP自体を使用しない）。
+- constrained requestはMTPを使わない。DFlash2 speculative decode ではconstraintが
+  target verify の各行に適用され、drafter の proposalにも現在の grammar 状態を適用する
+  （[dflash2.md](dflash2.md) を参照）。
 - constrained batchはHIP Graph replay/captureを行わない（dynamic execution path）。
   unconstrained batchは既存のHIP Graph pathをそのまま使う。constrained request後も
   unconstrained requestでGraphを再利用できる。constrained batchのHIP Graph対応は未実装である。

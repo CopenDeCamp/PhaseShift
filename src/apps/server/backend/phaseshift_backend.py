@@ -100,7 +100,6 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
         self._default_max_output_tokens = DEFAULT_DEFAULT_MAX_OUTPUT_TOKENS
         self._loaded_signature: tuple | None = None
         self._constraint_dir: str | None = None
-        self._dflash2_enabled = False
         self._prefix_cache_enabled = False
 
     # ------------------------------------------------------------------ health
@@ -202,19 +201,14 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
 
             constraint_dir = None
             constraint_path = None
-            if dflash2_model_dir is not None:
-                print("Structured Output / tool calling: disabled "
-                      "(DFlash2 speculative decoding)",
-                      file=sys.stderr, flush=True)
-            else:
-                try:
-                    written = _write_constraint_tokenizer_info(self._processor, model_dir)
-                    if written is not None:
-                        constraint_dir, constraint_path = written
-                        self._constraint_dir = constraint_dir
-                except BackendError as exc:
-                    self._close_client()
-                    return pb.Result(success=False, message=str(exc))
+            try:
+                written = _write_constraint_tokenizer_info(self._processor, model_dir)
+                if written is not None:
+                    constraint_dir, constraint_path = written
+                    self._constraint_dir = constraint_dir
+            except BackendError as exc:
+                self._close_client()
+                return pb.Result(success=False, message=str(exc))
 
             argv = [
                 compute_binary,
@@ -250,7 +244,6 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
         self._max_seq_len = max_seq_len
         self._default_max_output_tokens = default_max_output_tokens
         self._loaded_signature = signature
-        self._dflash2_enabled = dflash2_model_dir is not None
         self._prefix_cache_enabled = prefix_cache_capacity_tokens > 0
         self._constraint_dir = constraint_dir
         return pb.Result(success=True, message="loaded")
@@ -272,23 +265,9 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
         if not self._client.is_alive():
             raise BackendError("compute process is not running")
 
-    def _reject_dflash_request(self, request) -> None:
-        if float(request.Temperature) > 0.0:
-            raise BackendError(
-                "dflash2 speculative decoding supports greedy only: "
-                "temperature must be 0")
-        if request.Grammar:
-            raise BackendError(
-                "dflash2 speculative decoding does not support structured output")
-        if message_codec.parse_tools(request.Tools):
-            raise BackendError(
-                "dflash2 speculative decoding does not support tool calling")
-
     def _prepare(self, request) -> PreparedRequest:
         self._require_loaded()
         _log_request(request)
-        if self._dflash2_enabled:
-            self._reject_dflash_request(request)
         try:
             reasoning_enabled, reasoning_effort = codec.resolve_reasoning_policy(
                 request.Metadata)

@@ -28,6 +28,7 @@ __global__ void stochastic_sampling_impl(
         constraint.active = true;
         constraint.mask =
             constraint_masks + static_cast<std::size_t>(row) * constraint_mask_words;
+        constraint.allow_empty = (sampling[row].reserved[0] & 2u) != 0u;
     }
     sampling_sample_row(row_logits, vocab_size, params, constraint, sampled_tokens + row,
                         error_word, attempts_out == nullptr ? nullptr : attempts_out + row);

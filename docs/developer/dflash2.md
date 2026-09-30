@@ -19,7 +19,13 @@ Exact 数値モードで verify し、一致した prefix だけを commit す�
 
 ## Scope
 
-- greedy のみ（`temperature == 0`）。stochastic speculative decoding は実装しない。
+- greedy（`temperature == 0`）と stochastic（`temperature > 0`）の両方に対応する。
+  stochastic の verify は target の sample 結果と draft を比較する sample-and-compare
+  方式で、出力分布は target の分布に一致する。round で消費した row 数だけ
+  `sample_index` を進め、RNG key の再利用を避けている。
+- constraint（grammar / structural tag）は target verify の各行に適用される。
+  提案側（drafter）にも現在の grammar 状態を適用し、constraint 無効時と同じ
+  `GENERATED_IDS` 契約を満たす。
 - target verify の数値モードは **Exact** を既定とし、CLI も Exact を渡す。
 - drafter は 1 round で anchor 1 row + draft `block_size - 1` row を陽に処理する
   block-parallel 構成である。提案 block 内は非 causal。
@@ -430,9 +436,54 @@ kernel の出力 buffer を次 kernel の入力 pointer として直接渡す。
 
 ### prefix cache
 
-DFlash path では target prefix cache を使わない。prefix cache の checkpoint に
-`DFlash2ContextState` が含まれず、target context だけ復元して DFlash ring が空になる
-silent 不整合を避けるためである。`--prefix-cache-capacity-tokens` は error にする。
+DFlash path でも target prefix cache を使う。checkpoint には target KV / GDN slot に
+加えて `DFlash2ContextState` の ring（`k_ring` / `v_ring` / `length` / `next_position`）
+を含める。target context だけを復元して DFlash ring が空のままになると
+`context.length` が 0 になり、drafter が条件付けを失う silent 不整合に
+なるためである。ring の無い checkpoint に対して DFlash session の restore を
+要求した場合は fail-closed な error にする。
+
+- ring pool は serve 開始時に `PrefixCache::enable_dflash_ring()` で作られ、
+  `max_entries` × ring bytes を arena から消費する。
+- checkpoint は prompt boundary（prompt 全体）で保存する。
+- `restored_tokens` / `cache_checkpoint_tokens` は `done` event で返す。
+
+---
+
+## Constraint（grammar / structural tag）
+
+`TokenConstraintState::fill_draft_tree_masks()` が
+`xgrammar::GrammarMatcher::TraverseDraftTree()` で、draft prefix を仮定した
+row ごとの mask を一括で計算する。線形 chain として
+`draft_tokens = [_, d0, ..., d_{K-1}]` を渡し、row 数は `K + 1` で verify row 数と一致する。
+
+- row 0 は matcher の現状態（anchor accept 後）の許可集合。
+- row i は `draft[0..i-1]` を accept した状態の許可集合。
+- draft が親 row の mask に無い場合、および matcher が terminate した後の row は
+  全 0 で埋められる。
+- 呼び出し後に matcher は rollback で元の状態に戻るため、request の matcher を消費しない。
+
+正しさの契約:
+
+- `spec_greedy_accept()` の correction は row `accepted`、bonus は row `K` の結果である。
+  どちらも「それまでの draft が全て accepted」という仮定が実際の採否と一致するため、
+  commit される token は必ず grammar 準拠になる。draft が grammar 外を提案した場合は
+  reject が増え、生成結果は変わらない。
+- row 0 が全 0（dead end）なら request を fail-closed に error にする。
+- matcher が terminate して返る -1 は生成終了として扱う。`emitted` から除外し、
+  `pending_token` に EOS を設定して既存の終了経路へ流す。
+- 全 0 の row は sampling kernel で許可 0 件にならないよう、DFlash verify batch のみ
+  `ScheduledRequest::constraint_allow_empty` を立てる。これは
+  `DeviceSamplingParams.reserved[0]` の bit 1 で kernel に渡り、許可 0 件時に
+  error ではなく -1 を返させる。無制約経路の fail-closed 契約は変わらない。
+
+提案側:
+
+- `dflash2_select_draft_tokens()` は `constraint_mask` を受け、
+  `launch_dflash2_apply_constraint_mask()` で許可外の logit を `-INFINITY` に潰してから
+  top-k / INT2 coarse topn を実行する。許可外の候補は既存の `-INFINITY` skip で除外される。
+- proposal の row は現在の matcher 状態（draft 未確定）の mask を全 row に使い、
+  row 0 のみ厳密である。正しさは verify 側の mask が担保する。
 
 ---
 
@@ -936,10 +987,7 @@ DFlash2 有効時は `PHASESHIFT_TARGET_LM_HEAD_PROXY` が未指定・空文字�
 
 ### invalid combinations（model load 前に exit 2）
 
-- `--temperature > 0`（greedy のみ）
 - `--dump-logits`
-- `--constraint-tokenizer-info`
-- `--prefix-cache-capacity-tokens > 0`
 - `--dflash2-drafts` が `block_size - 1` を超える
 - `--dflash2-drafts + --dflash2-ngram-tail` が verify capacity（draft 63）を超える
 - `--dflash2-ngram-tail` / `--dflash2-ngram-n` の片方だけが 0
@@ -956,14 +1004,15 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
   保持し、request ごとに `PagedSequenceState` / `DFlash2ContextState` /
   `DFlash2SpecDecoder` を作成・解放する。解放順序は decoder → context → sequence。
 - drafter の `DFlash2Executor` は serve 終了時に `dflash2_executor_shutdown()` する。
-- request 時に次の3つは fail-closed で拒否する（error event）。
-  - `temperature > 0`
-  - `grammar` / `structural_tag`（constraint）
-  - `prefix_cache_checkpoint_position`
+- request 時に `grammar` / `structural_tag` / `prefix_cache_checkpoint_position` /
+  `temperature > 0` を受け付ける。constraint state は `DFlashServeSession` が所有し、
+  `serve_dflash_open_session()` で `Qwen35ComputeRuntime::create_constraint_state()`
+  から作って `dflash2_spec_decoder_set_constraint()` で decoder に渡す。
 - `max_concurrent_requests` は 1。`ServeState.dflash_enabled` が true のとき
   `serve_step()` は `ContinuousBatcher::step()` の代わりに
   `dflash2_spec_step()` を呼ぶ。
-- `generated_ids` / `finish_reason` / `prompt_tokens` は serve 側の
+- `generated_ids` / `finish_reason` / `prompt_tokens` /
+  `restored_tokens` / `cache_checkpoint_tokens` は serve 側の
   `ServeGeneration` が保持する（`RuntimeRequest` を使わない）。
 
 ### target executor config（DFlash 有効時）
@@ -1067,9 +1116,15 @@ DFlash mode の出力を扱える。
 
 ## Known limitations
 
-- greedy のみ。stochastic speculative decoding は未実装。
-- target prefix cache / grammar constraint / `--dump-logits` との併用は非対応。
-  `--serve-stdio` と `--kv-cache-dtype psq4` は serve mode と併用できる。
+- `--dump-logits` との併用は非対応。
+- `--serve-stdio` と `--kv-cache-dtype psq4` は serve mode と併用できる。
+- constraint の提案側適用は現在の grammar 状態（draft 未確定）を全 row に使う
+  近似である。row 1 以降の許可集合は draft prefix 依存の厳密な値と一致しない場合が
+  あり、正しさは target verify の mask が担保する。
+- draft vocab profile（`PHASESHIFT_DFLASH2_DRAFT_VOCAB`）は constraint と併用できない。
+  該当経路では `Status::unsupported` を返す。
+- prefix cache の ring pool は serve 開始時に arena から `max_entries` × ring bytes
+  を消費する。
 - target 層数 > 最大 tap、`num_target_layer_ids == 5`、`conv_kernel_size == 2` を要求する。
 - context ring は sliding_window 分しか保持しない。`capacity == sliding_window` を要求する。
 - attention GQA kernel は `q_heads == 4 * kv_heads`、`head_dim == 128` を要求し、それ以外は

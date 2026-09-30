@@ -51,10 +51,7 @@ backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation は�
 
 併用できない option（いずれも model load 前に exit 2）:
 
-- `--temperature > 0`（greedy のみ）
 - `--dump-logits`
-- `--constraint-tokenizer-info`
-- `--prefix-cache-capacity-tokens > 0`
 - `--dflash2-drafts` が `block_size - 1` を超える
 - `--dflash2-drafts` と `--dflash2-ngram-tail` の合計が verify capacity 64 行
   （draft 63）を超える
@@ -85,8 +82,10 @@ target の lm_head proxy（`PHASESHIFT_TARGET_LM_HEAD_PROXY`）は DFlash2 有�
 理由は [../developer/dflash2.md](../developer/dflash2.md) の verify 数値契約を参照。
 
 `--serve-stdio` と `--kv-cache-dtype psq4` は併用できる。serve mode では
-`temperature > 0` / `grammar` / `structural_tag` / `prefix_cache_checkpoint_position`
-を含む request を fail-closed で拒否する。
+`grammar` / `structural_tag` / `prefix_cache_checkpoint_position` / `temperature > 0`
+を DFlash2 経路でも受け付ける。constraint は target verify の各行に適用され、
+generation は grammar 準拠である。prefix cache の checkpoint は prompt boundary
+（prompt 全体）で保存する。
 
 ### 固定draft語彙の配置と明示有効化
 

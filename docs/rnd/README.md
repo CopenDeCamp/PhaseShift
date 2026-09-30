@@ -30,6 +30,7 @@
 - [dflash2/dflash2.md](dflash2/dflash2.md) — DFlash2 drafter の Gate 別検証記録（正本）
 - [dflash2/spec_decode_loops_adoption.md](dflash2/spec_decode_loops_adoption.md) — draft loop 設計を PhaseShift へどう適用したか
 - [dflash2/external_facts_adoption.md](dflash2/external_facts_adoption.md) — 外部 DFlash2 実装 fact を PhaseShift でどう検証・採用したか
+- [dflash2/constraint_adoption.md](dflash2/constraint_adoption.md) — DFlash2 への constraint / stochastic / prefix cache 導入と提案側 mask の効果計測
 - [mtp/mtp.md](mtp/mtp.md) — MTP（内蔵 drafter）の Gate 記録（正本）
 - [spec_decode/ngram_tail_gate1.md](spec_decode/ngram_tail_gate1.md) — NgramTail Gate 1（committed-history tail extension の候補品質検証と Gate 2 推奨）
 - [spec_decode/ngram_tail_gate2.md](spec_decode/ngram_tail_gate2.md) — NgramTail Gate 2（DFlash2 + NgramTail live composite の正しさと break-even 測定）

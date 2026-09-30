@@ -45,6 +45,34 @@ DLTensor make_bitmask_tensor(uint32_t* mask_words, uint32_t word_count) {
     return tensor;
 }
 
+DLTensor make_bitmask_grid_tensor(uint32_t* mask_rows, int64_t rows, int64_t word_count,
+                                  int64_t* shape) {
+    shape[0] = rows;
+    shape[1] = word_count;
+    DLTensor tensor;
+    tensor.data = mask_rows;
+    tensor.device = DLDevice{kDLCPU, 0};
+    tensor.ndim = 2;
+    tensor.dtype = xgrammar::GetBitmaskDLType();
+    tensor.shape = shape;
+    tensor.strides = nullptr;
+    tensor.byte_offset = 0;
+    return tensor;
+}
+
+DLTensor make_index_tensor(int64_t* data, int64_t count) {
+    DLTensor tensor;
+    tensor.data = data;
+    tensor.device = DLDevice{kDLCPU, 0};
+    tensor.ndim = 1;
+    tensor.dtype = DLDataType{kDLInt, 64, 1};
+    tensor.shape = nullptr;
+    tensor.strides = nullptr;
+    tensor.byte_offset = 0;
+    (void)count;
+    return tensor;
+}
+
 class XGrammarConstraintState final : public TokenConstraintState {
  public:
     XGrammarConstraintState(std::shared_ptr<const CompiledConstraint> compiled,
@@ -75,6 +103,48 @@ class XGrammarConstraintState final : public TokenConstraintState {
     }
 
     bool is_terminated() const override { return matcher_.IsTerminated(); }
+
+    Status fill_draft_tree_masks(const int32_t* draft_tokens, uint32_t draft_count,
+                                 uint32_t* mask_rows, uint32_t word_count) override {
+        if (draft_tokens == nullptr || mask_rows == nullptr) {
+            return Status::invalid_argument("draft tree mask argument is null", __FILE__,
+                                            __LINE__);
+        }
+        if (word_count != mask_words_) {
+            return Status::invalid_argument("mask word count mismatch", __FILE__, __LINE__);
+        }
+        if (draft_count == 0u) {
+            return Status::invalid_argument("draft tree requires at least one row", __FILE__,
+                                            __LINE__);
+        }
+        const int64_t rows = static_cast<int64_t>(draft_count) + 1;
+        std::vector<int64_t> next(static_cast<std::size_t>(rows), -1);
+        std::vector<int64_t> sibling(static_cast<std::size_t>(rows), -1);
+        std::vector<int64_t> tokens(static_cast<std::size_t>(rows), 0);
+        for (int64_t i = 0; i + 1 < rows; ++i) {
+            next[static_cast<std::size_t>(i)] = i + 1;
+        }
+        for (int64_t i = 1; i < rows; ++i) {
+            tokens[static_cast<std::size_t>(i)] = draft_tokens[i - 1];
+        }
+        int64_t shape[2] = {0, 0};
+        DLTensor next_tensor = make_index_tensor(next.data(), rows);
+        DLTensor sibling_tensor = make_index_tensor(sibling.data(), rows);
+        DLTensor tokens_tensor = make_index_tensor(tokens.data(), rows);
+        DLTensor mask_tensor =
+            make_bitmask_grid_tensor(mask_rows, rows, word_count, shape);
+        int64_t next_shape[1] = {rows};
+        int64_t sibling_shape[1] = {rows};
+        int64_t tokens_shape[1] = {rows};
+        next_tensor.shape = next_shape;
+        sibling_tensor.shape = sibling_shape;
+        tokens_tensor.shape = tokens_shape;
+        if (!matcher_.TraverseDraftTree(&next_tensor, &sibling_tensor, &tokens_tensor,
+                                        &mask_tensor)) {
+            return Status::invalid_state("draft tree traversal failed", __FILE__, __LINE__);
+        }
+        return Status::make_ok();
+    }
 
  private:
     std::shared_ptr<const CompiledConstraint> compiled_;

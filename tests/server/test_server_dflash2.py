@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """phaseshift-server の DFlash2 / psq4構成に対する E2E 検証.
 
-port 8001 相当の起動、chat / streaming / responses の成功、および DFlash2 で
-利用できない要件（structured output / tool calling / temperature > 0）が
-fail-closed で HTTP 400 になることを確認する.
+port 8001 相当の起動、chat / streaming / responses の成功、および DFlash2 でも
+structured output / tool calling / stochastic sampling / prefix cache が
+有効であることを確認する.
 """
 
 from __future__ import annotations
@@ -37,6 +37,17 @@ STRUCTURED = {
         },
     },
 }
+RESPONSES_STRUCTURED = {
+    "type": "json_schema",
+    "name": "probe",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a"],
+        "additionalProperties": False,
+    },
+}
 TOOLS = [{
     "type": "function",
     "function": {
@@ -53,9 +64,10 @@ TOOLS = [{
 
 def main() -> int:
     checker = Checker("server-dflash2")
-    harness = ServerHarness(max_seq_len=512, arena_gib=26, device=1,
+    harness = ServerHarness(max_seq_len=512, arena_gib=31, device=1,
                             max_concurrent_requests=1,
-                            prefix_cache_capacity_tokens=0,
+                            prefix_cache_capacity_tokens=16384,
+                            prefix_cache_max_entries=4,
                             kv_cache_dtype=KV_DTYPE,
                             dflash2_model_dir=DFLASH2_MODEL_DIR,
                             startup_timeout=420.0)
@@ -74,14 +86,14 @@ def main() -> int:
                       "Speculative:  DFlash2" in log_text, log_text[-800:])
         checker.check("log reports kv dtype",
                       f"KV dtype:     {KV_DTYPE}" in log_text, log_text[-800:])
-        checker.check("log disables tool calling",
-                      "Tool calling: no (DFlash2 speculative decoding)" in log_text,
+        checker.check("log enables tool calling",
+                      "Tool calling: yes" in log_text, log_text[-800:])
+        checker.check("log enables structured",
+                      "Structured:   fail-closed (Chat + Responses)" in log_text,
                       log_text[-800:])
-        checker.check("log disables structured",
-                      "Structured:   no (DFlash2 speculative decoding)" in log_text,
+        checker.check("log reports prefix cache",
+                      "Prefix cache: 16384 tokens / 4 entries" in log_text,
                       log_text[-800:])
-        checker.check("log disables prefix cache",
-                      "Prefix cache: off" in log_text, log_text[-800:])
         checker.check("log concurrency is 1",
                       "Concurrency:  1" in log_text, log_text[-800:])
 
@@ -101,32 +113,43 @@ def main() -> int:
                       chat["choices"][0]["finish_reason"] in ("stop", "length"),
                       str(chat["choices"][0]["finish_reason"]))
 
-        status, body = http_post_status(
-            f"{harness.base_url}/chat/completions",
-            {"model": "phaseshift",
-             "messages": [{"role": "user", "content": "hi"}],
-             "temperature": 0.7, "max_tokens": 8})
-        checker.check("temperature > 0 rejected with 400", status == 400,
-                      f"{status} {body[:200]}")
-        checker.check("temperature rejection mentions greedy",
-                      "greedy" in body, body[:200])
+        stochastic = http_json(f"{harness.base_url}/chat/completions", {
+            "model": "phaseshift",
+            "messages": [{"role": "user", "content": "Say exactly: hello"}],
+            "temperature": 0.7, "max_tokens": 32,
+        })
+        checker.check("temperature > 0 accepted",
+                      bool(stochastic["choices"][0]["message"]["content"]),
+                      str(stochastic["choices"][0]["message"])[:200])
 
-        status, body = http_post_status(
-            f"{harness.base_url}/chat/completions",
-            {"model": "phaseshift",
-             "messages": [{"role": "user", "content": "json"}],
-             "temperature": 0, "max_tokens": 8,
-             "response_format": STRUCTURED})
-        checker.check("structured rejected with 400", status == 400,
-                      f"{status} {body[:200]}")
+        structured = http_json(f"{harness.base_url}/chat/completions", {
+            "model": "phaseshift",
+            "messages": [{"role": "user", "content": "Produce the JSON value."}],
+            "temperature": 0, "max_tokens": 256,
+            "response_format": STRUCTURED,
+        })
+        structured_text = structured["choices"][0]["message"]["content"]
+        try:
+            parsed = json.loads(structured_text, strict=False)
+        except ValueError:
+            parsed = None
+        checker.check("structured accepted",
+                      parsed is not None and parsed.get("a") is not None,
+                      repr(structured_text[:400]))
 
-        status, body = http_post_status(
-            f"{harness.base_url}/chat/completions",
-            {"model": "phaseshift",
-             "messages": [{"role": "user", "content": "weather"}],
-             "temperature": 0, "max_tokens": 8, "tools": TOOLS})
-        checker.check("tools rejected with 400", status == 400,
-                      f"{status} {body[:200]}")
+        tools = http_json(f"{harness.base_url}/chat/completions", {
+            "model": "phaseshift",
+            "messages": [{"role": "user",
+                          "content": "大阪の現在の気温をget_weatherで確認して"}],
+            "temperature": 0, "max_tokens": 64, "tools": TOOLS,
+        })
+        tool_calls = tools["choices"][0]["message"].get("tool_calls") or []
+        checker.check("tools accepted", bool(tool_calls),
+                      str(tools["choices"][0]["message"])[:300])
+        if tool_calls:
+            checker.check("tool call name",
+                          tool_calls[0]["function"]["name"] == "get_weather",
+                          str(tool_calls[0])[:300])
 
         responses = http_json(f"{harness.base_url}/responses", {
             "model": "phaseshift",
@@ -139,12 +162,28 @@ def main() -> int:
             for item in responses.get("output", []) if item.get("type") == "message")
         checker.check("responses returns text", "ok" in text, text)
 
-        status, body = http_post_status(
+        rs_status, rs_body = http_post_status(
             f"{harness.base_url}/responses",
-            {"model": "phaseshift", "input": "json", "temperature": 0,
-             "max_output_tokens": 8, "text": {"format": STRUCTURED}})
-        checker.check("responses structured rejected with 400", status == 400,
-                      f"{status} {body[:200]}")
+            {"model": "phaseshift", "input": "Produce the JSON value.",
+             "temperature": 0,
+             "max_output_tokens": 256, "text": {"format": RESPONSES_STRUCTURED}})
+        rs_text = ""
+        if rs_status == 200:
+            rs_payload = json.loads(rs_body)
+            rs_text = "".join(
+                item.get("content", [{}])[0].get("text", "")
+                for item in rs_payload.get("output", [])
+                if item.get("type") == "message")
+            try:
+                rs_parsed = json.loads(rs_text, strict=False)
+            except ValueError:
+                rs_parsed = None
+        else:
+            rs_parsed = None
+        checker.check("responses structured accepted",
+                      rs_status == 200 and rs_parsed is not None
+                      and rs_parsed.get("a") is not None,
+                      f"status={rs_status} body={rs_body[:400]} text={rs_text[:200]}")
 
         request = urllib.request.Request(
             f"{harness.base_url}/chat/completions",

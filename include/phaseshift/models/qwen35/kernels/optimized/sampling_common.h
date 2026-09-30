@@ -60,6 +60,7 @@ struct SamplingRowParams {
 struct SamplingConstraint {
     const uint32_t* mask = nullptr;
     bool active = false;
+    bool allow_empty = false;
 };
 
 __device__ __forceinline__ bool sampling_token_allowed(
@@ -193,7 +194,9 @@ __device__ __forceinline__ void sampling_sample_row(
             *out_token = best_token == kNoToken ? -1 : static_cast<int32_t>(best_token);
         }
         __syncthreads();
-        if (best_token == kNoToken) sampling_report_error(error_word);
+        if (best_token == kNoToken && !constraint.allow_empty) {
+            sampling_report_error(error_word);
+        }
         return;
     }
 
@@ -227,7 +230,7 @@ __device__ __forceinline__ void sampling_sample_row(
     }
 
     if (!usable) {
-        sampling_report_error(error_word);
+        if (!constraint.allow_empty) sampling_report_error(error_word);
         if (threadIdx.x == 0u) *out_token = -1;
         __syncthreads();
         return;
@@ -285,7 +288,7 @@ __device__ __forceinline__ void sampling_sample_row(
         ++attempt;
     }
 
-    if (result < 0) sampling_report_error(error_word);
+    if (result < 0 && !constraint.allow_empty) sampling_report_error(error_word);
     if (threadIdx.x == 0u) {
         *out_token = result;
         if (attempt_count != nullptr) {

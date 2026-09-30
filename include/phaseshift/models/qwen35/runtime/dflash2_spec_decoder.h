@@ -7,6 +7,7 @@
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
 #include <phaseshift/models/qwen35/runtime/ngram_tail.h>
+#include <phaseshift/models/qwen35/runtime/token_constraint.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/runtime/execution/execution_types.h>
@@ -81,6 +82,14 @@ struct DFlash2SpecDecoder {
     hipEvent_t verify_stop_event = nullptr;
     bool initialized = false;
     DFlash2SpecTiming* timing = nullptr;
+
+    TokenConstraintState* constraint = nullptr;
+    uint32_t constraint_mask_words = 0u;
+    std::vector<uint32_t> constraint_mask_host;
+    uint32_t* proposal_mask_device = nullptr;
+
+    SamplingConfig sampling{};
+    uint64_t sample_index = 0u;
 };
 
 Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
@@ -95,6 +104,14 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
 
 Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept;
 
+Status dflash2_spec_decoder_set_constraint(DFlash2SpecDecoder& decoder,
+                                           TokenConstraintState* state,
+                                           uint32_t mask_words,
+                                           gpu::GpuArena* arena);
+
+void dflash2_spec_decoder_set_sampling(DFlash2SpecDecoder& decoder,
+                                       const SamplingConfig& sampling);
+
 struct DFlash2PrefillOutput {
     int32_t pending_token = -1;
 };
@@ -102,7 +119,8 @@ struct DFlash2PrefillOutput {
 Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
-    uint32_t prompt_count);
+    uint32_t prompt_count,
+    uint32_t restored_tokens = 0u);
 
 struct DFlash2TargetSnapshot {
     uint32_t position = 0u;
