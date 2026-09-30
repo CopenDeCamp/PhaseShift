@@ -1,5 +1,6 @@
 #include "support/dflash2_int2_test_common.h"
 
+#include <phaseshift/models/qwen35/kernels/dflash2/topk.h>
 #include <phaseshift/models/qwen35/kernels/optimized/constraint_candidates.h>
 #include <phaseshift/models/qwen35/kernels/optimized/linear/psq8.h>
 #include <phaseshift/quantization/fpx/e4m3.h>
@@ -345,6 +346,142 @@ bool run_exact_case(const ExactCaseSpec& spec, const char* label) {
     return true;
 }
 
+struct MaskedTopnSpec {
+    uint32_t vocab = 1024u;
+    uint32_t pool = 32u;
+    uint32_t allowed_count = 64u;
+    uint32_t seed = 0xabcdef01u;
+    bool use_radix = true;
+};
+
+bool run_masked_topn_case(const MaskedTopnSpec& spec, const char* label) {
+    const uint32_t rows = 1u;
+    const uint32_t vocab = spec.vocab;
+    const uint32_t pool = spec.pool;
+    const uint32_t words = mask_words_for(vocab);
+
+    Rng rng;
+    rng.state = spec.seed;
+    std::vector<float> logits(vocab);
+    for (uint32_t i = 0u; i < vocab; ++i)
+        logits[i] = rng.sym() * 6.0f;
+    for (uint32_t i = 0u; i < vocab; i += 97u)
+        logits[i] = logits[i > 0u ? i - 1u : 0u];
+
+    std::vector<uint32_t> all(vocab);
+    for (uint32_t i = 0u; i < vocab; ++i)
+        all[i] = i;
+    for (uint32_t i = vocab; i > 1u; --i) {
+        const uint32_t j = rng.below(i);
+        const uint32_t t = all[i - 1u];
+        all[i - 1u] = all[j];
+        all[j] = t;
+    }
+    const uint32_t allowed_n = std::min<uint32_t>(spec.allowed_count, vocab);
+    std::vector<uint32_t> allowed(all.begin(), all.begin() + allowed_n);
+    std::sort(allowed.begin(), allowed.end());
+    const std::vector<uint32_t> mask = build_mask(vocab, allowed);
+
+    float* dev_logits = nullptr;
+    uint32_t* dev_mask = nullptr;
+    int32_t* dev_ids = nullptr;
+    float* dev_values = nullptr;
+    void* dev_scratch = nullptr;
+    const uint32_t partitions = ps::kernel::dflash2_radix_default_partitions(vocab);
+    const std::size_t radix_bytes = ps::kernel::dflash2_radix_topn_scratch_bytes(
+        rows, partitions, vocab);
+    const uint32_t legacy_partitions = ps::kernel::dflash2_int2_default_partitions(vocab);
+    const uint32_t legacy_stride =
+        legacy_partitions * ps::kernel::kDflash2Int2MaxPool;
+    const std::size_t scratch_bytes =
+        spec.use_radix ? radix_bytes
+                       : static_cast<std::size_t>(legacy_stride) *
+                             (sizeof(int32_t) + sizeof(float));
+    bool ok = true;
+    ok = ok && hipMalloc(&dev_logits, vocab * sizeof(float)) == hipSuccess;
+    ok = ok && hipMalloc(&dev_mask, words * sizeof(uint32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&dev_ids, pool * sizeof(int32_t)) == hipSuccess;
+    ok = ok && hipMalloc(&dev_values, pool * sizeof(float)) == hipSuccess;
+    ok = ok && hipMalloc(&dev_scratch, scratch_bytes) == hipSuccess;
+    if (!ok) {
+        if (dev_logits) (void)hipFree(dev_logits);
+        if (dev_mask) (void)hipFree(dev_mask);
+        if (dev_ids) (void)hipFree(dev_ids);
+        if (dev_values) (void)hipFree(dev_values);
+        if (dev_scratch) (void)hipFree(dev_scratch);
+        return false;
+    }
+    (void)hipMemcpy(dev_logits, logits.data(), vocab * sizeof(float), hipMemcpyHostToDevice);
+    (void)hipMemcpy(dev_mask, mask.data(), words * sizeof(uint32_t), hipMemcpyHostToDevice);
+    (void)hipMemset(dev_ids, 0, pool * sizeof(int32_t));
+    (void)hipMemset(dev_values, 0, pool * sizeof(float));
+    (void)hipMemset(dev_scratch, 0, scratch_bytes);
+
+    hipError_t err = ps::kernel::launch_dflash2_apply_constraint_mask(
+        dev_logits, rows, vocab, vocab, dev_mask, words, nullptr);
+    if (err == hipSuccess) {
+        if (spec.use_radix) {
+            err = ps::kernel::launch_dflash2_radix_topn(
+                dev_logits, rows, vocab, vocab, pool, dev_ids, dev_values, partitions,
+                dev_scratch, radix_bytes, nullptr);
+        } else {
+            float* scratch_values = static_cast<float*>(dev_scratch);
+            int32_t* scratch_ids = reinterpret_cast<int32_t*>(
+                static_cast<std::byte*>(dev_scratch) +
+                static_cast<std::size_t>(legacy_stride) * sizeof(float));
+            err = ps::kernel::launch_dflash2_coarse_topn(
+                dev_logits, rows, vocab, vocab, pool, dev_ids, dev_values, scratch_ids,
+                scratch_values, legacy_stride, legacy_partitions, nullptr);
+        }
+    }
+    if (err != hipSuccess) {
+        std::printf("FAIL: %s launch err=%s\n", label, hipGetErrorString(err));
+        (void)hipFree(dev_logits);
+        (void)hipFree(dev_mask);
+        (void)hipFree(dev_ids);
+        (void)hipFree(dev_values);
+        (void)hipFree(dev_scratch);
+        return false;
+    }
+    (void)hipDeviceSynchronize();
+
+    std::vector<int32_t> ids(pool, 0);
+    std::vector<float> values(pool, 0.0f);
+    (void)hipMemcpy(ids.data(), dev_ids, pool * sizeof(int32_t), hipMemcpyDeviceToHost);
+    (void)hipMemcpy(values.data(), dev_values, pool * sizeof(float), hipMemcpyDeviceToHost);
+    (void)hipFree(dev_logits);
+    (void)hipFree(dev_mask);
+    (void)hipFree(dev_ids);
+    (void)hipFree(dev_values);
+    (void)hipFree(dev_scratch);
+
+    bool containment = true;
+    bool ordering = true;
+    for (uint32_t c = 0u; c < pool; ++c) {
+        const int32_t token = ids[c];
+        if (token < 0 || static_cast<uint32_t>(token) >= vocab ||
+            !std::binary_search(allowed.begin(), allowed.end(),
+                                static_cast<uint32_t>(token))) {
+            containment = false;
+            std::printf("  detail %s col=%u id=%d not allowed\n", label, c, token);
+            break;
+        }
+        if (c > 0u) {
+            const float prev = values[c - 1u];
+            const float cur = values[c];
+            if (cur > prev ||
+                (cur == prev && ids[c - 1u] >= ids[c])) {
+                ordering = false;
+            }
+        }
+    }
+    if (allowed_n >= pool) {
+        check(containment, label);
+        check(ordering, "masked topn ordering score desc token asc");
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -480,6 +617,26 @@ int main() {
         spec.counts = {33u};
         spec.seed = 0x789abcdeu;
         run_exact_case(spec, "exact vocab 65 unpadded");
+    }
+
+    for (bool use_radix : {true, false}) {
+        const char* kind = use_radix ? "radix" : "legacy";
+        for (uint32_t pool : {32u, 64u}) {
+            for (uint32_t allowed : {32u, 33u, 64u, 128u, 512u}) {
+                if (allowed < pool)
+                    continue;
+                MaskedTopnSpec spec;
+                spec.vocab = 1024u;
+                spec.pool = pool;
+                spec.allowed_count = allowed;
+                spec.seed = 0x10203040u + pool * 7u + allowed;
+                spec.use_radix = use_radix;
+                char label[96];
+                std::snprintf(label, sizeof(label), "masked topn %s allowed=%u pool=%u", kind,
+                              allowed, pool);
+                run_masked_topn_case(spec, label);
+            }
+        }
     }
 
     std::printf("test_constraint_candidates: passed=%d failed=%d\n", passed, failed);

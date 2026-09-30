@@ -2,6 +2,7 @@
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
 #include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/topk.h>
 #include <phaseshift/models/qwen35/kernels/optimized/activation_quantize.h>
 #include <phaseshift/models/qwen35/kernels/optimized/constraint_candidates.h>
 #include <phaseshift/runtime/program/int8_activation_workspace.h>
@@ -576,11 +577,125 @@ Status LmHeadCandidateProxy::run_select_constrained_exact(
     return Status::make_ok();
 }
 
+Status LmHeadCandidateProxy::select_constrained_masked(const bf16_t* normed, uint32_t rows,
+                                                       uint32_t row_stride,
+                                                       const uint32_t* masks,
+                                                       uint32_t mask_words, int32_t* out_ids,
+                                                       hipStream_t stream) {
+    return run_select_constrained_masked(normed, rows, row_stride, masks, mask_words, out_ids,
+                                         stream);
+}
+
+Status LmHeadCandidateProxy::select_constrained_masked_shadow(const bf16_t* normed,
+                                                              uint32_t rows,
+                                                              uint32_t row_stride,
+                                                              const uint32_t* masks,
+                                                              uint32_t mask_words,
+                                                              hipStream_t stream) {
+    return run_select_constrained_masked(normed, rows, row_stride, masks, mask_words,
+                                         shadow_ids_, stream);
+}
+
+Status LmHeadCandidateProxy::run_select_constrained_masked(
+    const bf16_t* normed, uint32_t rows, uint32_t row_stride, const uint32_t* masks,
+    uint32_t mask_words, int32_t* out_ids, hipStream_t stream) {
+    if (!valid()) {
+        return Status::invalid_state("lm_head proxy not initialized", __FILE__, __LINE__);
+    }
+    if (normed == nullptr || out_ids == nullptr || masks == nullptr || rows == 0u ||
+        rows > max_rows_) {
+        return Status::invalid_argument("lm_head proxy masked select arguments invalid",
+                                        __FILE__, __LINE__);
+    }
+    if (mask_words == 0u || mask_words < (vocab_ + 31u) / 32u || pool_ == 0u) {
+        return Status::invalid_argument("lm_head proxy masked capacity invalid", __FILE__,
+                                        __LINE__);
+    }
+    const bool timing = proxy_timing_enabled();
+    hipEvent_t ev[6] = {};
+    struct EventGuard {
+        hipEvent_t* events;
+        bool active;
+        ~EventGuard() {
+            if (!active)
+                return;
+            for (uint32_t i = 0u; i < 6u; ++i)
+                (void)hipEventDestroy(events[i]);
+        }
+    } guard{ev, false};
+    if (timing) {
+        for (auto& e : ev)
+            (void)hipEventCreate(&e);
+        guard.active = true;
+        (void)hipEventRecord(ev[0], stream);
+    }
+    hipError_t err = ps::kernel::launch_activation_quantize_e4m3(
+        normed, act_codes_, act_scales_, rows, cols_, k_padded_, row_stride, act_code_stride_,
+        act_scale_stride_, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy activation quantize failed",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    if (timing)
+        (void)hipEventRecord(ev[1], stream);
+    const uint32_t* expand_table = reinterpret_cast<const uint32_t*>(tables_ + 256u);
+    err = ps::kernel::launch_dflash2_int2_coarse_head(
+        int2_codes_, weight_scales_, act_codes_, act_scales_, expand_table, coarse_, rows, vocab_,
+        k_padded_, scale_stride_, act_code_stride_, act_scale_stride_, vocab_, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy int2 coarse head failed", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    err = ps::kernel::launch_dflash2_apply_constraint_mask(coarse_, rows, vocab_, vocab_, masks,
+                                                           mask_words, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy constraint mask apply failed",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    if (timing)
+        (void)hipEventRecord(ev[2], stream);
+    if (ps::kernel::dflash2_radix_topn_preferred(pool_)) {
+        err = ps::kernel::launch_dflash2_radix_topn(
+            coarse_, rows, vocab_, vocab_, pool_, pool_ids_, pool_logits_,
+            radix_partitions_, radix_scratch_, radix_scratch_bytes_, stream);
+    } else {
+        err = ps::kernel::launch_dflash2_coarse_topn(
+            coarse_, rows, vocab_, vocab_, pool_, pool_ids_, pool_logits_, scratch_ids_,
+            scratch_values_, scratch_stride_, partitions_, stream);
+    }
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy masked topn failed", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    if (timing)
+        (void)hipEventRecord(ev[3], stream);
+    err = ps::kernel::launch_dflash2_psq8_candidate_rerank(
+        weight_codes_, weight_scales_, act_codes_, act_scales_, pool_ids_, rerank_, rows, pool_,
+        k_padded_, scale_stride_, act_code_stride_, act_scale_stride_, pool_, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy masked rerank failed", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    if (timing)
+        (void)hipEventRecord(ev[4], stream);
+    pool_argmax_remap_kernel<<<rows, 1, 0, stream>>>(rerank_, pool_ids_, out_ids, pool_);
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+        return Status::hip_error("lm_head proxy masked argmax failed", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
+    }
+    if (timing) {
+        (void)hipEventRecord(ev[5], stream);
+        (void)hipEventSynchronize(ev[5]);
+        proxy_timing_report(ev);
+    }
+    return Status::make_ok();
+}
+
 Status LmHeadCandidateProxy::compare_shadow(const int32_t* full_ids, uint32_t rows,
                                             hipStream_t stream) {
     if (shadow_counters_ == nullptr || shadow_ids_ == nullptr || full_ids == nullptr ||
-        rows == 0u || rows > max_rows_) {
-        return Status::invalid_argument("lm_head proxy shadow compare invalid", __FILE__,
+        rows == 0u || rows > max_rows_) {        return Status::invalid_argument("lm_head proxy shadow compare invalid", __FILE__,
                                         __LINE__);
     }
     shadow_compare_kernel<<<1, 64, 0, stream>>>(full_ids, shadow_ids_, rows,
@@ -706,31 +821,54 @@ Result<OptimizedLaunchResult> try_launch_lm_head_proxy_fusion(
     if (constrained) {
         const LmHeadConstrainedSelection selection = select_lm_head_constrained(
             ctx.actual_stochastic_outputs, ctx.actual_sampled_outputs, ctx.actual_outputs,
-            ctx.constraint_allowed_counts, rows,
-            target_lm_head_proxy_constraint_threshold());
-        if (selection.path != LmHeadConstrainedPath::ExactCandidates)
+            ctx.constraint_allowed_counts, rows, target_lm_head_proxy_constraint_threshold(),
+            ctx.lm_head_proxy->coarse_pool());
+        if (selection.path == LmHeadConstrainedPath::None)
             return not_applicable;
-        if (mode == 2u) {
-            Status cst = ctx.lm_head_proxy->select_constrained_exact_shadow(
+        if (selection.path == LmHeadConstrainedPath::ExactCandidates) {
+            if (mode == 2u) {
+                Status cst = ctx.lm_head_proxy->select_constrained_exact_shadow(
+                    static_cast<const bf16_t*>(in.ptr), rows, in.row_stride,
+                    ctx.constraint_masks, ctx.constraint_mask_words,
+                    selection.candidate_capacity, stream);
+                if (!cst.ok())
+                    return cst;
+                ctx.lm_head_shadow_pending = true;
+                ctx.lm_head_shadow_full = static_cast<const int32_t*>(out.ptr);
+                ctx.lm_head_shadow_rows = rows;
+                return not_applicable;
+            }
+            Status cst = ctx.lm_head_proxy->select_constrained_exact(
                 static_cast<const bf16_t*>(in.ptr), rows, in.row_stride, ctx.constraint_masks,
-                ctx.constraint_mask_words, selection.candidate_capacity, stream);
+                ctx.constraint_mask_words, selection.candidate_capacity,
+                static_cast<int32_t*>(out.ptr), stream);
             if (!cst.ok())
                 return cst;
+            OptimizedLaunchResult constrained_result{};
+            constrained_result.kind = OptimizedLaunchKind::Launched;
+            constrained_result.consumed_dispatches = 3u;
+            return constrained_result;
+        }
+        if (mode == 2u) {
+            Status mst = ctx.lm_head_proxy->select_constrained_masked_shadow(
+                static_cast<const bf16_t*>(in.ptr), rows, in.row_stride, ctx.constraint_masks,
+                ctx.constraint_mask_words, stream);
+            if (!mst.ok())
+                return mst;
             ctx.lm_head_shadow_pending = true;
             ctx.lm_head_shadow_full = static_cast<const int32_t*>(out.ptr);
             ctx.lm_head_shadow_rows = rows;
             return not_applicable;
         }
-        Status cst = ctx.lm_head_proxy->select_constrained_exact(
+        Status mst = ctx.lm_head_proxy->select_constrained_masked(
             static_cast<const bf16_t*>(in.ptr), rows, in.row_stride, ctx.constraint_masks,
-            ctx.constraint_mask_words, selection.candidate_capacity,
-            static_cast<int32_t*>(out.ptr), stream);
-        if (!cst.ok())
-            return cst;
-        OptimizedLaunchResult constrained_result{};
-        constrained_result.kind = OptimizedLaunchKind::Launched;
-        constrained_result.consumed_dispatches = 3u;
-        return constrained_result;
+            ctx.constraint_mask_words, static_cast<int32_t*>(out.ptr), stream);
+        if (!mst.ok())
+            return mst;
+        OptimizedLaunchResult masked_result{};
+        masked_result.kind = OptimizedLaunchKind::Launched;
+        masked_result.consumed_dispatches = 3u;
+        return masked_result;
     }
     if (mode == 2u) {
         Status st = ctx.lm_head_proxy->select_shadow(

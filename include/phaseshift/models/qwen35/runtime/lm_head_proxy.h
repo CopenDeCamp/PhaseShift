@@ -40,12 +40,19 @@ public:
                                            uint32_t row_stride, const uint32_t* masks,
                                            uint32_t mask_words, uint32_t candidate_capacity,
                                            hipStream_t stream);
+    Status select_constrained_masked(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
+                                     const uint32_t* masks, uint32_t mask_words,
+                                     int32_t* out_ids, hipStream_t stream);
+    Status select_constrained_masked_shadow(const bf16_t* normed, uint32_t rows,
+                                            uint32_t row_stride, const uint32_t* masks,
+                                            uint32_t mask_words, hipStream_t stream);
     Status compare_shadow(const int32_t* full_ids, uint32_t rows, hipStream_t stream);
     Status shutdown() noexcept;
 
     bool valid() const noexcept { return int2_codes_ != nullptr; }
     uint32_t max_rows() const noexcept { return max_rows_; }
     uint32_t candidate_capacity() const noexcept { return candidate_capacity_; }
+    uint32_t coarse_pool() const noexcept { return pool_; }
 
 private:
     void move_from(LmHeadCandidateProxy& other) noexcept;
@@ -55,6 +62,10 @@ private:
                                         uint32_t row_stride, const uint32_t* masks,
                                         uint32_t mask_words, uint32_t candidate_capacity,
                                         int32_t* out_ids, hipStream_t stream);
+    Status run_select_constrained_masked(const bf16_t* normed, uint32_t rows,
+                                         uint32_t row_stride, const uint32_t* masks,
+                                         uint32_t mask_words, int32_t* out_ids,
+                                         hipStream_t stream);
 
     const uint8_t* weight_codes_ = nullptr;
     const uint8_t* weight_scales_ = nullptr;
@@ -127,7 +138,8 @@ struct LmHeadConstrainedSelection {
 
 inline LmHeadConstrainedSelection select_lm_head_constrained(
     uint32_t stochastic_outputs, uint32_t sampled_outputs, uint32_t outputs,
-    const uint32_t* allowed_counts, uint32_t rows, uint32_t small_threshold) {
+    const uint32_t* allowed_counts, uint32_t rows, uint32_t small_threshold,
+    uint32_t coarse_pool) {
     LmHeadConstrainedSelection selection;
     if (allowed_counts == nullptr || rows == 0u || small_threshold == 0u)
         return selection;
@@ -151,7 +163,7 @@ inline LmHeadConstrainedSelection select_lm_head_constrained(
         selection.candidate_capacity = max_count;
         return selection;
     }
-    if (min_count > small_threshold) {
+    if (min_count > small_threshold && coarse_pool != 0u && min_count >= coarse_pool) {
         selection.path = LmHeadConstrainedPath::MaskedCoarse;
     }
     return selection;
