@@ -174,29 +174,57 @@ e2e の比較診断を `(m, n)` 分布まで拡張した結果（correctness GEN
 - rank-1 更新 `S[m][n] += k[m]·δ[n]` の **key 側の一要素だけ**が食い違うことを意味する。
   `δ` の誤りは列、`a` の誤りは全 16384 要素に現れるので不一致。
 
-### 結論と残課題
+### 根因と修正（2026-09-30 確定）
 
-- 配線・conv・`S_0`・buffer alias・読み出し時点・`de0` はいずれも**除外済み**。
-- kernel 単体では合成データで bit-exact だが、**実モデルのデータでのみ** key 側の
-  一要素が食い違う。再現は e2e のみで、決定論的（同一入力で結果が安定）。
-- 未確認: 差が出ているのが「commit が読む log」か「history capture」の片方であること。
-  現状は history を正と仮定しているが、両者が等価にずれている可能性は排除していない。
-- 次の実験（優先順）:
-  1. device で update が使った `ktmp[0]` と、書込んだ `compact_k`、および verify 後の
-     `a.k` を三者比較し、食い違う側を特定する
-  2. `rows=2/4`（`DecodeRowsExact<2>/<4>`）で同じ形状が出るか確認（経路依存かデータ依存か）
-  3. compact log を v_head ごとに分離して共有書をなくす
+絞り込みの末、原因は **compact log の k の格納方法**にあった。
+
+**原因**
+
+1. log の k は `qk_head` でインデックスされていた（GQA で 3 つの v_head が同一アドレスを共有）。
+2. しかし update が実際に使う k は `k · de0`（`de0 = __expf(gval − gval)`）で、
+   **v_head ごとに値が異なる**。3 v_head が同一アドレスへ別値を書く競合（last-writer-wins）。
+3. さらに既存の spill は raw `a.k` を書いており、update の実値と一致していなかった。
+
+`[kcheck]`（update の実値と re-read 値の直接比較）の計測値:
+
+```
+diff = 26880 / 18874368 (0.14%),  max_abs ≈ 2.4e-7  ≒ 1 ULP
+```
+
+**なぜ「key 次元の 1 行」に現れたか**
+
+rank-1 更新 `S[m][n] += k[m]·δ[n]` なので、k の 1 要素の誤りは
+**key 次元の 1 行 × 全 128 列**に現れる。観測されていた
+`dm=1, dn=128, n=[0..127]`（例: layer 43 / v_head 16 / m=93）と完全に一致する。
+`δ` の誤りなら列（`dn=1`）、`a` の誤りなら全 16384 要素に現れるため不一致。
+
+**修正**
+
+- log の k のインデックスを `qk_head` → `v_head` に変更（3 v_head の書込み競合を解消）。
+- update が使う `k · de0` の実値を `compact_k` に保存する（raw `a.k` の再読み出しを廃止）。
+
+**結果（GPU0、Qwen3.8-27B-PSQ、Exact verify、既定 lossy）**
+
+| 経路 | 修正前 | 修正後 |
+| --- | --- | --- |
+| correctness（rows=8, `DecodeRowsExact`） | 24/32 | **32/32 (failed=0)** |
+| perf C16（rows=24, `Decode1Serial`） | ~50% | **4/4 (failed=0)** |
+
+両経路とも残差診断（`[compact-compare]`）は **ゼロ出力**。
+json512 C16 は **97.25 tok/s**（rerun 経路の 69.05 比で **+41%**）、prose2048 は 58.47 tok/s。
+
+**除外済み（根因ではないこと）**: conv、`S_0` snapshot、buffer アドレス重複、
+k の読み出し時点、`de0` の一様スケール、配線・spill・snapshot の追加。
 
 ## 次の作業
 
 1. 本番 recurrence kernel に compact log の optional spill を追加する。→ **完了**（層対応含む）
 2. spill した log からの逐次 replay が bit-exact かを確認。→ **完了**
    （decode1 / decode1_serial / decode_rows_exact の 3 経路、全層）
-3. verify rows を増やして target parity を測る。→ **未完了**（配線は健全、conv も無関係。
-   rec commit の実モデルデータ依存の微小差が残る）
-4. 実モデルデータ依存の rec 差の原因究明。候補: `de0` スケーリング、bf16 分解の
-   境界値、`dval` の edge case、history capture 同時実行時の codegen。
-5. commit を次回 GDN kernel へ fusion できるか設計する（pending prefix commit）。
+3. verify rows を増やして target parity を測る。→ **完了**（correctness 32/32、perf 4/4）
+4. 根因究明。→ **完了**（log の k を qk_head → v_head に分離し、update 実値 `k·de0` を保存）
+5. compact 経路の性能測定（rerun / history との比較、メモリ削減量）。
+6. commit を次回 GDN kernel へ fusion できるか設計する（pending prefix commit）。
 
 ## 再現
 

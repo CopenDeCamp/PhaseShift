@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -193,10 +195,17 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
 
     decoder.gdn_conv_bytes = spec_gdn_conv_bytes(gdn_pool);
     decoder.gdn_rec_bytes = spec_gdn_recurrent_bytes(gdn_pool);
+    const bool compact_requested = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT", false);
     const char* rerun_env = std::getenv("PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE");
     decoder.gdn_rerun_reference =
         rerun_env != nullptr && rerun_env[0] != '\0' && rerun_env[0] != '0';
-    if (decoder.gdn_rerun_reference) {
+    uint32_t history_rows = config.num_drafts;
+    if (ngram_enabled) {
+        history_rows = std::min<uint32_t>(
+            kDFlash2SpecMaxVerifyDrafts, config.num_drafts + config.ngram_max_tail);
+    }
+    const GdnStatePoolDeviceView pool_view = gdn_pool.device_view();
+    if (decoder.gdn_rerun_reference || compact_requested) {
         if (decoder.gdn_conv_bytes != 0u) {
             auto conv_alloc = arena.allocate_aligned(decoder.gdn_conv_bytes, 256u);
             if (!conv_alloc.ok()) return conv_alloc.status();
@@ -207,27 +216,62 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
             if (!rec_alloc.ok()) return rec_alloc.status();
             decoder.gdn_rec_snapshot = rec_alloc.release().data();
         }
-    } else {
-        uint32_t history_rows = config.num_drafts;
-        if (ngram_enabled) {
-            history_rows = std::min<uint32_t>(
-                kDFlash2SpecMaxVerifyDrafts, config.num_drafts + config.ngram_max_tail);
-        }
-        const GdnStatePoolDeviceView pool_view = gdn_pool.device_view();
-        const std::size_t per_row_bytes =
-            static_cast<std::size_t>(pool_view.conv_slot_stride) * sizeof(bf16_t) +
-            static_cast<std::size_t>(pool_view.recurrent_slot_stride) * sizeof(float);
-        const std::size_t history_bytes =
-            static_cast<std::size_t>(history_rows) * per_row_bytes;
-        if (history_bytes > kDFlash2SpecHistoryBytesMax) {
-            return Status::insufficient_memory(
-                "create_dflash2_spec_decoder: GDN history exceeds the 2.25 GiB guard",
-                __FILE__, __LINE__);
-        }
+    }
+    if (!decoder.gdn_rerun_reference || compact_requested) {
         auto history_result = create_gdn_spec_history(arena, gdn_pool, history_rows);
         if (!history_result.ok()) return history_result.status();
         decoder.gdn_history = history_result.release();
         decoder.gdn_history_enabled = true;
+    }
+    if (compact_requested) {
+        const uint64_t states = pool_view.num_gdn_states;
+        const bool diag = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_DIAG", false);
+        const uint64_t log_rows = kDFlash2SpecMaxVerifyRows;
+        const uint64_t vdim = static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
+        const uint64_t key_heads = tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16u;
+        const uint64_t qkdim = pool_view.num_v_heads * pool_view.head_k;
+        const uint64_t dper = log_rows * vdim;
+        const uint64_t kper = log_rows * qkdim;
+        const uint64_t aper = log_rows * pool_view.num_v_heads;
+        auto d_alloc = arena.allocate_aligned(states * dper * sizeof(float), 256u);
+        if (!d_alloc.ok()) return d_alloc.status();
+        decoder.gdn_compact_delta = static_cast<float*>(d_alloc.release().data());
+        auto k_alloc = arena.allocate_aligned(states * kper * sizeof(float), 256u);
+        if (!k_alloc.ok()) return k_alloc.status();
+        decoder.gdn_compact_k = static_cast<float*>(k_alloc.release().data());
+        auto a_alloc = arena.allocate_aligned(states * aper * sizeof(float), 256u);
+        if (!a_alloc.ok()) return a_alloc.status();
+        decoder.gdn_compact_a = static_cast<float*>(a_alloc.release().data());
+        decoder.gdn_compact_delta_layer_stride = dper;
+        decoder.gdn_compact_k_layer_stride = kper;
+        decoder.gdn_compact_a_layer_stride = aper;
+        decoder.gdn_key_heads = static_cast<uint32_t>(key_heads);
+
+        auto req_alloc = arena.allocate_aligned(
+            sizeof(::ps::runtime::DeviceRequestDescriptor), 256u);
+        if (!req_alloc.ok()) return req_alloc.status();
+        decoder.gdn_commit_request =
+            static_cast<::ps::runtime::DeviceRequestDescriptor*>(req_alloc.release().data());
+        ::ps::runtime::DeviceRequestDescriptor req{};
+        req.request_handle.slot = decoder.sequence->slot;
+        req.row_begin = 0u;
+        req.row_count = 0u;
+        const hipError_t req_err = hipMemcpy(decoder.gdn_commit_request, &req, sizeof(req),
+                                             hipMemcpyHostToDevice);
+        if (req_err != hipSuccess) {
+            return Status::hip_error("create_dflash2_spec_decoder gdn commit request",
+                                     hipGetErrorString(req_err), __FILE__, __LINE__);
+        }
+        if (diag && decoder.gdn_rec_bytes != 0u) {
+            auto scratch = arena.allocate_aligned(decoder.gdn_rec_bytes, 256u);
+            if (!scratch.ok()) return scratch.status();
+            decoder.gdn_compact_scratch = static_cast<float*>(scratch.release().data());
+            decoder.gdn_compact_compare_remaining = 8u;
+            const std::size_t n = decoder.gdn_rec_bytes / sizeof(float);
+            decoder.gdn_compact_host_a.assign(n, 0.0f);
+            decoder.gdn_compact_host_b.assign(n, 0.0f);
+        }
+        decoder.gdn_compact_commit = true;
     }
 
     decoder.initialized = true;
@@ -263,6 +307,19 @@ Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept {
     }
     decoder.gdn_history_enabled = false;
     decoder.gdn_rerun_reference = false;
+    decoder.gdn_compact_commit = false;
+    decoder.gdn_compact_delta = nullptr;
+    decoder.gdn_compact_k = nullptr;
+    decoder.gdn_compact_a = nullptr;
+    decoder.gdn_compact_delta_layer_stride = 0u;
+    decoder.gdn_compact_k_layer_stride = 0u;
+    decoder.gdn_compact_a_layer_stride = 0u;
+    decoder.gdn_commit_request = nullptr;
+    decoder.gdn_key_heads = 0u;
+    decoder.gdn_compact_scratch = nullptr;
+    decoder.gdn_compact_compare_remaining = 0u;
+    decoder.gdn_compact_host_a.clear();
+    decoder.gdn_compact_host_b.clear();
     decoder.hidden_size = 0u;
     decoder.target = nullptr;
     decoder.draft = nullptr;
@@ -626,13 +683,22 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     const uint32_t total_k = dflash_k + tail_k;
     out.num_drafts = total_k;
 
-    if (decoder.gdn_rerun_reference) {
+    if (decoder.gdn_rerun_reference || decoder.gdn_compact_commit) {
         ScopedTimer t(tm != nullptr ? &tm->gdn_snapshot_ms : nullptr);
         Status st = spec_gdn_snapshot(*decoder.gdn_pool, decoder.sequence->slot,
                                       decoder.gdn_conv_snapshot, decoder.gdn_rec_snapshot,
                                       decoder.gdn_conv_bytes, decoder.gdn_rec_bytes,
                                       decoder.stream);
         if (!st.ok()) return st;
+        if (decoder.gdn_compact_scratch != nullptr) {
+            const GdnStatePoolDeviceView pv2 = decoder.gdn_pool->device_view();
+            ps::gpu::discard_cleanup_result(
+                hipMemcpy(decoder.gdn_compact_scratch,
+                          pv2.recurrent_base +
+                              static_cast<std::size_t>(decoder.sequence->slot) *
+                                  pv2.recurrent_slot_stride,
+                          decoder.gdn_rec_bytes, hipMemcpyDeviceToDevice));
+        }
     }
 
     std::vector<ScheduledRequest> requests;
@@ -654,6 +720,14 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         ExecuteBatchOptions options;
         if (decoder.gdn_history_enabled) {
             options.gdn_spec_history = gdn_spec_history_view(decoder.gdn_history, total_k);
+        }
+        if (decoder.gdn_compact_commit) {
+            options.gdn_compact.delta = decoder.gdn_compact_delta;
+            options.gdn_compact.k = decoder.gdn_compact_k;
+            options.gdn_compact.a = decoder.gdn_compact_a;
+            options.gdn_compact.delta_layer_stride = decoder.gdn_compact_delta_layer_stride;
+            options.gdn_compact.k_layer_stride = decoder.gdn_compact_k_layer_stride;
+            options.gdn_compact.a_layer_stride = decoder.gdn_compact_a_layer_stride;
         }
         if (want_timing) {
             const hipError_t start_err =
@@ -792,6 +866,158 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         st = rollback_sequence_append(*decoder.sequence, required, decoder.stream);
         if (!st.ok()) return st;
         if (tm != nullptr) ++tm->full_accepts;
+    } else if (decoder.gdn_compact_commit) {
+        {
+            ScopedTimer t(tm != nullptr ? &tm->gdn_restore_ms : nullptr);
+            Status st = spec_gdn_restore(*decoder.gdn_pool, decoder.sequence->slot,
+                                         decoder.gdn_conv_snapshot, decoder.gdn_rec_snapshot,
+                                         decoder.gdn_conv_bytes, decoder.gdn_rec_bytes,
+                                         decoder.stream);
+            if (!st.ok()) return st;
+            st = restore_gdn_spec_conv(*decoder.gdn_pool, decoder.sequence->slot,
+                                       decoder.gdn_history, accepted, decoder.stream);
+            if (!st.ok()) return st;
+        }
+        {
+            ScopedTimer t(tm != nullptr ? &tm->rerun_ms : nullptr);
+            GdnCompactLogDeviceView compact{};
+            compact.delta = decoder.gdn_compact_delta;
+            compact.k = decoder.gdn_compact_k;
+            compact.a = decoder.gdn_compact_a;
+            compact.delta_layer_stride = decoder.gdn_compact_delta_layer_stride;
+            compact.k_layer_stride = decoder.gdn_compact_k_layer_stride;
+            compact.a_layer_stride = decoder.gdn_compact_a_layer_stride;
+            Status st = commit_gdn_compact_log(
+                *decoder.gdn_pool, decoder.sequence->slot, compact, decoder.gdn_commit_request,
+                accepted + 1u, decoder.gdn_key_heads, decoder.stream);
+            if (!st.ok()) return st;
+        }
+        if (decoder.gdn_compact_compare_remaining > 0u &&
+            decoder.gdn_compact_scratch != nullptr) {
+            --decoder.gdn_compact_compare_remaining;
+            {
+                const std::size_t ns = decoder.gdn_rec_bytes / sizeof(float);
+                ps::gpu::discard_cleanup_result(hipStreamSynchronize(decoder.stream));
+                ps::gpu::discard_cleanup_result(
+                    hipMemcpy(decoder.gdn_compact_host_a.data(), decoder.gdn_compact_scratch,
+                              decoder.gdn_rec_bytes, hipMemcpyDeviceToHost));
+                ps::gpu::discard_cleanup_result(
+                    hipMemcpy(decoder.gdn_compact_host_b.data(), decoder.gdn_rec_snapshot,
+                              decoder.gdn_rec_bytes, hipMemcpyDeviceToHost));
+                std::size_t fs = ns, cs = 0;
+                double ms = 0.0;
+                for (std::size_t i = 0; i < ns; ++i) {
+                    if (std::memcmp(&decoder.gdn_compact_host_a[i],
+                                    &decoder.gdn_compact_host_b[i], 4) != 0) {
+                        if (fs == ns) fs = i;
+                        ++cs;
+                    }
+                    const double dd = std::fabs(
+                        static_cast<double>(decoder.gdn_compact_host_a[i]) -
+                        static_cast<double>(decoder.gdn_compact_host_b[i]));
+                    if (dd > ms) ms = dd;
+                }
+                std::printf("[s0-check] accepted=%u diff=%zu/%zu max_abs=%.6g first=%zu\n",
+                            accepted, cs, ns, ms, fs);
+            }
+            const GdnStatePoolDeviceView pv = decoder.gdn_pool->device_view();
+            float* rec_dst =
+                pv.recurrent_base +
+                static_cast<std::size_t>(decoder.sequence->slot) * pv.recurrent_slot_stride;
+            ps::gpu::discard_cleanup_result(
+                hipMemcpy(decoder.gdn_compact_scratch, rec_dst, decoder.gdn_rec_bytes,
+                          hipMemcpyDeviceToDevice));
+            Status st = restore_gdn_spec_history(*decoder.gdn_pool, decoder.sequence->slot,
+                                                 decoder.gdn_history, accepted, decoder.stream);
+            if (!st.ok()) return st;
+            ps::gpu::discard_cleanup_result(hipStreamSynchronize(decoder.stream));
+            ps::gpu::discard_cleanup_result(
+                hipMemcpy(decoder.gdn_compact_host_a.data(), decoder.gdn_compact_scratch,
+                          decoder.gdn_rec_bytes, hipMemcpyDeviceToHost));
+            ps::gpu::discard_cleanup_result(
+                hipMemcpy(decoder.gdn_compact_host_b.data(), rec_dst, decoder.gdn_rec_bytes,
+                          hipMemcpyDeviceToHost));
+            const std::size_t n = decoder.gdn_rec_bytes / sizeof(float);
+            const std::size_t layer_elems = pv.recurrent_layer_stride;
+            const uint32_t hd = pv.head_k;
+            const uint32_t hvv = pv.head_v;
+            const std::size_t vh_blk = static_cast<std::size_t>(hd) * hvv;
+            std::vector<uint32_t> per_layer(pv.num_gdn_states, 0u);
+            std::size_t first = n;
+            std::size_t diff_count = 0;
+            double max_abs = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                if (std::memcmp(&decoder.gdn_compact_host_a[i], &decoder.gdn_compact_host_b[i],
+                                4) != 0) {
+                    if (first == n) first = i;
+                    ++diff_count;
+                    const std::size_t l = i / layer_elems;
+                    if (l < per_layer.size()) ++per_layer[l];
+                }
+                const double d = std::fabs(static_cast<double>(decoder.gdn_compact_host_a[i]) -
+                                           static_cast<double>(decoder.gdn_compact_host_b[i]));
+                if (d > max_abs) max_abs = d;
+            }
+            uint32_t dm = 0, dn = 0, elems_in_v = 0;
+            uint32_t n_min = 0xFFFFFFFFu, n_max = 0u;
+            std::vector<uint32_t> m_list;
+            if (first < n) {
+                const std::size_t l = first / layer_elems;
+                const std::size_t within = first % layer_elems;
+                const std::size_t vidx = within / vh_blk;
+                const std::size_t lo2 = l * layer_elems + vidx * vh_blk;
+                const std::size_t hi2 = lo2 + vh_blk;
+                std::vector<uint8_t> seen_m(hd, 0), seen_n(hvv, 0);
+                for (std::size_t i = lo2; i < hi2 && i < n; ++i) {
+                    if (std::memcmp(&decoder.gdn_compact_host_a[i],
+                                    &decoder.gdn_compact_host_b[i], 4) == 0)
+                        continue;
+                    const std::size_t w = (i % layer_elems) - vidx * vh_blk;
+                    const std::size_t m = w / hvv;
+                    const std::size_t nd = w % hvv;
+                    ++elems_in_v;
+                    if (m < seen_m.size() && !seen_m[m]) {
+                        seen_m[m] = 1;
+                        ++dm;
+                        if (m_list.size() < 8u) m_list.push_back(static_cast<uint32_t>(m));
+                    }
+                    if (nd < seen_n.size() && !seen_n[nd]) ++dn;
+                    if (static_cast<uint32_t>(nd) < n_min) n_min = static_cast<uint32_t>(nd);
+                    if (static_cast<uint32_t>(nd) > n_max) n_max = static_cast<uint32_t>(nd);
+                }
+                std::printf(
+                    "[compact-compare] accepted=%u rows=%u diff=%zu/%zu max_abs=%.6g "
+                    "first=%zu layer=%zu vidx=%zu hd=%u hvv=%u dm=%u dn=%u elems=%u "
+                    "n=[%u..%u] m=[",
+                    accepted, accepted + 1u, diff_count, n, max_abs, first,
+                    first / layer_elems, first % layer_elems / vh_blk, hd, hvv, dm, dn,
+                    elems_in_v, n_min, n_max);
+                for (std::size_t q = 0; q < m_list.size(); ++q)
+                    std::printf("%s%u", q == 0u ? "" : ",", m_list[q]);
+                std::printf("]\n");
+                std::printf("  [layers]");
+                for (std::size_t l2 = 0; l2 < per_layer.size(); ++l2)
+                    if (per_layer[l2] != 0u) std::printf(" %zu:%u", l2, per_layer[l2]);
+                std::printf("\n");
+            }
+            ps::gpu::discard_cleanup_result(
+                hipMemcpy(rec_dst, decoder.gdn_compact_scratch, decoder.gdn_rec_bytes,
+                          hipMemcpyDeviceToDevice));
+        }
+        decoder.sequence->position = position + accepted + 1u;
+        {
+            ScopedTimer t(tm != nullptr ? &tm->dflash_commit_ms : nullptr);
+            std::array<const bf16_t*, ps::kernel::kDFlash2TargetTaps> taps{};
+            collect_target_taps(*decoder.target, taps);
+            Status st = dflash2::dflash2_append_target_taps(
+                *decoder.draft, *decoder.context, taps.data(), ps::kernel::kDFlash2TargetTaps,
+                accepted + 1u, position, decoder.stream);
+            if (!st.ok()) return st;
+            const uint32_t required = ceil_div_u32(decoder.sequence->position, page_tokens);
+            st = rollback_sequence_append(*decoder.sequence, required, decoder.stream);
+            if (!st.ok()) return st;
+        }
+        if (tm != nullptr) ++tm->partial_accepts;
     } else if (decoder.gdn_history_enabled) {
         {
             ScopedTimer t(tm != nullptr ? &tm->gdn_restore_ms : nullptr);

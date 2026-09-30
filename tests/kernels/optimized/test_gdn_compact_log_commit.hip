@@ -90,7 +90,8 @@ bool setup(Buf& d, uint32_t seed) {
     if (hipMalloc(&d.out, (size_t)kRows * kVdim * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.compact_delta, (size_t)kStates * kRows * kVdim * 4u) != hipSuccess)
         return false;
-    if (hipMalloc(&d.compact_k, (size_t)kStates * kRows * kQk * 4u) != hipSuccess) return false;
+    if (hipMalloc(&d.compact_k, (size_t)kStates * kRows * kHeads * kHeadK * 4u) != hipSuccess)
+        return false;
     if (hipMalloc(&d.compact_a, (size_t)kStates * kRows * kHeads * 4u) != hipSuccess)
         return false;
     if (hipMalloc(&d.hist, (size_t)kRows * kStates * kSlotStride * 4u) != hipSuccess)
@@ -164,7 +165,7 @@ bool setup(Buf& d, uint32_t seed) {
     a.compact_k = d.compact_k;
     a.compact_a = d.compact_a;
     a.compact_delta_layer_stride = (uint64_t)kRows * kVdim;
-    a.compact_k_layer_stride = (uint64_t)kRows * kQk;
+    a.compact_k_layer_stride = (uint64_t)kRows * kHeads * kHeadK;
     a.compact_a_layer_stride = (uint64_t)kRows * kHeads;
     a.recurrent_history = d.hist;
     a.recurrent_history_row_stride = (uint64_t)kStates * kSlotStride;

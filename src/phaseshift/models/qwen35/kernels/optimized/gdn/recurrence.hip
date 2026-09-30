@@ -743,6 +743,11 @@ void phaseshift_qwen35_gdn_recurrence_wmma_decode1(GdnRecurrenceArgs a) {
     }
 
     const float egv = dval;
+    const uint64_t ckbase =
+        a.compact_k != nullptr
+            ? static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride
+            : 0u;
+    const uint64_t cqkdim = static_cast<uint64_t>(a.num_v_heads) * hd;
     #pragma unroll
     for (uint32_t t = 0; t < 4u; ++t)
         #pragma unroll
@@ -759,9 +764,15 @@ void phaseshift_qwen35_gdn_recurrence_wmma_decode1(GdnRecurrenceArgs a) {
         #pragma unroll
         for (uint32_t ki = 0; ki < 2u; ++ki) {
             float ktmp[8] = {};
-            if (tstep == 0u && kh == 0u)
+            if (tstep == 0u && kh == 0u) {
                 ktmp[0] = a.k[static_cast<size_t>(row) * a.k_row_stride + qk_head * hd
                               + (kt0 + ki) * 16u + lo] * de0;
+                if (a.compact_k != nullptr)
+                    a.compact_k[ckbase +
+                                static_cast<size_t>(row) * cqkdim +
+                                static_cast<size_t>(v_head) * hd +
+                                (kt0 + ki) * 16u + lo] = ktmp[0];
+            }
             const Frag2 akT = g::gdn_decomp8<kLossy>(ktmp);
             #pragma unroll
             for (uint32_t vj = 0; vj < 2u; ++vj)
@@ -788,7 +799,6 @@ void phaseshift_qwen35_gdn_recurrence_wmma_decode1(GdnRecurrenceArgs a) {
 
     if (a.compact_delta != nullptr) {
         const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
-        const uint64_t qkdim = static_cast<uint64_t>(a.key_heads) * hd;
         const uint64_t base = static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
         for (uint32_t v = tid; v < g::kWv; ++v)
             a.compact_delta[base + static_cast<size_t>(row) * vdim +
@@ -796,15 +806,6 @@ void phaseshift_qwen35_gdn_recurrence_wmma_decode1(GdnRecurrenceArgs a) {
         if (tid == 0u && a.compact_a != nullptr)
             a.compact_a[static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride +
                         static_cast<size_t>(row) * a.num_v_heads + v_head] = dval;
-        if (a.compact_k != nullptr) {
-            const uint64_t kbase =
-                static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride;
-            for (uint32_t d = tid; d < hd; d += g::kWthreads)
-                a.compact_k[kbase + static_cast<size_t>(row) * qkdim +
-                            static_cast<size_t>(qk_head) * hd + d] =
-                    a.k[static_cast<size_t>(row) * a.k_row_stride +
-                        static_cast<size_t>(qk_head) * hd + d];
-        }
     }
 }
 
@@ -829,8 +830,6 @@ void phaseshift_qwen35_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
         return;
     if (a.compact_rows == 0u) return;
 
-    const uint32_t repeat = a.num_v_heads / a.key_heads;
-    const uint32_t qk_head = v_head / repeat;
     const uint32_t v0 = vg * g::kWv;
 
     const uint32_t tid = threadIdx.x;
@@ -841,7 +840,7 @@ void phaseshift_qwen35_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
     const uint32_t kh = lane >> 4u;
 
     const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
-    const uint64_t qkdim = static_cast<uint64_t>(a.key_heads) * hd;
+    const uint64_t qkdim = static_cast<uint64_t>(a.num_v_heads) * hd;
 
     const uint32_t kt0 = (warp >> 1u) * 2u;
     const uint32_t vt0 = (warp & 1u) * 2u;
@@ -896,7 +895,7 @@ void phaseshift_qwen35_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
                     if (tstep == 0u && kh == 0u)
                         ktmp[0] = a.compact_k[
                             kbase + static_cast<size_t>(row) * qkdim +
-                            static_cast<size_t>(qk_head) * hd + (kt0 + ki) * 16u + lo];
+                            static_cast<size_t>(v_head) * hd + (kt0 + ki) * 16u + lo];
                     const Frag2 akT = g::gdn_decomp8<kLossy>(ktmp);
                     #pragma unroll
                     for (uint32_t vj = 0; vj < 2u; ++vj)
@@ -1109,6 +1108,11 @@ gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
         }
 
         const float egv = dval;
+        const uint64_t ckbase =
+            a.compact_k != nullptr
+                ? static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride
+                : 0u;
+        const uint64_t cqkdim = static_cast<uint64_t>(a.num_v_heads) * hd;
         #pragma unroll
         for (uint32_t t = 0; t < 4u; ++t)
             #pragma unroll
@@ -1125,9 +1129,14 @@ gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
             #pragma unroll
             for (uint32_t ki = 0; ki < 2u; ++ki) {
                 float ktmp[8] = {};
-                if (tstep == 0u && kh == 0u)
+                if (tstep == 0u && kh == 0u) {
                     ktmp[0] = a.k[static_cast<size_t>(row) * a.k_row_stride + qk_head * hd
                                   + (kt0 + ki) * 16u + lo] * de0;
+                    if (a.compact_k != nullptr)
+                        a.compact_k[ckbase + static_cast<size_t>(row) * cqkdim +
+                                    static_cast<size_t>(v_head) * hd +
+                                    (kt0 + ki) * 16u + lo] = ktmp[0];
+                }
                 const Frag2 akT = g::gdn_decomp8<true>(ktmp);
                 #pragma unroll
                 for (uint32_t vj = 0; vj < 2u; ++vj)
@@ -1137,25 +1146,15 @@ gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
 
         if (a.compact_delta != nullptr) {
             const uint64_t vdim = static_cast<uint64_t>(a.num_v_heads) * hv;
-            const uint64_t qkdim = static_cast<uint64_t>(a.key_heads) * hd;
             const uint64_t dbase =
                 static_cast<uint64_t>(a.state_index) * a.compact_delta_layer_stride;
             const uint64_t abase =
                 static_cast<uint64_t>(a.state_index) * a.compact_a_layer_stride;
-            const uint64_t kbase =
-                static_cast<uint64_t>(a.state_index) * a.compact_k_layer_stride;
             for (uint32_t v = tid; v < g::kWv; ++v)
                 a.compact_delta[dbase + static_cast<size_t>(row) * vdim +
                                 static_cast<size_t>(v_head) * hv + v0 + v] = s.delta[v];
             if (tid == 0u && a.compact_a != nullptr)
                 a.compact_a[abase + static_cast<size_t>(row) * a.num_v_heads + v_head] = dval;
-            if (a.compact_k != nullptr) {
-                for (uint32_t d = tid; d < hd; d += g::kWthreads)
-                    a.compact_k[kbase + static_cast<size_t>(row) * qkdim +
-                                static_cast<size_t>(qk_head) * hd + d] =
-                        a.k[static_cast<size_t>(row) * a.k_row_stride +
-                            static_cast<size_t>(qk_head) * hd + d];
-            }
         }
 
         if (hist_head != nullptr) {

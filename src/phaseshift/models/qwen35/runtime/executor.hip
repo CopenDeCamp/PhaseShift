@@ -219,6 +219,7 @@ Status build_host_execution_context(
     ::ps::runtime::ExecutionRole role,
     ::ps::runtime::VerifyNumericMode numeric_mode,
     const runtime::GdnSpecHistoryDeviceView& gdn_spec_history,
+    const runtime::GdnCompactLogDeviceView& gdn_compact,
     const uint32_t* constraint_masks,
     uint32_t constraint_mask_words,
     runtime::HostExecutionContext& ctx) {
@@ -283,6 +284,7 @@ Status build_host_execution_context(
     ctx.role = role;
     ctx.numeric_mode = numeric_mode;
     ctx.gdn_spec_history = gdn_spec_history;
+    ctx.gdn_compact = gdn_compact;
     ctx.model_state = executor.host_model_state;
     ctx.weights = executor.host_weight_table;
     ctx.weight_count = program.weight_slot_count;
@@ -851,7 +853,7 @@ Result<PendingBatch> submit_co_batch(
             executor, *program, status_ptr, N, prep.num_outputs,
             prep.num_sampled_outputs, prep.num_stochastic_outputs,
             min_visible_tokens, max_visible_tokens, exec_role,
-            exec_numeric_mode, options.gdn_spec_history,
+            exec_numeric_mode, options.gdn_spec_history, options.gdn_compact,
             any_constraint ? executor.constraint_mask_device.data<uint32_t>() : nullptr,
             any_constraint ? batch.constraint_mask_words : 0u, ctx);
         if (!stq.ok()) return stq;

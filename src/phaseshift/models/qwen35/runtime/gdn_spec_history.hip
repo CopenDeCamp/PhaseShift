@@ -1,4 +1,5 @@
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
+#include <phaseshift/models/qwen35/kernels/optimized/gdn/recurrence.h>
 
 #include <vector>
 
@@ -115,6 +116,91 @@ Status restore_gdn_spec_history(
     if (err != hipSuccess) {
         return Status::hip_error("restore_gdn_spec_history recurrent copy",
                                  hipGetErrorString(err), __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status restore_gdn_spec_conv(
+    const GdnStatePool& pool,
+    SequenceSlotId slot,
+    const GdnSpecHistory& history,
+    uint32_t history_row,
+    hipStream_t stream) {
+    if (!history.initialized) {
+        return Status::invalid_state("restore_gdn_spec_conv: not initialized", __FILE__,
+                                     __LINE__);
+    }
+    if (history_row >= history.rows) {
+        return Status::out_of_range("restore_gdn_spec_conv: history row out of range", __FILE__,
+                                    __LINE__);
+    }
+    if (slot >= pool.max_sequences()) {
+        return Status::out_of_range("restore_gdn_spec_conv: slot out of range", __FILE__,
+                                    __LINE__);
+    }
+    const GdnStatePoolDeviceView view = pool.device_view();
+    bf16_t* conv_dst = view.conv_base + static_cast<std::size_t>(slot) * view.conv_slot_stride;
+    const bf16_t* conv_src =
+        history.conv.data<bf16_t>() +
+        static_cast<std::size_t>(history_row) * history.conv.dim(1);
+    const hipError_t err = hipMemcpyAsync(conv_dst, conv_src, history.conv_state_bytes,
+                                          hipMemcpyDeviceToDevice, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("restore_gdn_spec_conv copy", hipGetErrorString(err), __FILE__,
+                                 __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Status commit_gdn_compact_log(
+    const GdnStatePool& pool,
+    SequenceSlotId slot,
+    const GdnCompactLogDeviceView& log,
+    const ::ps::runtime::DeviceRequestDescriptor* requests,
+    uint32_t rows,
+    uint32_t key_heads,
+    hipStream_t stream) {
+    if (log.delta == nullptr || log.k == nullptr || log.a == nullptr) {
+        return Status::invalid_argument("commit_gdn_compact_log: log is null", __FILE__,
+                                        __LINE__);
+    }
+    if (rows == 0u || requests == nullptr) {
+        return Status::invalid_argument("commit_gdn_compact_log: args are null", __FILE__,
+                                        __LINE__);
+    }
+    if (slot >= pool.max_sequences()) {
+        return Status::out_of_range("commit_gdn_compact_log: slot out of range", __FILE__,
+                                    __LINE__);
+    }
+    const GdnStatePoolDeviceView view = pool.device_view();
+    if (view.recurrent_base == nullptr || view.num_gdn_states == 0u) {
+        return Status::invalid_state("commit_gdn_compact_log: pool not initialized", __FILE__,
+                                     __LINE__);
+    }
+    ::ps::kernel::GdnRecurrenceArgs a{};
+    a.recurrent_state = view.recurrent_base;
+    a.requests = requests;
+    a.num_requests = 1u;
+    a.actual_rows = rows;
+    a.max_sequences = view.max_sequences;
+    a.num_gdn_states = view.num_gdn_states;
+    a.key_heads = key_heads;
+    a.num_v_heads = view.num_v_heads;
+    a.head_k = view.head_k;
+    a.head_v = view.head_v;
+    a.recurrent_slot_stride = view.recurrent_slot_stride;
+    a.recurrent_layer_stride = view.recurrent_layer_stride;
+    a.compact_delta = log.delta;
+    a.compact_k = log.k;
+    a.compact_a = log.a;
+    a.compact_delta_layer_stride = log.delta_layer_stride;
+    a.compact_k_layer_stride = log.k_layer_stride;
+    a.compact_a_layer_stride = log.a_layer_stride;
+    a.compact_rows = rows;
+    const hipError_t err = ::ps::kernel::launch_gdn_recurrence_f32_wmma_commit(a, stream);
+    if (err != hipSuccess) {
+        return Status::hip_error("commit_gdn_compact_log launch", hipGetErrorString(err),
+                                 __FILE__, __LINE__);
     }
     return Status::make_ok();
 }

@@ -184,6 +184,17 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         c.capture_rows = hist.capture_rows;
         c.capture_verify_only = mixed_verify ? 1u : 0u;
     }
+    const GdnCompactLogDeviceView& compact = ctx.gdn_compact;
+    if (compact.delta != nullptr && compact.k != nullptr && compact.a != nullptr &&
+        compact.delta_layer_stride != 0u && compact.k_layer_stride != 0u &&
+        compact.a_layer_stride != 0u) {
+        c.compact_delta = compact.delta;
+        c.compact_k = compact.k;
+        c.compact_a = compact.a;
+        c.compact_delta_layer_stride = compact.delta_layer_stride;
+        c.compact_k_layer_stride = compact.k_layer_stride;
+        c.compact_a_layer_stride = compact.a_layer_stride;
+    }
     return ra;
 }
 

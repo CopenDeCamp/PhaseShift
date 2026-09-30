@@ -163,6 +163,46 @@ decoder 統合を再適用し、env で切り分けた（`..._COMPACT_FULL_HISTO
 
 ---
 
+## 追記（2026-09-30 深夜）: 根因を特定し修正
+
+### 実験1の結果
+
+device で **update が実際に使った k（`k·de0`）と、既存 spill が書いた raw `a.k`** を直接比較した:
+
+```
+[kcheck] re-read_vs_used diff = 26880 / 18874368 (0.14%), max_abs ≈ 2.4e-7 ≒ 1 ULP
+```
+
+**⇒ log の k が update の実値と一致していなかった。**
+
+### 根因
+
+1. log の k は `qk_head` インデックス（GQA で 3 v_head が共有）だったが、update の実値
+   `k·de0` は **v_head ごとに異なる** → 3 v_head が同一アドレスへ別値を書く競合。
+2. 既存 spill は raw `a.k` を書くため、`k·de0` と約 1 ULP の差が生じていた。
+
+rank-1 更新の性質上、k の 1 要素の誤りは **key 次元の 1 行 × 全 128 列**に現れるため、
+観測されていた `dm=1, dn=128` の形状と完全に一致する。
+
+### 修正と結果
+
+- log の k を `qk_head` → **`v_head`** に分離（3 v_head の書込み競合を解消）、
+  update 実値 `k·de0` を `compact_k` に保存（raw `a.k` の再読み出しを廃止）。
+
+| 経路 | 修正前 | 修正後 |
+| --- | --- | --- |
+| correctness（rows=8, `DecodeRowsExact`） | 24/32 | **32/32 (failed=0)** |
+| perf C16（rows=24, `Decode1Serial`） | ~50% | **4/4 (failed=0)** |
+
+両経路とも残差診断はゼロ出力。json512 C16 は **97.25 tok/s**（rerun 69.05 比 **+41%**）。
+
+### 次
+
+1. compact 経路の性能測定（rerun / history との本比較、メモリ削減量）
+2. commit の GDN kernel への fusion 設計
+
+---
+
 ## 再現
 
 ```bash

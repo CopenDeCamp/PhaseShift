@@ -54,6 +54,21 @@ struct DFlash2SpecDecoder {
     bool gdn_history_enabled = false;
     bool gdn_rerun_reference = false;
 
+    bool gdn_compact_commit = false;
+    float* gdn_compact_delta = nullptr;
+    float* gdn_compact_k = nullptr;
+    float* gdn_compact_a = nullptr;
+    uint64_t gdn_compact_delta_layer_stride = 0u;
+    uint64_t gdn_compact_k_layer_stride = 0u;
+    uint64_t gdn_compact_a_layer_stride = 0u;
+    ::ps::runtime::DeviceRequestDescriptor* gdn_commit_request = nullptr;
+    uint32_t gdn_key_heads = 0u;
+
+    float* gdn_compact_scratch = nullptr;
+    uint32_t gdn_compact_compare_remaining = 0u;
+    std::vector<float> gdn_compact_host_a;
+    std::vector<float> gdn_compact_host_b;
+
     uint32_t hidden_size = 0u;
     int32_t* verify_token_ids_device = nullptr;
     int32_t* decision_staging_device = nullptr;
