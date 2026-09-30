@@ -156,6 +156,37 @@ e2e の比較診断を `(m, n)` 分布まで拡張した結果（correctness GEN
 
 次の実験: compact log を v_head ごとに分離（共有書をなくす）して差が消えるか確認。
 
+### 追加切り分けの結果（2026-09-30）
+
+| 検査 | 方法 | 結果 |
+| --- | --- | --- |
+| `S_0` の健全性 | verify 開始直後の全 state を別バッファに保存し、commit 時の snapshot と比較 | **diff=0**（全 accept）→ 除外 |
+| buffer の重複 | `hist_conv / hist_rec / delta / k / a / snap / scratch` の実アドレス出力 | 連続・非重複 → **除外** |
+| 配線・conv | control（spill + snapshot、rec は history）/ full-history vs conv-only | 32/32 / 24=24 → **除外** |
+| `de0` スケール | k を `*de0` にして spill | 悪化 + 一様乗算なので全行に出るべき → **除外** |
+| k の読み出し時点 | update が `a.k` を読んだ直後に `compact_k` へ同じ値を書くよう変更 | 差は消えない（パターンは変化）→ 読み出し時点は原因でない |
+| kernel 単体 | history capture 有効で chain / capture / commit 三者比較 | **10/10 PASS**（合成データ） |
+
+差の形状（`hd=hvv=128` 確認済み）:
+
+- `dm`（key 次元の一意数）= 1〜2、`dn`（value 次元の一意数）= 126〜128
+- 例: layer 43 / v_head 16 → `m=[93]` `n=[0..127]`（128 要素）
+- rank-1 更新 `S[m][n] += k[m]·δ[n]` の **key 側の一要素だけ**が食い違うことを意味する。
+  `δ` の誤りは列、`a` の誤りは全 16384 要素に現れるので不一致。
+
+### 結論と残課題
+
+- 配線・conv・`S_0`・buffer alias・読み出し時点・`de0` はいずれも**除外済み**。
+- kernel 単体では合成データで bit-exact だが、**実モデルのデータでのみ** key 側の
+  一要素が食い違う。再現は e2e のみで、決定論的（同一入力で結果が安定）。
+- 未確認: 差が出ているのが「commit が読む log」か「history capture」の片方であること。
+  現状は history を正と仮定しているが、両者が等価にずれている可能性は排除していない。
+- 次の実験（優先順）:
+  1. device で update が使った `ktmp[0]` と、書込んだ `compact_k`、および verify 後の
+     `a.k` を三者比較し、食い違う側を特定する
+  2. `rows=2/4`（`DecodeRowsExact<2>/<4>`）で同じ形状が出るか確認（経路依存かデータ依存か）
+  3. compact log を v_head ごとに分離して共有書をなくす
+
 ## 次の作業
 
 1. 本番 recurrence kernel に compact log の optional spill を追加する。→ **完了**（層対応含む）

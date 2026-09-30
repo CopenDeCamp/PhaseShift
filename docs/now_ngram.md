@@ -153,9 +153,13 @@ decoder 統合を再適用し、env で切り分けた（`..._COMPACT_FULL_HISTO
 
 ### 状態
 
-- 確定: kernel 層（spill / commit / 層対応 / bit-exact テスト・三者比較）と候補1・2。
-- 未確定: 単一 `k`/`S_0` 行の差の原因。decoder 統合の診断コードは**作業ツリーに未コミット**で残置。
-- 詳細は `docs/rnd/gdn/compact_commit_poc.md` を参照。
+- 確定: kernel 層（spill / commit / 層対応 / 三者比較 10/10）と候補1・2。
+- **除外済み**: conv、`S_0` snapshot、buffer アドレス重複、k の読み出し時点、`de0`、配線。
+- 未確定: key 次元の 1 要素が e2e のみ食い違う原因（kernel 単体の合成データでは再現せず、
+  決定論的）。history capture 側の可能性も未排除。
+- decoder 統合の診断コード（`PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT=1` ほか 2 種の env、
+  `[gdn-alloc]` / `[s0-check]` / `[compact-compare]` の m/n 分布診断）は**作業ツリーに未コミット**で残置。
+- 詳細と次の実験は `docs/rnd/gdn/compact_commit_poc.md` を参照。
 
 ---
 
