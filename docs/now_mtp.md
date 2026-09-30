@@ -32,8 +32,7 @@ MTP first-position acceptance の原因調査と、調査中に発見した
 
 | ファイル | 内容 |
 | --- | --- |
-| `include/phaseshift/models/qwen35/runtime/lm_head_proxy.h` | 証明用バッファと `select()` の `out_certified` を追加 |
-| `src/phaseshift/models/qwen35/runtime/lm_head_proxy.hip` | 証明付き pipeline に組み替え、既定を exact に変更 |
+| `include/phaseshift/models/qwen35/runtime/lm_head_proxy.h` + `src/.../lm_head_proxy.hip` | argmax 証明は不採用で元実装に復元。`PHASESHIFT_TARGET_LM_HEAD_PROXY` の既定を `1` → `0`（§4） |
 | `include/phaseshift/models/qwen35/runtime/spec_decode.h` | `MtpDraftPolicy::chain_post_norm`（既定 false） |
 | `src/phaseshift/models/qwen35/runtime/spec_decode.cpp` | draft chain の `hidden_out` / `hidden_out_normed` 切替 |
 | `src/apps/bench/mtp.hip` | `--mtp-hidden` / `--mtp-chain` / `--mtp-probe` / `--mtp-fixture`、accepted histogram・conditional 統計、rank・margin・cos 診断 |
@@ -166,43 +165,56 @@ INT2 coarse head → top-P 候補 → PSQ8 rerank → argmax
 Cauchy-Schwarz 誤差境界であって、**argmax 保存ではない**。
 `docs/developer/qwen35.md` にも保証内容の記述がなかった。
 
-### 修正
+### 対応（argmax 証明を試して不採用 → 既定 OFF に変更）
 
-`test_target_lm_proxy_fallback` と同じ形の厳密証明へ組み替えた。
+`test_target_lm_proxy_fallback` と同じ形の**厳密証明**を実装した。
 
 1. activation を E4M3 に量子化する
 2. `coarse + activation_l2 * error_l2` を全語彙の **upper logits** とする
 3. upper logits の上位 `pool+1` を取り、先頭 `pool` を候補とする
 4. 候補だけ PSQ8 で厳密に rerank する
-5. 最良候補の厳密 logit が **残り 1 つ目の upper logits より大きい**場合のみ certified。
-   満たさない場合は単体 launcher（exact 経路）へ fallback する
+5. `best > upper[pool+1]` のときだけ certified、外れたら exact 経路へ fallback
 
-最初に試した `coarse + act_l2 * max_error` という一括上界は締まりが悪く
-fallback が常時発生し、逆に遅くなったため、上位 `pool+1` の upper logits を
-`omitted_upper` にする方式に変更した。
+greedy equivalence は回復したが、計測で**採用できない**と判明した。
 
-### 結果
+**(1) 証明は実データで一度も通らない**
 
-- `--tokens-offset 345` を含む **31/31 offset で greedy equivalence PASS**
+`PHASESHIFT_QWEN35_KERNEL_TRACE` の `sampling` 最適化カウンタが
+`PROXY=0` と `PROXY=1 CERTIFY=1` の**両方で 43**（`phaseshift-compute` / max-new-tokens 128）。
+proxy が `SAMPLING` dispatch を消費していない＝証明失敗で常に exact へ落ちている。
+上界の桁が原因: `activation_l2 ≈ 107`（final norm 後の hidden ノルム）× INT2（4値）の
+行誤差で上界は十〜数百になるが、実際の logit margin は 0〜20。
+
+**(2) 証明失敗時も proxy の kernel は走る**
+
+GPU busy は exact 1901.4 ms に対し 1958.0 ms（+3.0%）だが、これは discard される
+無駄。さらに forward ごとの D2H（42 回 × 約 23 ms）で wall が
+63.55 → 43.99 tok/s（−31%）まで落ちる。
+証明用 kernel 自体は軽い（計 0.077 ms/call）ので、遅い原因は kernel ではなく **D2H sync**。
+
+**(3) 候補選択を `coarse` → `upper` に変えると品質が落ちる**
+
+`upper` は行ごとに `error_l2` が加算されるため、上位に残るのは「error が大きい行」。
+証明をスキップして proxy の答を採用すると
+`DFLASH2_ROUNDS/ACCEPTED` が `42/85` → **`68/59`** に崩れる。
+
+### 採用した対応
+
+- `LmHeadCandidateProxy` は**元の pipeline（候補を `coarse` で選ぶ）に戻した**
+- `PHASESHIFT_TARGET_LM_HEAD_PROXY` の既定を `1` → **`0`**（exact 経路）
+- `PHASESHIFT_TARGET_LM_HEAD_PROXY_CERTIFY` は**削除**
+
+証明を device 側で完結させても (1) と (2) では回復しない。
+証明が通るようになることが前提で、そのためには INT2 より狭い誤差境界が要る
+（候補を `coarse` で選び、候補外を追加で exact rerank する二段方式が候補）。
+
+結果は次のとおり:
+
+- `--tokens-offset 345` を含む 31/31 offset で greedy equivalence **PASS**
 - `test_target_lm_proxy_{certificate,fallback,upper_topn,error_bound}` 全て PASS
+  （kernel 級のテストは `draft_head_int2.h` を変えていないため維持）
 - K=1 acceptance は 0.662 で変化なし（acceptance には影響していなかった）
-
-### 既定を exact にした理由
-
-ctx256 / steps256 / K=1、verify 1 forward あたりの計測:
-
-| 経路 | ms/forward |
-| --- | ---: |
-| exact（proxy 無効、既定） | 37.4 |
-| proxy（証明なし） | 36.5 |
-| proxy（証明あり） | 57.7 |
-
-proxy 自体の利得は **2.4%** にとどまる一方、証明の判定に forward ごとの D2H が必要で
-CPU/GPU の重なりを失わせて +20 ms を生む。よって **既定は exact 経路**
-（`PHASESHIFT_TARGET_LM_HEAD_PROXY=0`）とした。
-
-証明を device 側で完結させれば proxy を有効化できるが、利得 2.4% に対して
-複雑化が大きいため実施しない。
+- DFlash2 は 63.55 tok/s（既定 OFF の代償 −2.38%）→ §7 と `docs/perf/current.md`
 
 ---
 
@@ -210,9 +222,8 @@ CPU/GPU の重なりを失わせて +20 ms を生む。よって **既定は exa
 
 | 変数 | 既定 | 意味 |
 | --- | --- | --- |
-| `PHASESHIFT_TARGET_LM_HEAD_PROXY` | `0` | `0` で exact 経路。`1` / `2` で proxy を有効化 |
-| `PHASESHIFT_TARGET_LM_HEAD_PROXY_POOL` | `32` | 候補数。上限 `kDflash2Int2MaxPool - 1` |
-| `PHASESHIFT_TARGET_LM_HEAD_PROXY_CERTIFY` | `1` | `0` で証明と fallback を省略。**greedy equivalence を満たさない** |
+| `PHASESHIFT_TARGET_LM_HEAD_PROXY` | `0` | `0` で exact 経路。`1` / `2` で近似 proxy を有効化（**argmax は保証されない**） |
+| `PHASESHIFT_TARGET_LM_HEAD_PROXY_POOL` | `32` | 候補数 |
 
 ---
 
@@ -245,10 +256,21 @@ CPU/GPU の重なりを失わせて +20 ms を生む。よって **既定は exa
   - MTP の較正 / 訓練は要件から**中止**
 - 診断フラグ `--mtp-fixture` の比較スクリプトは使い捨てであり
   `tools/` には置いていない（再実行する場合は本ファイル §3.3 の手順を参照）。
-- `models/Qwen3.8-27B-PSQ-mtpq4`（MTP 量子化版）は既存
-  `models/Qwen3.8-27B-PSQ` と別に保持している。旧 model へ置き換えると
-  `docs/perf/current.md` の数値が別 model の測定値になるため、
-  **置換するなら perf を再計測する**。
+- **model の置換と perf 再計測は完了**。`models/Qwen3.8-27B-PSQ` を MTP PSQ4 版に
+  差し替え、`docs/perf/current.md` を commit `f14d5c3c` / 2026-09-30 の計測値で更新した。
+  - pp2048 **2332.21** tok/s（前回 2327.66、+0.20%）
+  - tg128 **27.59** tok/s（前回 27.58、+0.04%）
+  - DFlash2 K7 **63.55** tok/s（前回 65.10、**−2.38%**）
+  - 正しさ契約は全一致（`GREEDY_TOKEN_SUM=2446188` /
+    `GENERATED_IDS` sha1 `47aebe55d048` / `DFLASH2_ROUNDS=84` /
+    `DFLASH2_ACCEPTED_DRAFTS=171`）
+  - DFlash2 の −2.38% は `LmHeadCandidateProxy` 既定 OFF の代償。
+    `2b90b202` の proxy を差し戻すと 65.20 が再現することを確認済み。
+    経緯は [rnd/mtp/mtp.md](rnd/mtp/mtp.md) §10.4。
+  - 旧 model（MTP 全 BF16）は削除済み（`git show 2b90b202:src/phaseshift/quantization/fpx/profile.cpp`
+    から再生成できる）。
+- proxy の argmax 証明は、実データで一度も通らないため不採用（§4）。
+  回復には INT2 より狭い誤差境界が必要で、これは**別課題**として扱う。
 
 ---
 

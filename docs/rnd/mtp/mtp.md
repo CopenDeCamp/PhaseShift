@@ -753,6 +753,8 @@ K の異なる run を引き算して per-position を推定しない。
 
 ## 10. LmHeadCandidateProxy と greedy equivalence
 
+### 10.1 症状
+
 `--tokens-offset 345 --context 1 --steps 4` で `greedy equivalence: FAIL`
 （`emitted 1245` / `expected 4220`）となった。`PHASESHIFT_TARGET_LM_HEAD_PROXY=0` で
 PASS することから `LmHeadCandidateProxy` が原因である。
@@ -761,22 +763,80 @@ proxy は INT2 coarse の上位を候補にして PSQ8 で rerank する**近似
 候補外だと取りこぼす。`test_target_lm_proxy_error_bound` の保証は per-logit の
 Cauchy-Schwarz 誤差境界であって argmax 保存ではない。
 
-Cauchy-Schwarz 上界（`coarse + act_l2 * max_err`）による証明は締まりが悪く fallback が
-常時発生し、逆に遅くなった。上位 `pool+1` の **upper logits** を `omitted_upper` に使う
-証明（`test_target_lm_proxy_fallback` と同じ形）へ変更した結果、全 31 offset で
-greedy equivalence が PASS した。
+### 10.2 argmax 証明は不採用
 
-ctx256 / steps256 / K=1 での計測（`verify` 1 forward あたり）:
+`upper_v = coarse_v + activation_l2 * error_l2` を exact logit の厳密な上界として全語彙に
+作り、上位 `pool+1` を取り、先頭 `pool` を候補に exact rerank、
+`best > upper[pool+1]` のときだけ採用して外れたら exact 経路へ fallback する証明を
+実装した（`test_target_lm_proxy_fallback` と同型）。greedy equivalence は回復したが、
+計測で次の3点が判明し**採用しなかった**。
 
-| 経路 | ms/forward |
-| --- | ---: |
-| exact（proxy 無効） | 37.4 |
-| proxy（証明なし） | 36.5 |
-| proxy（証明あり） | 57.7 |
+**(1) 証明は実データで一度も通らない**
 
-証明の判定に forward ごとの D2H が必要になり、CPU/GPU の重なりを失わせる。proxy 自体の
-利得は 2.4% にすぎないため、**既定は exact 経路**とする。証明を device 側で完結させる
-ことは別途の作業であり、利得が小さいため実施しない。
+`PHASESHIFT_QWEN35_KERNEL_TRACE` の `sampling` 最適化カウンタは、
+`phaseshift-compute`（max-new-tokens 128）で `PROXY=0` と `PROXY=1 CERTIFY=1` の
+**両方とも 43**。proxy が `SAMPLING` dispatch を消費していない＝`NotApplicable`＝
+証明失敗で常に exact 経路へ落ちていることを意味する。
+`test_target_lm_proxy_fallback` が `certified > 0` を満たすのは合成入力だけで、
+実 lm_head では満たさない。
+
+理由は上界の桁。`activation_l2` は final norm 後の hidden のノルムで約 107、
+INT2（4値）近似の行誤差 `error_l2` を掛けると上界は十〜数百になる。
+対して実際の logit margin は 0〜20。**Cauchy-Schwarz は INT2 の誤差に対して広すぎる。**
+
+**(2) 証明失敗時も proxy の kernel は走る**
+
+GPU busy は exact 1901.4 ms に対し証明ありで 1958.0 ms（+3.0%）。証明が通らず
+discard されるためこれは丸ごと無駄になる。さらに forward ごとの D2H（42 回 × 約 23 ms）で
+wall が 63.55 → 43.99 tok/s（−31%）まで落ちる。
+
+証明用 kernel 自体は軽い（`activation_l2` 0.051 / `target_upper_logits` 0.022 /
+`target_certified_argmax` 0.002 / `compact` 0.002 ms で計 0.077 ms/call）。
+遅いのは kernel ではなく **D2H sync**。
+
+**(3) 候補選択を `coarse` から `upper` に変えると品質が落ちる**
+
+上界 `upper` は行ごとに `error_l2` が加算されるため、`upper` の上位に選ばれるのは
+「error が大きい行」になり候補として劣化する。証明をスキップして proxy の答を
+採用した場合の実測は `DFLASH2_ROUNDS/ACCEPTED` が `42/85` から **`68/59`** に崩れた。
+
+### 10.3 採否
+
+- `LmHeadCandidateProxy` は元の pipeline（候補を `coarse` で選ぶ）に戻す
+- `PHASESHIFT_TARGET_LM_HEAD_PROXY` の既定を `1` → **`0`** に変更（exact 経路）
+- `PHASESHIFT_TARGET_LM_HEAD_PROXY_CERTIFY` は削除（証明しないため）
+
+device 側で証明を完結させても (1) と (2) のため回復しない。証明が通るようになることが
+前提で、そのためには INT2 より狭い誤差境界が要る
+（候補を `coarse` で選び、候補外を追加で exact rerank する二段方式が候補）。
+
+### 10.4 既定 OFF の代償（DFlash2 spec decode）
+
+`LmHeadCandidateProxy` は `batch.speculative_verify` の `ExecutionRole::Verify` で
+効くため、影響は DFlash2 の verify に出る。
+
+`phaseshift-compute --dflash2-drafts 7 --max-new-tokens 256`（GPU 1、3 rep）:
+
+| 条件 | DECODE_TOKENS_PER_SEC | DFLASH2_VERIFY_GPU_MS |
+| --- | ---: | ---: |
+| proxy 既定 ON（`2b90b202` の元実装 / lossy） | **65.20** | 3355.65 |
+| proxy 既定 OFF（exact・**採用**） | **63.55** | 3456.34 |
+
+帰属の切り分け:
+
+- **model 差ではない** — 同一バイナリで旧 model（MTP 全 BF16）を当てても 63.60。
+  MTP は DFlash2 経路で使われない。
+- **binary 差 = 既定変更** — `2b90b202` の proxy 実装を差し戻すと 65.20
+  （3 rep: 65.20 / 65.22 / 65.16）が再現し、同じく `PROXY=0` は 63.64。
+  `PHASESHIFT_TARGET_LM_HEAD_PROXY` の既定 `1` → `0` そのもの。
+
+正しさ契約は完全に一致: `GREEDY_TOKEN_SUM=2446188`、
+`GENERATED_IDS` sha1 `47aebe55d048`、`DFLASH2_ROUNDS=84`、
+`DFLASH2_ACCEPTED_DRAFTS=171`。
+
+ただしこの workload で proxy が生成結果を変えていないにすぎない。
+greedy equivalence を破る実例（10.1）が別に存在するため、
+**−2.38% は argmax を保証する代償**として受け入れた。
 
 ---
 
