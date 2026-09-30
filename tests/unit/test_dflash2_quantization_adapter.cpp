@@ -201,6 +201,22 @@ void test_qwen_contract_unchanged() {
                                       fpx::TensorRole::Output, 0u, 64u) ==
               fpx::WeightEncoding::PSQ8,
           "qwen_output_stays_psq8");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpOutput, 0u, 64u) ==
+              fpx::WeightEncoding::PSQ4,
+          "qwen_mtp_fc_psq4");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpAttention, 0u, 64u) ==
+              fpx::WeightEncoding::PSQ4,
+          "qwen_mtp_attn_psq4");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpFfn, 0u, 64u) ==
+              fpx::WeightEncoding::PSQ4,
+          "qwen_mtp_ffn_psq4");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpNorm, 0u, 64u) ==
+              fpx::WeightEncoding::BF16,
+          "qwen_mtp_norm_bf16");
 }
 
 void test_role_strings() {

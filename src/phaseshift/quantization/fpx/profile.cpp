@@ -17,16 +17,16 @@ WeightEncoding psq(TensorRole role, uint32_t li) {
         case TensorRole::MoeRouterBias:
         case TensorRole::MtpNorm:
         case TensorRole::MtpEmbedding:
-        case TensorRole::MtpOutput:
-        case TensorRole::MtpAttention:
-        case TensorRole::MtpFfn:
             return WeightEncoding::BF16;
+        case TensorRole::MtpOutput:
         case TensorRole::AttnQ:
         case TensorRole::AttnO:
         case TensorRole::AttnK:
         case TensorRole::AttnV:
         case TensorRole::FfnGate:
         case TensorRole::FfnUp:
+        case TensorRole::MtpAttention:
+        case TensorRole::MtpFfn:
         case TensorRole::ExpertGate:
         case TensorRole::ExpertUp:
         case TensorRole::SharedExpertGate:

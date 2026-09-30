@@ -778,3 +778,66 @@ ctx256 / steps256 / K=1 での計測（`verify` 1 forward あたり）:
 利得は 2.4% にすぎないため、**既定は exact 経路**とする。証明を device 側で完結させる
 ことは別途の作業であり、利得が小さいため実施しない。
 
+---
+
+## 11. MTP quantumization の A/B
+
+MTP（425M params、BF16 で 0.79 GiB）を量子化して draft を速くする検討。
+`--preset psq` の profile（`src/phaseshift/quantization/fpx/profile.cpp` の `psq()`）を
+変更し、`phaseshift-quantizer quantize --preset psq --backend hip --scope text-only`
+で再生成して比較した。比較対象は `models/Qwen3.8-27B-PSQ`（MTP 全 BF16）と生成物。
+
+非 MTP tensor は **1253 本すべてビット一致**であり、差分は MTP のみ。
+
+### 11.1 encoding の決定
+
+| `TensorRole` | 実体 | params | 初期案 | 採用 |
+| --- | --- | ---: | --- | --- |
+| `MtpOutput` | `mtp.fc.weight` (5120, 10240) | 52M | PSQ8 | **PSQ4** |
+| `MtpAttention` | `self_attn.{q,k,v,o}_proj` | 68M | PSQ4 | PSQ4 |
+| `MtpFfn` | `mlp.{gate,up,down}_proj` | 267M | PSQ4 | PSQ4 |
+| `MtpNorm` | norm 7本 | 1M | PSQ4 | **BF16**（`load_quantized_small` が 1 次元の量子化を拒否） |
+| `Output` | `lm_head.weight` | 1271M | PSQ8 | PSQ8（従来どおり） |
+
+`test_dflash2_quantization_adapter` に新契約の assert を 4 件追加（74/74 PASS）。
+
+### 11.2 Round 1: `mtp.fc` = PSQ8 — 否決
+
+| 条件 | acceptance base / new | draft ms/update base / new |
+| --- | --- | --- |
+| ctx32 K1 | 0.765 / 0.744 | 4.456 / **5.794** |
+| ctx32 K2 | 1.141 / 1.141 | 8.162 / **10.949** |
+| ctx256 K1 | 0.662 / 0.673 | 4.474 / **5.962** |
+| ctx256 K2 | 1.116 / 1.065 | 8.292 / **11.076** |
+
+draft が **+30〜34% 遅化**。`PHASESHIFT_QWEN35_KERNEL_TRACE=1` の
+`KERNEL_TRACE_FALLBACK LINEAR_PSQ8`（base は fallback 0）で原因を特定した。
+`linear_selector.cpp` の `kLinearShapeRules` には
+`{ 5120, 10240, kFamilyBf16 | kFamilyPsq4 }` があり **PSQ8 が未登録**。
+`select_psq8_gemm_config` が `nullopt` を返し `SelectorRejected` で
+`launch_model_dispatch_correctness`（参照実装）へ退避していた。
+rocprofv3 では `model_dispatch_kernel` 89 dispatch / 207 ms（2.33 ms/draft）。
+
+### 11.3 Round 2: MTP linear 8本すべて PSQ4 — 採用
+
+fallback は 0、`greedy equivalence` は全条件 PASS。
+
+| 条件 | acceptance base / new | draft ms/update base / new |
+| --- | --- | --- |
+| ctx32 K1 | 0.765 / 0.786 | 4.453 / **3.552**（−20%） |
+| ctx32 K2 | 1.141 / 1.141 | 8.252 / **6.442**（−22%） |
+| ctx256 K1 | 0.662 / 0.652 | 4.471 / **3.570**（−20%） |
+| ctx256 K2 | 1.116 / 1.151 | 8.281 / **6.484**（−22%） |
+
+acceptance の差は 4 条件すべて標本誤差内
+（n = 85〜154 rounds、`mean accepted/update` の標準誤差は約 ±4〜5pt）。
+
+- draft 速度: **−20〜22%**
+- メモリ: MTP linear 387M が 774 MiB → 約 218 MiB（約 556 MiB 削減）
+- required acceptance: **124/124 PASS**
+
+### 11.4 計測条件
+
+`phaseshift-bench mtp --device 1 --arena-gib 24 --draft-k {1,2} --spec --spec-only`、
+corpus は `tests/data/mtp_perf/prose.psktok`、`--verify-mode` 既定（Exact）。
+

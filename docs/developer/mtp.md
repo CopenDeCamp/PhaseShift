@@ -83,8 +83,15 @@ target の `Qwen35TextConfig` から次を用いる。
   loader は転置しない。PyTorch の `[out, in]` と一致する。
 - MTP 層数は **1** を要求する。checkpoint の MTP 層数が 1 以外なら読み込みを拒否する。
 - 必須 tensor が 1 つでも欠けると tensor 名付きで拒否する。
-- dtype / encoding は checkpoint の manifest に従う。現在の checkpoint は BF16 と
-  PSQ の双方で MTP 15 tensor を BF16 で保持する（MTP は量子化対象外）。
+- dtype / encoding は checkpoint の manifest に従う。`--preset psq` の MTP は
+  linear 8本（`mtp.fc` / `self_attn.{q,k,v,o}_proj` / `mlp.{gate,up,down}_proj`）を
+  PSQ4、norm 7本（`pre_fc_norm_embedding` / `pre_fc_norm_hidden` / `mtp.norm` /
+  層の `input_layernorm` / `post_attention_layernorm` / `q_norm` / `k_norm`）を
+  BF16 で保持する。norm が BF16 なのは `load_quantized_small` が 1 次元 tensor の
+  量子化を拒否するため。MTP KV は常に BF16。
+- MTP linear の encoding は `kLinearShapeRules` の whitelist と一致していなければ
+  ならず、外れると参照経路へ退避する。このため `mtp.fc`（out=5120, k=10240）は
+  PSQ8 にはできない。
 - `lm_head` は `tie_word_embeddings=true` のとき `embed_tokens` を使う
   （target と同一 weight）。MTP 専用の embedding / lm_head は持たない。
 

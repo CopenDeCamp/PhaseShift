@@ -22,6 +22,9 @@ MTP first-position acceptance の原因調査と、調査中に発見した
    予測している**ことによる。MTP 側の修正では改善しない。
 4. 調査中に **別不具合**を発見し修正した。`LmHeadCandidateProxy` が
    spec ON/OFF の greedy equivalence（必須要件）を破っていた。
+5. MTP linear 8本（fc / attn / ffn）を **PSQ4** にすると draft が
+   **−20〜22%** 高速化し、acceptance は標本誤差内で変化しない。詳細は §8。
+   MTP の較正 / 訓練は**中止**した。
 
 ---
 
@@ -231,11 +234,88 @@ CPU/GPU の重なりを失わせて +20 ms を生む。よって **既定は exa
 
 ## 7. 残課題
 
-- 必須 acceptance (`tests/run_required_acceptance.py`) は本レポート作成時点で**実行中**。
-  完了後、結果を確認すること。
+- 必須 acceptance (`tests/run_required_acceptance.py`) は **124/124 PASS**
+  （0 fail / 0 skip）。MTP 実モデル gate も `weight_real` / `spec_real` /
+  `gate3_replay` / `verify_divergence` が PASS。
+  `forward_real` は baseline（非量子化 model）でも同じく失敗する既存の環境問題
+  （arena 不足 + `artifacts/mtp_gate1` 欠落）であり回帰ではない。
 - acceptance を 0.84 以上へ上げる方針は未決定。選択肢:
-  - PSQ target 用に MTP を較正 / 訓練する（DFlash2 と同様）
   - 公開値 0.94-0.97 の測定条件を確認し、目標値の妥当性を先に確定する
   - MTP embedding / lm_head の BF16 化は計測上効果ゼロのため**実装しない**
+  - MTP の較正 / 訓練は要件から**中止**
 - 診断フラグ `--mtp-fixture` の比較スクリプトは使い捨てであり
   `tools/` には置いていない（再実行する場合は本ファイル §3.3 の手順を参照）。
+- `models/Qwen3.8-27B-PSQ-mtpq4`（MTP 量子化版）は既存
+  `models/Qwen3.8-27B-PSQ` と別に保持している。旧 model へ置き換えると
+  `docs/perf/current.md` の数値が別 model の測定値になるため、
+  **置換するなら perf を再計測する**。
+
+---
+
+## 8. MTP quantumization の A/B
+
+MTP（425M params、BF16 で 0.79 GiB）を量子化して draft を速くする検討。
+`--preset psq` の profile（`src/phaseshift/quantization/fpx/profile.cpp`）を変更し、
+`phaseshift-quantizer quantize --preset psq --backend hip --scope text-only` で
+再生成して比較した。詳細は [rnd/mtp/mtp.md](rnd/mtp/mtp.md) §11 が正本。
+
+非 MTP tensor は **1253 本すべてビット一致**であり、差分は MTP のみ。
+
+### 8.1 encoding の決定
+
+| `TensorRole` | 実体 | params | 初期案 | 採用 |
+| --- | --- | ---: | --- | --- |
+| `MtpOutput` | `mtp.fc.weight` (5120, 10240) | 52M | PSQ8 | **PSQ4** |
+| `MtpAttention` | `self_attn.{q,k,v,o}_proj` | 68M | PSQ4 | PSQ4 |
+| `MtpFfn` | `mlp.{gate,up,down}_proj` | 267M | PSQ4 | PSQ4 |
+| `MtpNorm` | norm 7本 | 1M | PSQ4 | **BF16**（`load_quantized_small` が 1 次元の量子化を拒否） |
+| `Output` | `lm_head.weight` | 1271M | PSQ8 | PSQ8（従来どおり） |
+
+### 8.2 Round 1: `mtp.fc` = PSQ8 — 否決
+
+draft が **+30〜34% 遅化**（4.46 → 5.79 / 8.16 → 10.95 ms/update）。
+
+`PHASESHIFT_QWEN35_KERNEL_TRACE=1` の `KERNEL_TRACE_FALLBACK LINEAR_PSQ8`
+（base は fallback 0）で原因を特定。`linear_selector.cpp` の `kLinearShapeRules` は
+`{ 5120, 10240, kFamilyBf16 | kFamilyPsq4 }` で **PSQ8 が未登録**、
+`select_psq8_gemm_config` が `nullopt` を返して
+`launch_model_dispatch_correctness`（参照実装）へ退避していた。
+rocprofv3 では `model_dispatch_kernel` 89 dispatch / 207 ms（2.33 ms/draft）。
+
+**遅延の原因は PSQ4 化ではなく、1 本だけが参照経路に落ちていたこと。**
+
+### 8.3 Round 2: MTP linear 8本すべて PSQ4 — 採用
+
+fallback 0、`greedy equivalence` 全条件 PASS。
+
+| 条件 | acceptance base / new | draft ms/update base / new |
+| --- | --- | --- |
+| ctx32 K1 | 0.765 / 0.786 | 4.453 / **3.552**（−20%） |
+| ctx32 K2 | 1.141 / 1.141 | 8.252 / **6.442**（−22%） |
+| ctx256 K1 | 0.662 / 0.652 | 4.471 / **3.570**（−20%） |
+| ctx256 K2 | 1.116 / 1.151 | 8.281 / **6.484**（−22%） |
+
+- acceptance の差は 4 条件すべて**標本誤差内**
+  （n = 85〜154 rounds、標準誤差 約 ±4〜5pt に対し −1.0〜+3.5pt）
+- draft 速度: **−20〜22%**
+- メモリ: MTP linear 387M が 774 MiB → 約 218 MiB（約 556 MiB 削減）
+
+### 8.4 検証
+
+| 対象 | 結果 |
+| --- | --- |
+| required acceptance | **124/124 PASS** |
+| `test_dflash2_quantization_adapter`（新契約 assert 4件追加） | **74/74 PASS** |
+| `test_qwen35_mtp_weight_real` | **PASS**（encoding-agnostic） |
+| `test_qwen35_mtp_spec_real` | **PASS**（`MTP_GATE3`） |
+| `test_qwen35_mtp_gate3_replay` | **PASS**（7/7） |
+| `test_qwen35_mtp_verify_divergence` | **PASS** |
+| `test_qwen35_mtp_forward_real` | baseline と同一失敗（既存の環境問題、回帰ではない） |
+
+`tools/` / `docs/` の BF16 前提の記述は `docs/developer/mtp.md`（loader 契約）を
+書き換えた。
+
+### 8.5 計測条件
+
+`phaseshift-bench mtp --device 1 --arena-gib 24 --draft-k {1,2} --spec --spec-only`、
+corpus は `tests/data/mtp_perf/prose.psktok`、`--verify-mode` 既定（Exact）。
