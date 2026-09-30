@@ -120,6 +120,7 @@ phaseshift_add_test(NAME test_dflash2_coarse_topn SOURCE unit/test_dflash2_coars
 phaseshift_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_psq8_rerank SOURCE unit/test_dflash2_psq8_rerank.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
+phaseshift_add_test(NAME test_constraint_candidates SOURCE unit/test_constraint_candidates.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_error_bound SOURCE unit/test_target_lm_proxy_error_bound.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_upper_topn SOURCE unit/test_target_lm_proxy_upper_topn.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_certificate SOURCE unit/test_target_lm_proxy_certificate.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
@@ -257,6 +258,7 @@ add_custom_target(
         test_dflash2_coarse_topn
         test_dflash2_radix_topn
         test_dflash2_psq8_rerank
+        test_constraint_candidates
         test_target_lm_proxy_error_bound
         test_target_lm_proxy_upper_topn
         test_target_lm_proxy_certificate
