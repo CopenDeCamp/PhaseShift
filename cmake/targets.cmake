@@ -188,6 +188,7 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/mtp_kv_state.cpp
     src/phaseshift/models/qwen35/runtime/mtp_executor.hip
     src/phaseshift/models/qwen35/runtime/spec_decode.cpp
+    src/phaseshift/models/qwen35/runtime/ngram_tail.cpp
     src/phaseshift/models/qwen35/runtime/spec_decoder.cpp
     src/phaseshift/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/phaseshift/models/qwen35/runtime/gdn_spec_history.hip

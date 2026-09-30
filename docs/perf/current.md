@@ -73,6 +73,12 @@ run 間のばらつきは 0.15%。
 
 run 間のばらつきは 0.03%。
 
+> このセクションは Gate3（[../rnd/spec_decode/ngram_tail_gate3.md](../rnd/spec_decode/ngram_tail_gate3.md)、
+> target lm_head proxy の停止と NgramTail option の追加）**以前**の revision で
+> 測った値である。DFlash2 有効時は lm_head proxy が既定で停止するため、
+> acceptance / tok/s はこの表から変わる。現行既定は未再計測のため、この表は
+> 現行既定の性能を保証しない。正本 model が計測環境にない場合は数値を書き換えない。
+
 ## 正しさ契約
 
 速度の数値は生成結果が一致している rep からのみ採用する。

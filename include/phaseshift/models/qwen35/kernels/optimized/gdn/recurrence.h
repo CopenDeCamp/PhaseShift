@@ -52,6 +52,14 @@ struct GdnRecurrenceArgs {
 
     int32_t row_override = -1;
     uint32_t capture_verify_only = 0;
+
+    float* compact_delta = nullptr;
+    float* compact_k = nullptr;
+    float* compact_a = nullptr;
+    uint64_t compact_delta_layer_stride = 0;
+    uint64_t compact_k_layer_stride = 0;
+    uint64_t compact_a_layer_stride = 0;
+    uint32_t compact_rows = 0;
 };
 
 hipError_t
@@ -113,6 +121,13 @@ bool gdn_recurrence_decode_rows_supported(const GdnRecurrenceArgs& args);
 
 hipError_t
 launch_gdn_recurrence_f32_wmma_decode_rows_exact(
+    const GdnRecurrenceArgs& args,
+    hipStream_t stream);
+
+bool gdn_recurrence_commit_supported(const GdnRecurrenceArgs& args);
+
+hipError_t
+launch_gdn_recurrence_f32_wmma_commit(
     const GdnRecurrenceArgs& args,
     hipStream_t stream);
 

@@ -18,6 +18,7 @@
 
 - [quantization/kernel_optimization_history.md](quantization/kernel_optimization_history.md) — PSQ / GEMM / preshuffle / scale / codebook / iMatrix / FP8・MXFP4 の検証履歴
 - [gdn/optimization_history.md](gdn/optimization_history.md) — GDN recurrence / conv / chunked scan / WMMA 数値挙動
+- [gdn/compact_commit_poc.md](gdn/compact_commit_poc.md) — GDN compact-log commit の PoC（full state snapshot / rerun の置き換え検証）
 - [attention/optimization_history.md](attention/optimization_history.md) — paged attention decode / prefill、KV split/reduce
 - [runtime/execution_overhead.md](runtime/execution_overhead.md) — prefill・decode コスト内訳、kernel gap、HIP Graph / keep-alive
 - [kernel/optimization_history.md](kernel/optimization_history.md) — RoPE 等の単独 kernel
@@ -30,6 +31,9 @@
 - [dflash2/spec_decode_loops_adoption.md](dflash2/spec_decode_loops_adoption.md) — draft loop 設計を PhaseShift へどう適用したか
 - [dflash2/external_facts_adoption.md](dflash2/external_facts_adoption.md) — 外部 DFlash2 実装 fact を PhaseShift でどう検証・採用したか
 - [mtp/mtp.md](mtp/mtp.md) — MTP（内蔵 drafter）の Gate 記録（正本）
+- [spec_decode/ngram_tail_gate1.md](spec_decode/ngram_tail_gate1.md) — NgramTail Gate 1（committed-history tail extension の候補品質検証と Gate 2 推奨）
+- [spec_decode/ngram_tail_gate2.md](spec_decode/ngram_tail_gate2.md) — NgramTail Gate 2（DFlash2 + NgramTail live composite の正しさと break-even 測定）
+- [spec_decode/ngram_tail_gate3.md](spec_decode/ngram_tail_gate3.md) — NgramTail Gate 3（production 統合、opt-in 判定と history guard / lm_head proxy の決定）
 
 ## Qwen4Exp (Qwen3.8-Flash-Next)
 

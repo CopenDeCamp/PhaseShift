@@ -340,12 +340,19 @@ kernel へ切り替える。
 - **decode / prefill**: `Fast`。batch-invariant な decode 経路（M=1 は exact-rows）を使う。
 - **verify**:
   - `Fast`（既定）: 既存の fast path。
-  - `Exact`: bf16 linear は `1 <= rows <= 16` で `Bf16GemmConfig{ExactRows, rows}` を選び、
-    `gemm_bf16_exact_rows_kernel` で row ごとの K 還元順序を M=1 と一致させる。
-    GDN recurrence は geometry に応じて exact 経路を選ぶ。27B geometry では
-    decode M=1 と同じ `decode1` 系（`launch_gdn_recurrence_f32_wmma_decode1_serial`、
-    条件が合えば multi-row 版）を使い、丸め順を decode と一致させる。
-    それ以外の geometry は `wmma_serial` を使う。
+  - `Exact`: bf16 linear は `1 <= rows <= 64`（`kBf16GemmExactRowsMax`）で
+    `Bf16GemmConfig{ExactRows, rows}` を選び、`gemm_bf16_exact_rows_kernel` で row ごとの
+    K 還元順序を M=1 と一致させる。`launch_gemm_bf16_exact_rows()` は
+    `kBf16GemmExactRowsKernelMax = 16` 行ずつ chunk launch し、chunk 内でも M=1 と
+    bit-exact な還元を保つ。
+    GDN recurrence の演算モードは `gdn_recurrence_lossy_enabled()` が決める（既定 lossy、
+    `PHASESHIFT_GDN_RECURRENCE_EXACT=1` で exact）。verify-exact の lossy 時は geometry に
+    応じて decode1 系（`decode1_serial`、条件が合えば multi-row 版）、lossy off 時は
+    `wmma_serial` を選ぶ。どちらの serial path も GDN spec history を capture する。
+    decode attention は M=1 decode と同じ split 経路（`max_visible_tokens >= 2048` で S=16）
+    を使う。split と非 split は f32 丸めが一致しないため、verify rows が split の
+    partial workspace（`kDecodeAttnPartialBytes`）に収まる必要がある。workspace は R64 の
+    最大 verify rows（64）まで split を維持できる大きさにする。
 
 `SpecDecoderConfig::verify_numeric_mode` の既定は `Fast` である。`create_spec_decoder`
 は環境変数 `PHASESHIFT_VERIFY_EXACT=1` が設定されているときだけ `Exact` へ上書きする。

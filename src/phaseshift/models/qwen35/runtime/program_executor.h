@@ -17,7 +17,7 @@ namespace ps::qwen35::runtime {
 
 class LmHeadCandidateProxy;
 
-constexpr uint64_t kDecodeAttnPartialBytes = 8u * 1024u * 1024u;
+constexpr uint64_t kDecodeAttnPartialBytes = 32u * 1024u * 1024u;
 
 struct HostResolvedValue {
     void* ptr = nullptr;
@@ -81,6 +81,7 @@ struct HostExecutionContext {
     ::ps::runtime::VerifyNumericMode numeric_mode =
         ::ps::runtime::VerifyNumericMode::Fast;
     GdnSpecHistoryDeviceView gdn_spec_history{};
+    GdnCompactLogDeviceView gdn_compact{};
 };
 
 inline bool verify_exact_active(const HostExecutionContext& ctx) noexcept {

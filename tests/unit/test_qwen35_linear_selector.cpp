@@ -112,12 +112,12 @@ void test_bf16() {
           "bf16 rows=1 weight unaligned -> Wmma");
 
     bool exact_ok = true;
-    for (uint32_t rows = 2u; rows <= 16u; ++rows) {
+    for (uint32_t rows = 2u; rows <= ps::kernel::kBf16GemmExactRowsMax; ++rows) {
         exact_ok = exact_ok &&
                    is_bf16(sel_bf16(rows, 1024, 2560, 2560, true, true, true),
                            Bf16GemmConfigId::ExactRows, static_cast<uint8_t>(rows));
     }
-    check(exact_ok, "bf16 verify_exact rows 2..16 aligned -> ExactRows(rows)");
+    check(exact_ok, "bf16 verify_exact rows 2..64 aligned -> ExactRows(rows)");
 
     check(is_bf16(sel_bf16(8, 1024, 2560, 2560, false, true, true),
                   Bf16GemmConfigId::Wmma, 0u),
@@ -129,8 +129,11 @@ void test_bf16() {
                   Bf16GemmConfigId::WmmaWide, 0u),
           "bf16 verify_exact rows=65 -> WmmaWide");
     check(is_bf16(sel_bf16(17, 1024, 2560, 2560, true, true, true),
-                  Bf16GemmConfigId::Wmma, 0u),
-          "bf16 verify_exact rows=17 -> Wmma");
+                  Bf16GemmConfigId::ExactRows, 17u),
+          "bf16 verify_exact rows=17 -> ExactRows(17)");
+    check(is_bf16(sel_bf16(64, 1024, 2560, 2560, true, true, true),
+                  Bf16GemmConfigId::ExactRows, 64u),
+          "bf16 verify_exact rows=64 -> ExactRows(64)");
 
     check(is_bf16(sel_bf16(2, 32, 2560, 2560, true, true, false),
                   Bf16GemmConfigId::WmmaKPartition, 0u),

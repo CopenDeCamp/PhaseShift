@@ -1103,3 +1103,50 @@ PHASESHIFT_GDN_CONV1D_TILE=0 ./build/phaseshift-bench pp \
   --model-dir models/Qwen3.8-27B-PSQ --prompt-tokens 2048 --mode forward \
   --page-tokens 16 --arena-gib 24 --runs 1 --warmup 0 --device 1
 ```
+
+---
+
+## 7.96 GDN recurrence exact serial path の history capture 欠落の修正（2026-09-29）
+
+### 症状
+
+`PHASESHIFT_GDN_RECURRENCE_EXACT=1`（lossy off）の verify-exact 経路では、
+`gdn_recurrence_wmma_decode1_supported()` が false になるため dispatch variant が
+`WmmaSerial`（`gdn_recurrence_wmma_impl<false, true>`）へ変わる。しかし GDN spec history の
+capture は decode1 kernel（`phaseshift_qwen35_gdn_recurrence_wmma_decode1`）の
+`row_override >= 0` 条件付きブロックにのみ実装されており、`WmmaSerial` は
+`row_override` を設定しないため history が 1 行も書かれない。
+
+その結果 store/restore を使う history mode では、`restore_gdn_spec_history()` が
+未初期化の history 行を recurrent state へコピーし、generation が崩壊する。
+Gate 2A（`test_dflash2_ngram_tail_gate2`, correctness mode）では parity 0/24 となった。
+
+| lossy | verify rows と variant | capture |
+| --- | --- | --- |
+| ON（既定） | 2/4/8 → DecodeRowsExact、それ以外 → Decode1Serial | あり |
+| OFF（exact） | 全 rows → WmmaSerial | **なし（本不具合）** |
+
+### 修正
+
+`gdn_recurrence_wmma_body<kLossy, kSerialRows>` の serial chunk（`kSerialRows=true`
+では 1 chunk = 1 行）の計算終端で、state 更新後の `Sacc` を history 行 `ci` へ書く。
+条件と書き込みレイアウトは `gdn_recurrence_wmma_decode_rows_exact_impl<kRows>` と同一
+（`ci < capture_rows`、`capture_verify_only == 0 || req.execution_class == SPEC_VERIFY`、
+`recurrent_history + ci * row_stride + state_index * layer_stride + v_head * hd * hv`）。
+
+history 行 `r` の意味は decode1 / decode_rows_exact と同じく「先頭 r+1 行を処理した後の
+state」である。serial path は 1 リクエストの verify pass を想定しており、index は
+request-relative（`row_begin` を 0 とする）とした。
+
+既定は lossy のままとし（`PHASESHIFT_GDN_RECURRENCE_EXACT=1` で exact）、
+本修正は lossy / exact 両方の serial path に capture を追加する。本モデルの lossy 経路は
+DecodeRowsExact / Decode1Serial を選ぶため、lossy の挙動は変わらない。
+
+### 検証
+
+- 新規 `test_gdn_recurrence_exact_history`（required）: `PHASESHIFT_GDN_RECURRENCE_EXACT=1`
+  で exact serial と sequential exact M=1 の state / output / history が bit-exact
+  （rows = 1/2/4/8/12/17、partial capture を含む）。
+- Gate 2A を `PHASESHIFT_GDN_RECURRENCE_EXACT=1` + `PHASESHIFT_TARGET_LM_HEAD_PROXY=0`
+  で実行: parity **24/24**、per-round violations **0**。
+- 既定 lossy の Gate 2A は従来どおり parity 24/24。

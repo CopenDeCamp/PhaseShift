@@ -4,7 +4,8 @@
 
 namespace ps::kernel {
 
-inline constexpr uint32_t kBf16GemmExactRowsMax = 16u;
+inline constexpr uint32_t kBf16GemmExactRowsMax = 64u;
+inline constexpr uint32_t kBf16GemmExactRowsKernelMax = 16u;
 inline constexpr uint32_t kBf16GemmSplitKMaxOutFeatures = 256u;
 inline constexpr uint32_t kBf16GemmWideMinRows = 65u;
 inline constexpr uint32_t kBf16GemmExactKAlignment = 8u;

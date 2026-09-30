@@ -201,6 +201,7 @@ struct PendingBatch {
 
 struct ExecuteBatchOptions {
     runtime::GdnSpecHistoryDeviceView gdn_spec_history{};
+    runtime::GdnCompactLogDeviceView gdn_compact{};
 };
 
 Result<PendingBatch> submit_batch(
