@@ -27,6 +27,8 @@
 #include <atomic>
 #include <new>
 #include <phaseshift/models/qwen35/runtime/embedding_selector.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/optimized/sampling_common.h>
 
 namespace ps {
 namespace qwen35 {
@@ -181,6 +183,8 @@ struct PreparedBatch {
     uint32_t num_outputs = 0;
     uint32_t num_sampled_outputs = 0;
     uint32_t num_stochastic_outputs = 0;
+    bool stochastic_topk_eligible = false;
+    uint32_t stochastic_top_k = 0;
 };
 
 struct ReservationEntry {
@@ -222,6 +226,8 @@ Status build_host_execution_context(
     const runtime::GdnCompactLogDeviceView& gdn_compact,
     const uint32_t* constraint_masks,
     uint32_t constraint_mask_words,
+    bool stochastic_topk_eligible,
+    uint32_t stochastic_top_k,
     runtime::HostExecutionContext& ctx) {
     if (status_ptr == nullptr) {
         return Status::invalid_argument("status pointer must be non-null", __FILE__, __LINE__);
@@ -337,6 +343,16 @@ Status build_host_execution_context(
         (!executor.constraint_allowed_counts_host.empty())
             ? executor.constraint_allowed_counts_host.data()
             : nullptr;
+    ctx.stochastic_topk_eligible = stochastic_topk_eligible;
+    ctx.stochastic_top_k = stochastic_top_k;
+    ctx.stochastic_topk_ids = executor.stochastic_topk_ids.data<int32_t>();
+    ctx.stochastic_topk_logits = executor.stochastic_topk_logits.data<float>();
+    ctx.stochastic_topk_scratch = executor.stochastic_topk_scratch.data<uint8_t>();
+    ctx.stochastic_topk_partitions = executor.stochastic_topk_partitions;
+    ctx.stochastic_topk_scratch_bytes =
+        static_cast<uint32_t>(executor.stochastic_topk_scratch_bytes);
+    ctx.stochastic_topk_active_counts =
+        executor.stochastic_topk_active_counts.data<uint32_t>();
     ctx.lm_head_proxy = executor.lm_head_proxy.valid() ? &executor.lm_head_proxy : nullptr;
     ctx.lm_head_shadow_pending = false;
     ctx.lm_head_shadow_full = nullptr;
@@ -603,6 +619,50 @@ Result<PendingBatch> submit_co_batch(
     prep.num_outputs = output_count;
     prep.num_sampled_outputs = sampled_count;
     prep.num_stochastic_outputs = stochastic_count;
+
+    bool stochastic_topk_eligible = false;
+    uint32_t stochastic_top_k = 0u;
+    const bool topk_workspace_ready =
+        executor.stochastic_topk_ids.data<int32_t>() != nullptr &&
+        executor.stochastic_topk_logits.data<float>() != nullptr &&
+        executor.stochastic_topk_scratch.data<uint8_t>() != nullptr &&
+        executor.stochastic_topk_scratch_bytes > 0u;
+    if (stochastic_count > 0u && sampled_count == output_count &&
+        stochastic_count == output_count && topk_workspace_ready) {
+        bool ok = true;
+        for (uint32_t i = 0u; i < R && ok; ++i) {
+            if (staging[i].output_count == 0u) continue;
+            if (staging[i].sampling.mode !=
+                static_cast<uint8_t>(runtime::SamplingMode::Stochastic)) {
+                ok = false;
+                break;
+            }
+            const uint32_t k = staging[i].sampling.top_k;
+            if (k == 0u || k > ps::kernel::kSamplingMaxTopK) {
+                ok = false;
+                break;
+            }
+            if (batch.requests[i].token_constraint) {
+                ok = false;
+                break;
+            }
+            if (stochastic_top_k == 0u)
+                stochastic_top_k = k;
+            else if (stochastic_top_k != k) {
+                ok = false;
+                break;
+            }
+        }
+        stochastic_topk_eligible = ok && stochastic_top_k > 0u;
+    }
+    if (stochastic_topk_eligible) {
+        for (uint32_t i = 0u; i < R; ++i) {
+            if (staging[i].output_count == 0u) continue;
+            staging[i].sampling.reserved[0] |= ps::kernel::kSamplingTopKPathFlag;
+        }
+    }
+    prep.stochastic_topk_eligible = stochastic_topk_eligible;
+    prep.stochastic_top_k = stochastic_top_k;
     const bool any_constraint =
         batch.constraint_masks != nullptr && batch.constraint_mask_words > 0u &&
         executor.config.constraint_mask_words == batch.constraint_mask_words &&
@@ -880,7 +940,8 @@ Result<PendingBatch> submit_co_batch(
             min_visible_tokens, max_visible_tokens, exec_role,
             exec_numeric_mode, options.gdn_spec_history, options.gdn_compact,
             any_constraint ? executor.constraint_mask_device.data<uint32_t>() : nullptr,
-            any_constraint ? batch.constraint_mask_words : 0u, ctx);
+            any_constraint ? batch.constraint_mask_words : 0u,
+            prep.stochastic_topk_eligible, prep.stochastic_top_k, ctx);
         if (!stq.ok()) return stq;
 
         const uint32_t dispatch_count =
@@ -1771,6 +1832,26 @@ Result<Executor> create_model_executor(
         ex.constraint_mask_host.assign(
             static_cast<std::size_t>(MO) * ex.config.constraint_mask_words, 0xFFFFFFFFu);
         ex.constraint_allowed_counts_host.assign(MO, UINT32_MAX);
+    }
+    if (V > 0u && MO > 0u) {
+        ex.stochastic_topk_partitions = ps::kernel::dflash2_radix_default_partitions(V);
+        const std::size_t radix_bytes = ps::kernel::dflash2_radix_topn_scratch_bytes(
+            MO, ex.stochastic_topk_partitions, V);
+        if (radix_bytes > 0u) {
+            st = allocate_contiguous_tensor<int32_t>(
+                arena, {MO, ps::kernel::kSamplingMaxTopK}, ex.stochastic_topk_ids);
+            if (!st.ok()) return st;
+            st = allocate_contiguous_tensor<float>(
+                arena, {MO, ps::kernel::kSamplingMaxTopK}, ex.stochastic_topk_logits);
+            if (!st.ok()) return st;
+            st = allocate_contiguous_tensor<uint8_t>(
+                arena, {static_cast<uint32_t>(radix_bytes)}, ex.stochastic_topk_scratch);
+            if (!st.ok()) return st;
+            st = allocate_contiguous_tensor<uint32_t>(
+                arena, {MO}, ex.stochastic_topk_active_counts);
+            if (!st.ok()) return st;
+            ex.stochastic_topk_scratch_bytes = radix_bytes;
+        }
     }
     st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.token_hidden);
     if (!st.ok()) return st;

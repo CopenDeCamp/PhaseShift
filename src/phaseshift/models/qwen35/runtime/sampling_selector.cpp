@@ -1,4 +1,5 @@
 #include <phaseshift/models/qwen35/runtime/sampling_selector.h>
+#include <phaseshift/models/qwen35/kernels/optimized/sampling_limits.h>
 
 namespace ps::qwen35::runtime {
 namespace {
@@ -22,6 +23,15 @@ const SamplingRule kRules[] = {
 SamplingChoice select_sampling_implementation(const SamplingSelectorInput& in) {
     if (in.outputs == 0) return {SamplingImplementation::Correctness, 0};
     const SamplingBatchMode mode = derive_mode(in);
+    if (mode == SamplingBatchMode::HasStochastic) {
+        const bool topk_ready = in.stochastic_topk_eligible &&
+                                in.stochastic_outputs == in.outputs &&
+                                in.sampled_outputs == in.outputs &&
+                                in.stochastic_top_k > 0u &&
+                                in.stochastic_top_k <= ::ps::kernel::kSamplingMaxTopK &&
+                                in.stochastic_topk_workspace;
+        if (topk_ready) return {SamplingImplementation::StochasticRadixTopK, 0};
+    }
     for (const auto& r : kRules) {
         if (r.vocab_size != in.vocab_size) continue;
         if (r.batch_mode != mode) continue;

@@ -15,6 +15,7 @@ enum class SamplingImplementation : uint8_t {
     SingleBlock = 1,
     Partitioned = 2,
     StochasticSingleBlock = 3,
+    StochasticRadixTopK = 4,
 };
 
 struct SamplingChoice {
@@ -28,6 +29,9 @@ struct SamplingSelectorInput {
     uint32_t sampled_outputs = 0;
     uint32_t stochastic_outputs = 0;
     uint32_t scratch_pair_capacity = 0;
+    bool stochastic_topk_eligible = false;
+    uint32_t stochastic_top_k = 0;
+    bool stochastic_topk_workspace = false;
 };
 
 struct SamplingRule {

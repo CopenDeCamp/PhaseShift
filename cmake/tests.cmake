@@ -220,6 +220,7 @@ phaseshift_add_test(NAME test_qwen35_sampling_params SOURCE unit/test_qwen35_sam
 target_include_directories(test_qwen35_sampling_params PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_qwen35_sampling_rng SOURCE unit/test_qwen35_sampling_rng.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_stochastic_sampling SOURCE kernels/optimized/test_stochastic_sampling.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu)
+phaseshift_add_test(NAME test_stochastic_topk SOURCE kernels/optimized/test_stochastic_topk.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 
 
 # Default required build unit. Required acceptance builds only this target.
@@ -310,6 +311,7 @@ add_custom_target(
         test_qwen35_sampling_params
         test_qwen35_sampling_rng
         test_stochastic_sampling
+        test_stochastic_topk
         test_qwen35_mtp_lowering
         test_qwen35_lowering_contract
         test_qwen35_mtp_primitives

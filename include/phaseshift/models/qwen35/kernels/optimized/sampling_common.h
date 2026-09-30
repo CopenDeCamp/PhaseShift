@@ -2,6 +2,7 @@
 
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/program/device_program.h>
+#include <phaseshift/models/qwen35/kernels/optimized/sampling_limits.h>
 
 #include <hip/hip_runtime.h>
 
@@ -69,6 +70,12 @@ __device__ __forceinline__ bool sampling_token_allowed(
     return ((constraint.mask[token_id >> 5u] >> (token_id & 31u)) & 1u) != 0u;
 }
 
+struct SamplingTopKView {
+    const int32_t* ids = nullptr;
+    const float* logits = nullptr;
+    uint32_t count = 0;
+};
+
 __host__ __device__ __forceinline__ SamplingRowParams sampling_row_params(
     const ::ps::runtime::DeviceSamplingParams& p) {
     SamplingRowParams r;
@@ -79,6 +86,11 @@ __host__ __device__ __forceinline__ SamplingRowParams sampling_row_params(
     r.seed = p.seed;
     r.sample_index = p.sample_index;
     return r;
+}
+
+__host__ __device__ __forceinline__ bool sampling_topk_path_enabled(
+    const ::ps::runtime::DeviceSamplingParams& p) {
+    return (p.reserved[0] & kSamplingTopKPathFlag) != 0u;
 }
 
 __device__ __forceinline__ void sampling_report_error(uint32_t* error_word) {
@@ -296,6 +308,180 @@ __device__ __forceinline__ void sampling_sample_row(
         }
     }
     __syncthreads();
+}
+
+__device__ __forceinline__ void sampling_topk_active_row(
+    const float* __restrict__ row,
+    uint32_t vocab_size,
+    const SamplingRowParams& params,
+    const SamplingConstraint& constraint,
+    const SamplingTopKView& topk,
+    int32_t* __restrict__ out_token,
+    uint32_t* error_word,
+    uint32_t* attempt_count = nullptr,
+    uint32_t* active_count_out = nullptr) {
+    using namespace sampling_detail;
+
+    __shared__ float s_val[1024];
+    __shared__ uint32_t s_tok[1024];
+    __shared__ double s_acc[1024];
+    __shared__ uint32_t s_active[kSamplingMaxTopK];
+
+    if (attempt_count != nullptr && threadIdx.x == 0u) *attempt_count = 0u;
+
+    if (params.mode == kSamplingNoneMode) {
+        if (threadIdx.x == 0u) *out_token = -1;
+        __syncthreads();
+        return;
+    }
+
+    if (params.mode == kSamplingGreedyMode) {
+        float best_value = kNegInf;
+        uint32_t best_token = kNoToken;
+        for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
+            if (!sampling_token_allowed(constraint, v)) continue;
+            const float val = row[v];
+            if (argmax_better(val, v, best_value, best_token)) {
+                best_value = val;
+                best_token = v;
+            }
+        }
+        block_argmax(best_value, best_token, s_val, s_tok);
+        if (threadIdx.x == 0u) {
+            *out_token = best_token == kNoToken ? -1 : static_cast<int32_t>(best_token);
+        }
+        __syncthreads();
+        if (best_token == kNoToken && !constraint.allow_empty) {
+            sampling_report_error(error_word);
+        }
+        return;
+    }
+
+    const uint32_t count = topk.count;
+    if (vocab_size == 0u || !(params.temperature > 0.0f) || topk.ids == nullptr ||
+        topk.logits == nullptr || count == 0u || count > kSamplingMaxTopK) {
+        sampling_report_error(error_word);
+        if (threadIdx.x == 0u) *out_token = -1;
+        __syncthreads();
+        return;
+    }
+
+    const float temperature = params.temperature;
+
+    float lmax = kNegInf;
+    uint32_t nan_count = 0u;
+    for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
+        const float val = row[v];
+        if (val != val) nan_count = 1u;
+        if (val > lmax) lmax = val;
+    }
+    lmax = block_max(lmax, s_val);
+    nan_count = block_sum_u32(nan_count, s_tok);
+
+    bool usable = (isfinite(lmax) != 0) && lmax > kNegInf && nan_count == 0u;
+    double z = 0.0;
+    if (usable && params.top_p < 1.0f) {
+        for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
+            z += static_cast<double>(::expf((row[v] - lmax) / temperature));
+        }
+        z = block_sum_f64(z, s_acc);
+        usable = (isfinite(z) != 0) && z > 0.0;
+    }
+
+    if (!usable) {
+        if (!constraint.allow_empty) sampling_report_error(error_word);
+        if (threadIdx.x == 0u) *out_token = -1;
+        __syncthreads();
+        return;
+    }
+
+    const bool top_p_active = params.top_p < 1.0f;
+    const double top_p_mass = top_p_active ? static_cast<double>(params.top_p) * z : 0.0;
+    if (threadIdx.x == 0u) {
+        double prefix = 0.0;
+        uint32_t active = 0u;
+        for (uint32_t i = 0u; i < count; ++i) {
+            const bool take = !top_p_active || prefix < top_p_mass;
+            s_active[i] = take ? 1u : 0u;
+            if (take) ++active;
+            prefix += static_cast<double>(
+                ::expf((topk.logits[i] - lmax) / temperature));
+        }
+        if (active_count_out != nullptr) *active_count_out = active;
+    }
+    __syncthreads();
+
+    float best_score = kNegInf;
+    uint32_t best_token = kNoToken;
+    for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
+        if (s_active[i] == 0u) continue;
+        const uint32_t token = static_cast<uint32_t>(topk.ids[i]);
+        const float u = sampling_uniform(params.seed, params.sample_index, 0u, token);
+        const float score =
+            (topk.logits[i] - lmax) / temperature + sampling_gumbel(u);
+        if (argmax_better(score, token, best_score, best_token)) {
+            best_score = score;
+            best_token = token;
+        }
+    }
+    block_argmax(best_score, best_token, s_val, s_tok);
+
+    const int32_t result =
+        best_token == kNoToken ? -1 : static_cast<int32_t>(best_token);
+    if (result < 0 && !constraint.allow_empty) sampling_report_error(error_word);
+    if (threadIdx.x == 0u) {
+        *out_token = result;
+        if (attempt_count != nullptr) {
+            *attempt_count = (result < 0) ? kMaxSamplingAttempts : 1u;
+        }
+    }
+    __syncthreads();
+}
+
+__device__ __forceinline__ void sampling_topk_select_reference(
+    const float* __restrict__ row,
+    uint32_t vocab_size,
+    uint32_t count,
+    int32_t* __restrict__ ids,
+    float* __restrict__ values) {
+    using namespace sampling_detail;
+
+    __shared__ float s_val[1024];
+    __shared__ uint32_t s_tok[1024];
+    __shared__ uint32_t s_taken[kSamplingMaxTopK];
+
+    if (threadIdx.x == 0u) {
+        for (uint32_t i = 0u; i < count; ++i) s_taken[i] = 0xFFFFFFFFu;
+    }
+    __syncthreads();
+
+    for (uint32_t it = 0u; it < count; ++it) {
+        float best_value = kNegInf;
+        uint32_t best_token = kNoToken;
+        for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
+            bool taken = false;
+            for (uint32_t t = 0u; t < it; ++t) {
+                if (s_taken[t] == v) {
+                    taken = true;
+                    break;
+                }
+            }
+            if (taken) continue;
+            const float val = row[v];
+            if (argmax_better(val, v, best_value, best_token)) {
+                best_value = val;
+                best_token = v;
+            }
+        }
+        block_argmax(best_value, best_token, s_val, s_tok);
+        if (threadIdx.x == 0u) {
+            const uint32_t token = best_token == kNoToken ? 0u : best_token;
+            s_taken[it] = token;
+            ids[it] = static_cast<int32_t>(token);
+            values[it] = best_token == kNoToken ? kNegInf : row[token];
+        }
+        __syncthreads();
+    }
 }
 
 }  // namespace ps::kernel
