@@ -85,11 +85,11 @@ greedy equivalence を破る（実例は [../rnd/mtp/mtp.md](../rnd/mtp/mtp.md) 
 `2b90b202` の proxy 実装を差し戻すと 65.20 tok/s が再現することを
 計測で確認している（差の主因が proxy の代替である根拠）。
 
-残る約 0.6% は main へ rebase したときに生じたもので、
-GDN compact log / NgramTail あたりの変更が候補だが、本件では
-commit 単位の A/B を行っていないため原因を断定しない。
+残る約 0.6% は原因を断定していない。ただし pp で同時刻交互計測により
+**コード寄与ゼロ**を確認済み（下記 caveat）であり、これも同種の日時差と推定する。
+DFlash2 自体は A/B を行っていないので推定にとどめる。
 
-計測は全 GPU idle の単独環境で行った。
+この計測は全 GPU idle の単独環境で行った。
 
 > このセクションは Gate3（[../rnd/spec_decode/ngram_tail_gate3.md](../rnd/spec_decode/ngram_tail_gate3.md)、
 > target lm_head proxy の停止と NgramTail option の追加）**以前**の revision で
@@ -144,6 +144,12 @@ grep '^GENERATED_IDS=' <output> | sed 's/^GENERATED_IDS=//' | sha1sum
 - 初回プロセスは GPU クロックのランプアップで pp が大きく遅く出るため、
   warmup で除外している。
 - 絶対値は single-run ではぶれる。run 間安定性（中央値）で判定する。
+- **絶対値は計測日の GPU 状態にも依存する。** 同一セッションで `2b90b202`（元の
+  baseline）と現行 main+3 を交互に pp2048 計測したところ、中央値は
+  **2300.9 / 2301.0 でコード差はゼロ**だった。一方 2026-09-28 計測の 2327.66 と
+  2026-09-30 の 2300.9 は **−1.15%** 差があり、その間 GPU[1] の junction 温度は
+  31°C → 57°C に上がっている。約 1% 程度の振れはコードではなく蓄熱・クロック
+  による日時差と考えること。日付違いの値を直接比較しないこと。
 - ここに無い性能値が必要な場合は、勝手に推測せず
   [methodology.md](methodology.md) の手順で新規計測し、日付・revision・commit とともに
   追記する。

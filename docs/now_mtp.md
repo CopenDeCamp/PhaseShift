@@ -267,7 +267,10 @@ GPU busy は exact 1901.4 ms に対し 1958.0 ms（+3.0%）だが、これは di
   - DFlash2 の低下は verify の `LmHeadCandidateProxy` が効かないことが主因
     （約 2.4%）。`2b90b202` の proxy を差し戻すと 65.20 が再現することを
     確認済み。経緯は [rnd/mtp/mtp.md](rnd/mtp/mtp.md) §10.4。
-  - 残り約 0.6% は main へ rebase したときに生じたもので、原因は未断定。
+  - 残り約 0.6% の原因は断定していない。pp で同時刻交互計測により
+    **コード寄与ゼロ**を確認済み（`2b90b202` と main+3 の中央値 2300.9 / 2301.0、
+    GPU junction 31°C → 57°C）。DFlash2 も同種の日時差と推定するが
+    A/B は未実施。詳細は `docs/perf/current.md` の caveat。
   - 旧 model（MTP 全 BF16）は削除済み
     （`git show 2b90b202:src/phaseshift/quantization/fpx/profile.cpp` から再生成できる）。
 - **main へ rebase 済み**（`4dac188a`）。proxy とその contract doc は、main が
