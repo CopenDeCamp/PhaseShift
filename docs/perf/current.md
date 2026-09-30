@@ -13,8 +13,8 @@
 | model | `models/Qwen3.8-27B-PSQ`（main performance target） |
 | draft model | `models/Qwen3.8-27B-DFlash2-PSQ` |
 | GPU | AMD Radeon AI PRO R9700 (gfx1201) / ROCm / HIP / Linux |
-| measurement revision | commit `2b90b202` |
-| date | 2026-09-28 |
+| measurement revision | commit `a33b0bb1` |
+| date | 2026-09-30 |
 | build | Release / gfx1201 / benchmarks ON / optional tests OFF |
 | build directory | `build-gfx1201` |
 | HIP graph | OFF（`PHASESHIFT_HIP_GRAPH` 既定） |
@@ -29,6 +29,7 @@ Fusion / DeepFusion は一時的に build option が撤去されている。
 
 model は `--preset psq --backend hip` で再生成できる
 （27B は `--scope text-only` が必要。手順は [../user/quantizer.md](../user/quantizer.md)）。
+MTP linear 8本は PSQ4、norm 7本は BF16（契約は [../developer/mtp.md](../developer/mtp.md)）。
 
 ## Target prefill（pp2048）
 
@@ -37,12 +38,12 @@ model は `--preset psq --backend hip` で再生成できる
 
 | rep | gpu_ms_median | tok/s |
 | --- | ---: | ---: |
-| 1 | 876.79 | 2335.79 |
-| 2 | 879.85 | 2327.66 |
-| 3 | 881.08 | 2324.43 |
-| **中央値** | | **2327.66** |
+| 1 | 888.45 | 2305.13 |
+| 2 | 889.81 | 2301.60 |
+| 3 | 889.16 | 2303.29 |
+| **中央値** | | **2303.29** |
 
-run 間のばらつきは 0.49%。
+run 間のばらつきは 0.15%。
 
 ## Target non-spec decode（tg128・ctx2048）
 
@@ -51,10 +52,10 @@ run 間のばらつきは 0.49%。
 
 | rep | tok/s |
 | --- | ---: |
-| 1 | 27.60 |
-| 2 | 27.58 |
-| 3 | 27.56 |
-| **中央値** | **27.58** |
+| 1 | 27.51 |
+| 2 | 27.51 |
+| 3 | 27.47 |
+| **中央値** | **27.51** |
 
 run 間のばらつきは 0.15%。
 `GREEDY_TOKEN_SUM=2446188` は全 rep で一致する。
@@ -66,12 +67,29 @@ run 間のばらつきは 0.15%。
 
 | rep | tok/s | DFLASH2_VERIFY_GPU_MS |
 | --- | ---: | ---: |
-| 1 | 65.10 | 3360.58 |
-| 2 | 65.09 | 3362.66 |
-| 3 | 65.11 | 3360.77 |
-| **中央値** | **65.10** | **3360.77** |
+| 1 | 63.15 | 3479.58 |
+| 2 | 63.14 | 3479.88 |
+| 3 | 63.15 | 3479.66 |
+| **中央値** | **63.15** | **3479.66** |
 
-run 間のばらつきは 0.03%。
+run 間のばらつきは 0.02%。
+
+前回 baseline（commit `2b90b202`、65.10 tok/s）から **−3.00%**。
+
+うち約 2.4% は verify の `LmHeadCandidateProxy` が効かなくなったことによる。
+proxy は int2 coarse の top-P 候補からのみ argmax を決め、精度を保証できず
+greedy equivalence を破る（実例は [../rnd/mtp/mtp.md](../rnd/mtp/mtp.md) §10.1）。
+`phaseshift-compute` は DFlash2 有効時に mode を `0` へ強制する
+（[../developer/qwen35.md](../developer/qwen35.md) §7.1）ため、
+この経路は exact のままである。速度より正しさを採用した。
+`2b90b202` の proxy 実装を差し戻すと 65.20 tok/s が再現することを
+計測で確認している（差の主因が proxy の代替である根拠）。
+
+残る約 0.6% は main へ rebase したときに生じたもので、
+GDN compact log / NgramTail あたりの変更が候補だが、本件では
+commit 単位の A/B を行っていないため原因を断定しない。
+
+計測は全 GPU idle の単独環境で行った。
 
 > このセクションは Gate3（[../rnd/spec_decode/ngram_tail_gate3.md](../rnd/spec_decode/ngram_tail_gate3.md)、
 > target lm_head proxy の停止と NgramTail option の追加）**以前**の revision で

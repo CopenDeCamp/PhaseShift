@@ -257,18 +257,29 @@ GPU busy は exact 1901.4 ms に対し 1958.0 ms（+3.0%）だが、これは di
 - 診断フラグ `--mtp-fixture` の比較スクリプトは使い捨てであり
   `tools/` には置いていない（再実行する場合は本ファイル §3.3 の手順を参照）。
 - **model の置換と perf 再計測は完了**。`models/Qwen3.8-27B-PSQ` を MTP PSQ4 版に
-  差し替え、`docs/perf/current.md` を commit `f14d5c3c` / 2026-09-30 の計測値で更新した。
-  - pp2048 **2332.21** tok/s（前回 2327.66、+0.20%）
-  - tg128 **27.59** tok/s（前回 27.58、+0.04%）
-  - DFlash2 K7 **63.55** tok/s（前回 65.10、**−2.38%**）
+  差し替え、`docs/perf/current.md` を commit `a33b0bb1` / 2026-09-30 の計測値で更新した。
+  - pp2048 **2303.29** tok/s（前回 2332.21）
+  - tg128 **27.51** tok/s（前回 27.59）
+  - DFlash2 K7 **63.15** tok/s（baseline 65.10 から **−3.00%**）
   - 正しさ契約は全一致（`GREEDY_TOKEN_SUM=2446188` /
     `GENERATED_IDS` sha1 `47aebe55d048` / `DFLASH2_ROUNDS=84` /
     `DFLASH2_ACCEPTED_DRAFTS=171`）
-  - DFlash2 の −2.38% は `LmHeadCandidateProxy` 既定 OFF の代償。
-    `2b90b202` の proxy を差し戻すと 65.20 が再現することを確認済み。
-    経緯は [rnd/mtp/mtp.md](rnd/mtp/mtp.md) §10.4。
-  - 旧 model（MTP 全 BF16）は削除済み（`git show 2b90b202:src/phaseshift/quantization/fpx/profile.cpp`
-    から再生成できる）。
+  - DFlash2 の低下は verify の `LmHeadCandidateProxy` が効かないことが主因
+    （約 2.4%）。`2b90b202` の proxy を差し戻すと 65.20 が再現することを
+    確認済み。経緯は [rnd/mtp/mtp.md](rnd/mtp/mtp.md) §10.4。
+  - 残り約 0.6% は main へ rebase したときに生じたもので、原因は未断定。
+  - 旧 model（MTP 全 BF16）は削除済み
+    （`git show 2b90b202:src/phaseshift/quantization/fpx/profile.cpp` から再生成できる）。
+- **main へ rebase 済み**（`4dac188a`）。proxy とその contract doc は、main が
+  shadow 比較・decode mode・radix topn を持っていたため **main 版を優先**した。
+  required acceptance は **131/131 PASS**（main が7件追加）。
+- **未解決**: `phaseshift-bench mtp --spec` は main 既定（proxy mode=1）だと
+  `--tokens-offset 345` で greedy equivalence が **FAIL** する
+  （`PHASESHIFT_TARGET_LM_HEAD_PROXY=0` で PASS）。
+  `phaseshift-compute` は DFlash2 有効時に mode 0 を強制しているが、
+  `phaseshift-bench mtp` への適用が漏れている。`--spec` は
+  `verify_numeric_mode = Exact` を要求し末尾で greedy equivalence を
+  exit code で判定する exactness contract ツールなので、同じ強制が必要。
 - proxy の argmax 証明は、実データで一度も通らないため不採用（§4）。
   回復には INT2 より狭い誤差境界が必要で、これは**別課題**として扱う。
 
