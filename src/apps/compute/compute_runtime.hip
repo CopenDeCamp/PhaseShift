@@ -212,6 +212,10 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     batcher_config.page_tokens = config_.page_tokens;
     batcher_config.eos_token_id = static_cast<int32_t>(text_config.eos_token_id);
     batcher_config.constraint_mask_words = constraint_mask_words;
+    batcher_config.constraint_vocab_size =
+        constraint_compiler_ != nullptr
+            ? constraint_compiler_->vocab_size()
+            : static_cast<uint32_t>(text_config.vocab_size);
 
     batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(
         executor_, *slot_pool_, *gdn_pool_, *kv_pool_, batcher_config, stream_,

@@ -33,6 +33,7 @@ struct ContinuousBatcherConfig {
     int32_t eos_token_id = -1;
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
     uint32_t constraint_mask_words = 0;
+    uint32_t constraint_vocab_size = 0;
 };
 
 struct StepResult {
@@ -97,6 +98,8 @@ class ContinuousBatcher {
 
     KVBankerState build_kv_banker_state() const;
 
+    void constraint_allowed_count_report() const;
+
     Executor& executor_;
     SequenceSlotPool& seq_pool_;
     GdnStatePool& gdn_pool_;
@@ -113,6 +116,7 @@ class ContinuousBatcher {
     RequestList requests_;
     std::unordered_map<uint64_t, RequestList::iterator> request_index_;
     std::vector<uint32_t> constraint_mask_buffer_;
+    std::vector<uint32_t> constraint_allowed_samples_;
 };
 
 }

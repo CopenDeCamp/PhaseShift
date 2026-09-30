@@ -333,6 +333,10 @@ Status build_host_execution_context(
             .data<::ps::runtime::DeviceSamplingParams>();
     ctx.constraint_masks = constraint_masks;
     ctx.constraint_mask_words = constraint_mask_words;
+    ctx.constraint_allowed_counts =
+        (!executor.constraint_allowed_counts_host.empty())
+            ? executor.constraint_allowed_counts_host.data()
+            : nullptr;
     ctx.lm_head_proxy = executor.lm_head_proxy.valid() ? &executor.lm_head_proxy : nullptr;
     ctx.lm_head_shadow_pending = false;
     ctx.lm_head_shadow_full = nullptr;
@@ -608,6 +612,25 @@ Result<PendingBatch> submit_co_batch(
             executor.constraint_mask_host.data(), batch.constraint_masks,
             static_cast<std::size_t>(output_count) * batch.constraint_mask_words *
                 sizeof(uint32_t));
+        if (!executor.constraint_allowed_counts_host.empty()) {
+            uint32_t* counts = executor.constraint_allowed_counts_host.data();
+            const uint32_t capacity =
+                static_cast<uint32_t>(executor.constraint_allowed_counts_host.size());
+            for (uint32_t r = 0; r < capacity; ++r) {
+                counts[r] = UINT32_MAX;
+            }
+            for (uint32_t i = 0; i < R; ++i) {
+                const uint32_t oc = staging[i].output_count;
+                const uint32_t base = staging[i].output_index;
+                if (oc == 0u || base >= capacity) continue;
+                const uint32_t count = batch.requests[i].constraint_allowed_count;
+                const uint32_t end = base + oc;
+                const uint32_t limit = end < capacity ? end : capacity;
+                for (uint32_t r = base; r < limit; ++r) {
+                    counts[r] = count;
+                }
+            }
+        }
     }
     uint64_t min_vis = UINT64_MAX;
     uint64_t max_vis = 0;
@@ -1747,6 +1770,7 @@ Result<Executor> create_model_executor(
         if (!st.ok()) return st;
         ex.constraint_mask_host.assign(
             static_cast<std::size_t>(MO) * ex.config.constraint_mask_words, 0xFFFFFFFFu);
+        ex.constraint_allowed_counts_host.assign(MO, UINT32_MAX);
     }
     st = allocate_contiguous_tensor<bf16_t>(arena, {Npad, H}, ex.token_hidden);
     if (!st.ok()) return st;

@@ -19,6 +19,25 @@ inline bool constraint_token_allowed(
     return ((mask_words[token_id >> 5u] >> (token_id & 31u)) & 1u) != 0u;
 }
 
+inline uint32_t constraint_allowed_count(
+    const uint32_t* mask_words, uint32_t word_count, uint32_t vocab_size) {
+    if (mask_words == nullptr || word_count == 0u || vocab_size == 0u) {
+        return 0u;
+    }
+    uint32_t count = 0u;
+    const uint32_t full_words = vocab_size / 32u;
+    const uint32_t words = full_words < word_count ? full_words : word_count;
+    for (uint32_t i = 0u; i < words; ++i) {
+        count += static_cast<uint32_t>(__builtin_popcount(mask_words[i]));
+    }
+    const uint32_t remainder = vocab_size % 32u;
+    if (remainder != 0u && words < word_count) {
+        count += static_cast<uint32_t>(
+            __builtin_popcount(mask_words[words] & ((1u << remainder) - 1u)));
+    }
+    return count;
+}
+
 class TokenConstraintState {
  public:
   virtual ~TokenConstraintState() = default;

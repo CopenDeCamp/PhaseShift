@@ -34,6 +34,8 @@ struct ScheduledRequest {
     bool token_constraint = false;
     bool constraint_allow_empty = false;
     uint32_t num_output_rows = 1;
+
+    uint32_t constraint_allowed_count = UINT32_MAX;
 };
 
 enum class TokenIdsLocation : uint8_t {
