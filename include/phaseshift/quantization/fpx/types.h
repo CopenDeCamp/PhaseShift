@@ -50,7 +50,7 @@ enum class TensorRole : uint16_t {
     SharedExpertUp,
     SharedExpertDown,
     MtpEmbedding,
-    MtpOutput,
+    MtpFc,
     MtpAttention,
     MtpFfn,
     MtpNorm,

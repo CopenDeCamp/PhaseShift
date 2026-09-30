@@ -853,13 +853,22 @@ MTP（425M params、BF16 で 0.79 GiB）を量子化して draft を速くする
 
 | `TensorRole` | 実体 | params | 初期案 | 採用 |
 | --- | --- | ---: | --- | --- |
-| `MtpOutput` | `mtp.fc.weight` (5120, 10240) | 52M | PSQ8 | **PSQ4** |
+| `MtpFc` | `mtp.fc.weight` (5120, 10240) | 52M | PSQ8 | **PSQ4** |
 | `MtpAttention` | `self_attn.{q,k,v,o}_proj` | 68M | PSQ4 | PSQ4 |
 | `MtpFfn` | `mlp.{gate,up,down}_proj` | 267M | PSQ4 | PSQ4 |
 | `MtpNorm` | norm 7本 | 1M | PSQ4 | **BF16**（`load_quantized_small` が 1 次元の量子化を拒否） |
 | `Output` | `lm_head.weight` | 1271M | PSQ8 | PSQ8（従来どおり） |
 
 `test_dflash2_quantization_adapter` に新契約の assert を 4 件追加（74/74 PASS）。
+
+role 名は旧 `MtpOutput` から **`MtpFc` へ rename した**。実体は `mtp.fc`（入力側の
+融合射影、`[H, 2H]`）で **LM head ではない**ため。MTP の LM head は target と共有する
+`lm_head.weight`（`tie_word_embeddings: false` の独立 tensor で `lm_index` は
+`weights.lm_head` を指す）であり、target と同じく **PSQ8**。`embed_tokens` も PSQ8。
+
+manifest の `role` 文字列は書き出しのみでロジックに使われない
+（`try_parse_tensor_role` は呼び出し無し）ため、旧 `mtp_output` を含む既存 model は
+`phaseshift-quantizer verify` で `Validation OK` のまま。**model の再生成は不要**。
 
 ### 11.2 Round 1: `mtp.fc` = PSQ8 — 否決
 

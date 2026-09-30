@@ -301,11 +301,16 @@ MTP（425M params、BF16 で 0.79 GiB）を量子化して draft を速くする
 
 | `TensorRole` | 実体 | params | 初期案 | 採用 |
 | --- | --- | ---: | --- | --- |
-| `MtpOutput` | `mtp.fc.weight` (5120, 10240) | 52M | PSQ8 | **PSQ4** |
+| `MtpFc` | `mtp.fc.weight` (5120, 10240) | 52M | PSQ8 | **PSQ4** |
 | `MtpAttention` | `self_attn.{q,k,v,o}_proj` | 68M | PSQ4 | PSQ4 |
 | `MtpFfn` | `mlp.{gate,up,down}_proj` | 267M | PSQ4 | PSQ4 |
 | `MtpNorm` | norm 7本 | 1M | PSQ4 | **BF16**（`load_quantized_small` が 1 次元の量子化を拒否） |
 | `Output` | `lm_head.weight` | 1271M | PSQ8 | PSQ8（従来どおり） |
+
+`MtpFc` は旧名 `MtpOutput`。実体は `mtp.fc`（入力融合射影 `[H, 2H]`）で LM head では
+ない。MTP の LM head は target と共有する `lm_head.weight` で **PSQ8**。
+rename の経緯と model が再生成不要である根拠は
+[rnd/mtp/mtp.md](rnd/mtp/mtp.md) §11.1。
 
 ### 8.2 Round 1: `mtp.fc` = PSQ8 — 否決
 
