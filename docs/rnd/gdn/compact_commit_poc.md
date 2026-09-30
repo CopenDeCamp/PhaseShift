@@ -125,6 +125,37 @@ correctness（GEN=128、Exact、既定 lossy）での結果:
 原因は未特定。e2e 統合は revert し、kernel 層（spill / commit / 層対応 / bit-exact
 テスト）のみ確定した。
 
+### 残差の切り分け（2026-09-30 追加）
+
+kernel 単体テストを **history capture 有効**（`recurrent_history` を設定）に拡張し、
+chain 状態 / history capture / commit の三者比較を追加 → **10/10 PASS**。
+すなわち history capture の有無を問わず、kernel 単体では bit-exact。
+
+e2e の比較診断を `(m, n)` 分布まで拡張した結果（correctness GEN=128、rows=8）:
+
+| 位置 | diff | m 一意 | n 一意 | m の値 | n 範囲 |
+| --- | ---: | ---: | ---: | --- | --- |
+| layer 43 / v_head 16 | 128 | **1** | 128 | 93 | 0..127 |
+| layer 1 / v_head 0 | 239 | **1** | 126 | 86 | 0..127 |
+| layer 3 / v_head 30 | 768 | **2** | 256 | 18,126 | 0..127 |
+
+- `hd = 128`, `hvv = 128` を確認（27B geometry）。
+- 差分は **m（key 次元）方向に 1〜2 行のみ**に集中し、n（value 次元）は全 128 列に広がる。
+  rank-1 更新 `S[m][n] = a·S_0[m][n] + k[m]·δ[n]` で、`δ` の誤りは列（n 一意）に、
+  `a` の誤りは全要素に現れるため、**k 因子または S_0 の 1 行**が原因であることが確定。
+- `de0`（k のスケール）は一様な乗算なので全 128 行に現れるはずで、**原因から除外**。
+- **矛盾点**: spill の書き出しアドレス `qk_head*hd + d`、update の読み出しアドレス
+  `qk_head*hd + (kt0+ki)*16 + lo`、commit の読み出しアドレスはすべて一致し、
+  単一要素だけが食い違うことは構造上起こらない。
+
+未解消の候補:
+
+1. `S_0`（snapshot）と verify 開始状態の差が特定の (layer, v_head, m) 行にだけ存在
+2. `compact_k` の 3 つの v_head（同 `qk_head`）による共有アドレスへの書込み競合
+3. history buffer と pool state のアドレス重複
+
+次の実験: compact log を v_head ごとに分離（共有書をなくす）して差が消えるか確認。
+
 ## 次の作業
 
 1. 本番 recurrence kernel に compact log の optional spill を追加する。→ **完了**（層対応含む）

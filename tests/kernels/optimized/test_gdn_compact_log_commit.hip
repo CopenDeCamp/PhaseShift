@@ -62,12 +62,13 @@ struct Buf {
     uint16_t* a_log = nullptr;
     float* state = nullptr;
     float* out = nullptr;
+    float* hist = nullptr;
     float* compact_delta = nullptr;
     float* compact_k = nullptr;
     float* compact_a = nullptr;
     void* requests = nullptr;
     void free_all() {
-        void* bufs[] = {q, k, v, a, b, dt_bias, a_log, state, out,
+        void* bufs[] = {q, k, v, a, b, dt_bias, a_log, state, out, hist,
                         compact_delta, compact_k, compact_a, requests};
         for (void* p : bufs)
             if (p) ps::gpu::discard_cleanup_result(hipFree(p));
@@ -92,6 +93,10 @@ bool setup(Buf& d, uint32_t seed) {
     if (hipMalloc(&d.compact_k, (size_t)kStates * kRows * kQk * 4u) != hipSuccess) return false;
     if (hipMalloc(&d.compact_a, (size_t)kStates * kRows * kHeads * 4u) != hipSuccess)
         return false;
+    if (hipMalloc(&d.hist, (size_t)kRows * kStates * kSlotStride * 4u) != hipSuccess)
+        return false;
+    ps::gpu::discard_cleanup_result(
+        hipMemset(d.hist, 0, (size_t)kRows * kStates * kSlotStride * 4u));
     if (hipMalloc(&d.requests, sizeof(::ps::runtime::DeviceRequestDescriptor)) != hipSuccess)
         return false;
 
@@ -161,6 +166,10 @@ bool setup(Buf& d, uint32_t seed) {
     a.compact_delta_layer_stride = (uint64_t)kRows * kVdim;
     a.compact_k_layer_stride = (uint64_t)kRows * kQk;
     a.compact_a_layer_stride = (uint64_t)kRows * kHeads;
+    a.recurrent_history = d.hist;
+    a.recurrent_history_row_stride = (uint64_t)kStates * kSlotStride;
+    a.capture_rows = kRows;
+    a.capture_verify_only = 0u;
     return a;
 }
 
@@ -210,6 +219,8 @@ int main() {
 
     std::vector<std::vector<float>> ref_traj(kRows + 1u);
     for (auto& v : ref_traj) v.resize(state_n);
+    std::vector<std::vector<float>> chain_hist(kRows);
+    for (auto& v : chain_hist) v.resize(state_n);
 
     bool ok = true;
     for (uint32_t r = 0u; r < kRows && ok; ++r) {
@@ -224,8 +235,26 @@ int main() {
         if (ok)
             ok = hipMemcpy(ref_traj[r + 1u].data(), d.state, state_n * 4u,
                            hipMemcpyDeviceToHost) == hipSuccess;
+        if (ok)
+            ok = hipMemcpy(chain_hist[r].data(),
+                           d.hist + (size_t)r * kStates * kSlotStride, state_n * 4u,
+                           hipMemcpyDeviceToHost) == hipSuccess;
     }
     check(ok, "spill chain runs");
+
+    {
+        bool hok = true;
+        size_t hfirst = 0;
+        for (uint32_t r = 0u; r < kRows; ++r) {
+            if (!all_bits_equal(ref_traj[r + 1u], chain_hist[r], hfirst)) {
+                hok = false;
+                std::printf("  [hist] r=%u first_bad=%zu ref=%.6g hist=%.6g\n", r, hfirst,
+                            (double)ref_traj[r + 1u][hfirst], (double)chain_hist[r][hfirst]);
+                break;
+            }
+        }
+        check(hok, "history capture matches chain state (multi-layer)");
+    }
 
     bool all_hist_ok = true;
     bool all_commit_ok = true;
@@ -322,6 +351,24 @@ int main() {
         size_t first = 0;
         check(all_bits_equal(ref_traj[kRowsExact], rows8, first),
               "decode_rows_exact matches per-row decode1 chain (multi-layer)");
+
+        std::vector<std::vector<float>> rows8_hist(kRowsExact);
+        for (auto& v : rows8_hist) v.resize(state_n);
+        bool hok = true;
+        for (uint32_t r = 0u; r < kRowsExact && hok; ++r)
+            hok = hipMemcpy(rows8_hist[r].data(),
+                            d.hist + (size_t)r * kStates * kSlotStride, state_n * 4u,
+                            hipMemcpyDeviceToHost) == hipSuccess;
+        size_t hfirst = 0;
+        for (uint32_t r = 0u; hok && r < kRowsExact; ++r) {
+            if (!all_bits_equal(chain_hist[r], rows8_hist[r], hfirst)) {
+                hok = false;
+                std::printf("  [hist-exact] r=%u first_bad=%zu chain=%.6g hist=%.6g\n", r,
+                            hfirst, (double)chain_hist[r][hfirst],
+                            (double)rows8_hist[r][hfirst]);
+            }
+        }
+        check(hok, "decode_rows_exact history capture matches chain history (multi-layer)");
     }
 
     {

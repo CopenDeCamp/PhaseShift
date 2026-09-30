@@ -145,11 +145,16 @@ decoder 統合を再適用し、env で切り分けた（`..._COMPACT_FULL_HISTO
   大半の accept は bit-exact。
 - kernel 単体では 3 経路すべて bit-exact だが、**実モデルのデータでのみ**微小差が出る。
   `de0 = __expf(gval−gval)` を spill の k に掛ける実験は悪化した。
+- 追加の切り分け: kernel 単体テストを history capture 有効に拡張して三者比較 → **10/10 PASS**。
+  e2e の `(m, n)` 分布診断で、差分は **m 方向 1〜2 行のみ**（n は全 128 列）であることを確認。
+  → rank-1 の **k 因子または S_0 の 1 行**が原因。`de0` は一様乗算なので除外。
+  → ただし spill / update / commit の k アドレスは構造上一致しており、単一要素の食い違いは
+  未説明。候補は S_0 の行差・`compact_k` の共有書込み競合・buffer のアドレス重複。
 
 ### 状態
 
-- 確定: kernel 層（spill / commit / 層対応 / bit-exact テスト）と候補2。
-- 未確定: 実モデルデータ依存の rec 差の原因。decoder 統合は revert（作業ツリーには残さない）。
+- 確定: kernel 層（spill / commit / 層対応 / bit-exact テスト・三者比較）と候補1・2。
+- 未確定: 単一 `k`/`S_0` 行の差の原因。decoder 統合の診断コードは**作業ツリーに未コミット**で残置。
 - 詳細は `docs/rnd/gdn/compact_commit_poc.md` を参照。
 
 ---
