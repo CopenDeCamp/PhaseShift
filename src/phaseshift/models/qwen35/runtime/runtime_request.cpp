@@ -46,10 +46,10 @@ void mark_finished(RuntimeRequest& request, FinishReason reason) {
 CommitAction commit_sampled_token(
     RuntimeRequest& request,
     int32_t token,
-    int32_t eos_token_id) {
+    const StopTokens& stop_tokens) {
     ++request.generated_tokens;
     request.generated.push_back(token);
-    if (eos_token_id >= 0 && token == eos_token_id) {
+    if (is_stop_token(stop_tokens, token)) {
         mark_finished(request, FinishReason::Eos);
         return CommitAction::Finished;
     }

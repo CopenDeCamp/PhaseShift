@@ -98,7 +98,38 @@ Result<Qwen35TextConfig> read_qwen35_text_config(const std::string& model_dir) {
     read_size("num_key_value_heads", cfg.num_key_value_heads);
     read_size("head_dim", cfg.attention_head_dim);
 
-    read_size("eos_token_id", cfg.eos_token_id);
+    // Generation stop tokens come from generation_config.json, which may list
+    // several (Qwen3.5/3.8 use <|im_end|> and <|endoftext|>). Fall back to the
+    // single text_config.eos_token_id when no generation config is present.
+    {
+        std::ifstream gen_file(model_dir + "/generation_config.json");
+        if (gen_file.is_open()) {
+            nlohmann::json gen;
+            try {
+                gen_file >> gen;
+            } catch (const nlohmann::json::exception&) {
+                gen = nlohmann::json();
+            }
+            if (gen.is_object() && gen.contains("eos_token_id")) {
+                const nlohmann::json& eos = gen["eos_token_id"];
+                if (eos.is_number_integer()) {
+                    cfg.stop_tokens.push_back(eos.get<int32_t>());
+                } else if (eos.is_array()) {
+                    for (const auto& value : eos) {
+                        if (value.is_number_integer()) {
+                            cfg.stop_tokens.push_back(value.get<int32_t>());
+                        }
+                    }
+                }
+            }
+        }
+        if (cfg.stop_tokens.empty()) {
+            std::size_t eos_token_id = 0;
+            if (read_size("eos_token_id", eos_token_id)) {
+                cfg.stop_tokens.push_back(static_cast<int32_t>(eos_token_id));
+            }
+        }
+    }
 
     read_float("rms_norm_eps", cfg.rms_norm_eps);
 

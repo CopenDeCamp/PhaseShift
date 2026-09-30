@@ -7,6 +7,7 @@
 #include <phaseshift/models/qwen35/runtime/kv_banker.h>
 #include <phaseshift/models/qwen35/runtime/prefix_cache.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
+#include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/core/status.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -30,7 +31,7 @@ struct ContinuousBatcherConfig {
     uint32_t max_scheduled_requests = 0;
     uint32_t max_seq_len = 0;
     uint32_t page_tokens = 0;
-    int32_t eos_token_id = -1;
+    StopTokens eos_token_ids;
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
     uint32_t constraint_mask_words = 0;
 };

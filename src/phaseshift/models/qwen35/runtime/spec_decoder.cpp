@@ -290,7 +290,7 @@ Result<SpecIterationOutput> spec_decoder_step(
         if (!status.ok()) return status;
         out.mtp_length_after = decoder.mtp_state->logical_length;
         record_token_history(decoder, out.emitted_tokens);
-        if (decoder.config.eos_token >= 0 && out.pending_token == decoder.config.eos_token) {
+        if (is_stop_token(decoder.config.eos_tokens, out.pending_token)) {
             out.finished = true;
         }
         return out;
@@ -335,7 +335,7 @@ Result<SpecIterationOutput> spec_decoder_step(
         out.num_drafts_generated = 0u;
         out.mtp_length_after = decoder.mtp_state->logical_length;
         record_token_history(decoder, out.emitted_tokens);
-        if (decoder.config.eos_token >= 0 && out.pending_token == decoder.config.eos_token) {
+        if (is_stop_token(decoder.config.eos_tokens, out.pending_token)) {
             out.finished = true;
         }
         return out;
@@ -484,17 +484,15 @@ Result<SpecIterationOutput> spec_decoder_step(
 
     out.mtp_length_after = decoder.mtp_state->logical_length;
 
-    if (decoder.config.eos_token >= 0) {
-        for (std::size_t i = 0u; i < out.emitted_tokens.size(); ++i) {
-            if (out.emitted_tokens[i] == decoder.config.eos_token) {
-                out.emitted_tokens.resize(i + 1u);
-                out.finished = true;
-                break;
-            }
-        }
-        if (out.pending_token == decoder.config.eos_token) {
+    for (std::size_t i = 0u; i < out.emitted_tokens.size(); ++i) {
+        if (is_stop_token(decoder.config.eos_tokens, out.emitted_tokens[i])) {
+            out.emitted_tokens.resize(i + 1u);
             out.finished = true;
+            break;
         }
+    }
+    if (is_stop_token(decoder.config.eos_tokens, out.pending_token)) {
+        out.finished = true;
     }
     record_token_history(decoder, out.emitted_tokens);
     return out;

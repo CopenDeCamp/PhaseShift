@@ -53,7 +53,7 @@ int main() {
     const std::string serialized = info.SerializeJSON();
 
     auto compiler_result = TokenConstraintCompiler::create(
-        serialized, kVocabSize, kStop);
+        serialized, kVocabSize, ps::qwen35::StopTokens{kStop});
     CHECK(compiler_result.ok());
     if (!compiler_result.ok()) {
         return 1;
@@ -133,7 +133,7 @@ int main() {
         CHECK(stream.good());
         std::string json((std::istreambuf_iterator<char>(stream)),
                          std::istreambuf_iterator<char>());
-        auto native = TokenConstraintCompiler::create(json, 248320u, stop_token);
+        auto native = TokenConstraintCompiler::create(json, 248320u, ps::qwen35::StopTokens{stop_token});
         CHECK(native.ok());
         if (native.ok()) {
             auto& native_compiler = *native.value();

@@ -285,10 +285,11 @@ def main() -> int:
             _log(f"dflash2 model directory not found: {dflash2_dir}")
             return 2
         opts.dflash2_model_dir = str(dflash2_dir)
-        if opts.max_concurrent_requests != 1:
-            _log(f"--dflash2-model-dir forces --max-concurrent-requests 1 "
-                 f"(requested {opts.max_concurrent_requests})")
-            opts.max_concurrent_requests = 1
+        if opts.max_concurrent_requests > 1 and opts.kv_cache_capacity_tokens == 0:
+            needed = (opts.max_concurrent_requests + 1) * (opts.max_seq_len + 1)
+            opts.kv_cache_capacity_tokens = needed
+            _log(f"--dflash2-model-dir raises --kv-cache-capacity-tokens to {needed} "
+                 f"for {opts.max_concurrent_requests} concurrent requests")
         if opts.dflash2_drafts < 1:
             _log("--dflash2-drafts must be >= 1")
             return 2

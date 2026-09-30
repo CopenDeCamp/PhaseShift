@@ -502,7 +502,7 @@ int main() {
         dcfg.num_drafts = k_drafts;
         apply_replay_policy(dcfg.draft_policy);
         dcfg.bonus_token_enabled = true;
-        dcfg.eos_token = eos;
+        dcfg.eos_tokens = {eos};
         dcfg.verify_numeric_mode = ps::runtime::VerifyNumericMode::Exact;
         auto dec_result = q35rt::create_spec_decoder(executor, mtp, mtp_state, spec, gdn_pool, arena, dcfg, stream);
         if (!dec_result.ok()) { std::printf("FAIL: spec decoder3\n"); return 1; }

@@ -14,7 +14,7 @@
 /.worktrees/
 
 # Models (bare names also cover worktree symlinks)
-/models
+/models*
 
 # AGENTS
 opencode.json

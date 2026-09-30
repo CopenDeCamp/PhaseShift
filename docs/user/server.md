@@ -88,7 +88,8 @@ debug / repro用には保守的profileを明示指定できる。
 --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)
 --page-tokens N        paged KV page size in tokens (default 16)
 --max-concurrent-requests N  max in-flight requests (default 4)
---kv-cache-capacity-tokens N physical KV token capacity (0 = one context)
+--kv-cache-capacity-tokens N physical KV token capacity (0 = one context、
+                     DFlash2 で concurrency > 1 のときは自動拡張)
 --prefix-cache-capacity-tokens N GPU prefix cache KV token capacity (0 = disabled, default 16384)
 --prefix-cache-max-entries N max cached prefixes / GDN snapshots (default 8)
 --default-max-output-tokens N output cap when the request specifies none (default 4096)
@@ -118,11 +119,15 @@ NgramTail を有効化する option は server に無く、`phaseshift-compute` 
 
 指定時の挙動:
 
-- `--max-concurrent-requests 1` を強制する。
+- `--max-concurrent-requests` は指定値を尊重する。DFlash2 でも複数 request を
+  受付できる。`--kv-cache-capacity-tokens` が未指定のときは
+  `(concurrency + 1) × (max_seq_len + 1)` へ自動拡張する。
 - Structured Output（GBNF / json_schema）、tool calling、prefix cache は
   DFlash2 経路でも利用できる。constraint は target verify の各行に適用され、
   generate される token 列は grammar 準拠である。
 - prefix cache の checkpoint は prompt boundary（prompt 全体）で保存する。
+- prefill は `prefix_cache_checkpoint_position`（turn boundary）で分割される。
+  非 DFlash2 経路と同じ分割にすることで生成列が一致する。
 
 起動ログの `Capabilities` はこれらを反映して表示する。
 

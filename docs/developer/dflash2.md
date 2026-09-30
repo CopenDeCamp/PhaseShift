@@ -471,7 +471,7 @@ row ごとの mask を一括で計算する。線形 chain として
   reject が増え、生成結果は変わらない。
 - row 0 が全 0（dead end）なら request を fail-closed に error にする。
 - matcher が terminate して返る -1 は生成終了として扱う。`emitted` から除外し、
-  `pending_token` に EOS を設定して既存の終了経路へ流す。
+  `pending_token` に primary stop token を設定して既存の終了経路へ流す。
 - 全 0 の row は sampling kernel で許可 0 件にならないよう、DFlash verify batch のみ
   `ScheduledRequest::constraint_allow_empty` を立てる。これは
   `DeviceSamplingParams.reserved[0]` の bit 1 で kernel に渡り、許可 0 件時に
@@ -809,21 +809,40 @@ acceptance の間は変更しない。
 ### GDN state history
 
 partial reject 時に full target rerun を不要にするため、verify の各 row 直後の GDN state を
-その場で history へ記録する。既定は history path である。
+その場で記録する。**既定は compact log path** である
+（`PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT` の既定が 1）。
+
+- **recurrent** は `{a_i, k_i, δ_i}` の compact log を保存し、accept prefix を逐次 replay で
+  再構成する（[../../rnd/gdn/compact_commit_poc.md](../../rnd/gdn/compact_commit_poc.md)）。
+  full recurrent state を row 分で保持するのは history path のみである。
+- **conv** は `GdnSpecHistory` の conv のみを保持する（shift register であり、受け入れ済み
+  token から再計算できないため）。compact path では `create_gdn_spec_history` を
+  `with_recurrent=false` で呼び、rec buffer を作らない。
+- partial reject の base 復元用に conv / recurrent の slot snapshot（各 1 slot 分）を
+  decoder に取る。これは compact / history どちらの path でも必要である。
+
+decoder あたりの GDN 消費（27B geometry、K=7）:
+
+| path | env | 既定 | 計 |
+| --- | --- | --- | --- |
+| compact | `PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT` | **1** | conv history 19.7 MiB + snapshot 146.8 MiB + compact log 144.6 MiB = **311.1 MiB** |
+| history | `PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT=0` | - | conv + recurrent history = **1027.8 MiB** |
+| rerun | `PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE=1` | 0 | snapshot のみ + full target rerun（22〜37 ms/round） |
+
+compact と history で生成列は一致する。round 時間は compact が +2.1%（92 rounds 累積）。
 
 - `GdnSpecHistory` は decoder 専用の single-sequence checkpoint で、sequence slot の
   GDN state を row 数分保持する。`GdnStatePool` 自体へは埋め込まない。
   - `conv`: `[row][num_gdn_states][conv_history][conv_history_stride]` BF16
     （live slot と同一 layout）
-  - `recurrent`: `[row][num_gdn_states][num_v_heads][head_k][head_v]` F32
+  - `recurrent`: history path のみ `[row][num_gdn_states][num_v_heads][head_k][head_v]` F32
     （live slot と同一 layout）
 - rows = `config.num_drafts + config.ngram_max_tail`（NgramTail 無効なら
   `config.num_drafts`）。capture_rows は round の実 draft 数（`K + T'`）。
   NgramTail 有効構成（K=7 + T=8）では 15 row である。
 - allocation は create 時の 1 回のみ。hot path allocation は行わない。
-- history は `DFlash2SpecDecoder` ごとに確保する。DFlash2 有効時は
-  `max_concurrent_requests = 1` が強制されるため、同時に存在するのは 1 decoder 分
-  （無効時 1.00 GiB、T=8 で 2.15 GiB）である。arena 容量はこの値を含めて確保する。
+- history / compact log は `DFlash2SpecDecoder` ごとに確保する。arena は bump のみで
+  個別 free が無いため、同時 N decoder はこの値を N 倍で確保する。
 - create 時に `history bytes > kDFlash2SpecHistoryBytesMax`（2.25 GiB）なら
   decoder create を FAIL する（FP16 化等で逃げない）。27B geometry
   （146.8 MiB/row）では rows ≤ 15 が上限で、これは opt-in 推奨構成の K=7 + T=8 に
@@ -845,7 +864,9 @@ capture:
 restore:
 
 - `restore_gdn_spec_history(pool, slot, history, history_row)` は conv / recurrent を
-  各 1 回の D2D copy で live へ戻す。
+  各 1 回の D2D copy で live へ戻す（history path）。
+- compact path では conv のみをこの経路で戻し、recurrent は compact log から
+  逐次 replay で再構成する。
 
 target verify の GDN recurrence 本体:
 
@@ -859,8 +880,8 @@ target verify の GDN recurrence 本体:
 
 ### EOS
 
-`config.eos_token >= 0` のとき、emit 列の最初の EOS で truncate して `finished = true`。
-pending token が EOS でも `finished = true`。
+`config.eos_tokens` が空でないとき、emit 列の最初の stop token で truncate して
+`finished = true`。pending token が stop token でも `finished = true`。
 
 ### state invariant
 
@@ -1008,16 +1029,17 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
   `temperature > 0` を受け付ける。constraint state は `DFlashServeSession` が所有し、
   `serve_dflash_open_session()` で `Qwen35ComputeRuntime::create_constraint_state()`
   から作って `dflash2_spec_decoder_set_constraint()` で decoder に渡す。
-- `max_concurrent_requests` は 1。`ServeState.dflash_enabled` が true のとき
+- `max_concurrent_requests` は compute の指定値をそのまま使う（DFlash2 でも複数
+  受付できる）。`ServeState.dflash_enabled` が true のとき
   `serve_step()` は `ContinuousBatcher::step()` の代わりに
-  `dflash2_spec_step()` を呼ぶ。
+  `dflash2_spec_step()` を呼ぶ。inflight は順に1つずつ round するため、
+  同時に in-flight な target submit は常に1つで、round ごとに完全 sync する。
 - `generated_ids` / `finish_reason` / `prompt_tokens` /
   `restored_tokens` / `cache_checkpoint_tokens` は serve 側の
   `ServeGeneration` が保持する（`RuntimeRequest` を使わない）。
 
 ### target executor config（DFlash 有効時）
 
-- `max_concurrent_requests = 1`
 - `target_hidden_taps = dflash_config.target_layer_ids`、順序も config 通り
 - `target_hidden_tap_count = dflash_config.num_target_layer_ids`
 - `max_scheduled_output_rows = block_size`
@@ -1039,6 +1061,8 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 | env | 既定 | 意味 |
 | --- | --- | --- |
 | `PHASESHIFT_DFLASH2_DEVICE_TOKEN_BRIDGE` | 1 | 0 で legacy Host bridge |
+| `PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT` | 1 | 1 で recurrent を compact log に置き換える（既定） |
+| `PHASESHIFT_DFLASH2_GDN_COMPACT_DIAG` | 0 | 1 で commit と history の層別比較 diag を有効化 |
 | `PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE` | 0 | 1 で base snapshot + full target rerun の参照 path |
 | `PHASESHIFT_DFLASH2_TOPK_REFERENCE` | 0 | 1 で reference top-k |
 | `PHASESHIFT_DFLASH2_ATTENTION_REFERENCE` | 0 | 1 で ring attention 参照実装 |
@@ -1075,7 +1099,8 @@ pool leak 検査（kv page / seq slot / gdn slot）は DFlash mode でも共通�
 DFLASH2_DRAFTS, DFLASH2_BLOCK_SIZE, DFLASH2_VERIFY_NUMERIC_MODE=Exact,
 DFLASH2_NGRAM_N, DFLASH2_NGRAM_TAIL, DFLASH2_NGRAM_WINDOW,
 DFLASH2_ROUNDS, DFLASH2_FULL_ACCEPTS, DFLASH2_RERUNS, DFLASH2_PARTIAL_ACCEPTS,
-DFLASH2_GDN_HISTORY_BYTES, DFLASH2_GDN_MODE, DFLASH2_ACCEPTED_DRAFTS,
+DFLASH2_GDN_HISTORY_BYTES, DFLASH2_GDN_SNAPSHOT_BYTES, DFLASH2_GDN_COMPACT_BYTES,
+DFLASH2_GDN_MODE, DFLASH2_ACCEPTED_DRAFTS,
 DFLASH2_MEAN_ACCEPTED, DFLASH2_FULL_ACCEPT_RATE, DFLASH2_EMITTED_PER_ROUND,
 DFLASH2_NGRAM_HIT_ROUNDS, DFLASH2_NGRAM_PROPOSED, DFLASH2_NGRAM_ACCEPTED,
 DFLASH2_TAIL_REACHED_ROUNDS, DFLASH2_TAIL_BLOCKED_ROUNDS,

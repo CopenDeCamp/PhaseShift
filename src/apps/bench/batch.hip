@@ -257,7 +257,7 @@ int run_batch(int argc, char** argv) {
     cfg.max_scheduled_requests = 1;
     cfg.max_seq_len = seq_len;
     cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
-    cfg.eos_token_id = static_cast<int32_t>(tc.eos_token_id);
+    cfg.eos_token_ids = tc.stop_tokens;
 
     auto run_one = [&](uint32_t cache_slots) -> RunResult {
         ps::qwen35::runtime::ContinuousBatcherConfig c = cfg;

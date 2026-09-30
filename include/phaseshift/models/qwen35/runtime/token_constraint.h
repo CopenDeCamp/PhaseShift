@@ -1,6 +1,7 @@
 #pragma once
 
 #include <phaseshift/core/status.h>
+#include <phaseshift/models/qwen35/stop_tokens.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -48,7 +49,7 @@ class TokenConstraintCompiler {
   static Result<std::unique_ptr<TokenConstraintCompiler>> create(
       const std::string& tokenizer_info_json,
       uint32_t expected_vocab_size,
-      int32_t generation_stop_token,
+      const StopTokens& generation_stop_tokens,
       std::size_t cache_max_bytes = 64ull * 1024ull * 1024ull);
 
   TokenConstraintCompiler(const TokenConstraintCompiler&) = delete;

@@ -1,5 +1,6 @@
 #pragma once
 #include <phaseshift/core/status.h>
+#include <phaseshift/models/qwen35/stop_tokens.h>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -25,7 +26,7 @@ struct Qwen35TextConfig {
     std::size_t num_key_value_heads = 0;
     std::size_t attention_head_dim = 0;
 
-    std::size_t eos_token_id = 0;
+    StopTokens stop_tokens;
 
     float rms_norm_eps = 1.0e-6f;
     float rope_theta = 10000000.0f;

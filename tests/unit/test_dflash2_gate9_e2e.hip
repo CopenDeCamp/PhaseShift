@@ -421,7 +421,7 @@ int main() {
                 DFlash2ContextState state = state_result.release();
                 ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_cfg;
                 decoder_cfg.num_drafts = max_drafts;
-                decoder_cfg.eos_token = baseline[eos_index];
+                decoder_cfg.eos_tokens = {baseline[eos_index]};
                 decoder_cfg.verify_numeric_mode =
                     verify_exact ? ps::runtime::VerifyNumericMode::Exact
                                  : ps::runtime::VerifyNumericMode::Fast;

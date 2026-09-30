@@ -473,7 +473,7 @@ Result<StepResult> ContinuousBatcher::step() {
                             "grammar matcher rejected sampled token", __FILE__, __LINE__);
                     }
                     const CommitAction action =
-                        commit_sampled_token(request, token, config_.eos_token_id);
+                        commit_sampled_token(request, token, config_.eos_token_ids);
                     if (action == CommitAction::Finished) {
                         auto st = finish_request(request, request.finish_reason, stream_);
                         if (!st.ok() && first_error.ok()) {

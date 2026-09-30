@@ -235,7 +235,8 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
 
     decoder.gdn_conv_bytes = spec_gdn_conv_bytes(gdn_pool);
     decoder.gdn_rec_bytes = spec_gdn_recurrent_bytes(gdn_pool);
-    const bool compact_requested = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT", false);
+    const bool compact_requested =
+        env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT", true);
     const bool compact_diag = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_DIAG", false);
     const char* rerun_env = std::getenv("PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE");
     decoder.gdn_rerun_reference =
@@ -251,11 +252,13 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
             auto conv_alloc = arena.allocate_aligned(decoder.gdn_conv_bytes, 256u);
             if (!conv_alloc.ok()) return conv_alloc.status();
             decoder.gdn_conv_snapshot = conv_alloc.release().data();
+            decoder.gdn_snapshot_bytes += decoder.gdn_conv_bytes;
         }
         if (decoder.gdn_rec_bytes != 0u) {
             auto rec_alloc = arena.allocate_aligned(decoder.gdn_rec_bytes, 256u);
             if (!rec_alloc.ok()) return rec_alloc.status();
             decoder.gdn_rec_snapshot = rec_alloc.release().data();
+            decoder.gdn_snapshot_bytes += decoder.gdn_rec_bytes;
         }
     }
     if (!decoder.gdn_rerun_reference || compact_requested) {
@@ -288,6 +291,7 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
         decoder.gdn_compact_k_layer_stride = kper;
         decoder.gdn_compact_a_layer_stride = aper;
         decoder.gdn_key_heads = static_cast<uint32_t>(key_heads);
+        decoder.gdn_compact_bytes = states * (dper + kper + aper) * sizeof(float);
 
         auto req_alloc = arena.allocate_aligned(
             sizeof(::ps::runtime::DeviceRequestDescriptor), 256u);
@@ -413,7 +417,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
-    uint32_t restored_tokens) {
+    uint32_t restored_tokens,
+    uint32_t checkpoint_position) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_prefill: not initialized", __FILE__,
                                      __LINE__);
@@ -445,7 +450,10 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     std::vector<ScheduledRequest> requests;
     uint32_t offset = restored_tokens;
     while (offset < prompt_count) {
-        const uint32_t n = std::min(chunk_limit, prompt_count - offset);
+        uint32_t n = std::min(chunk_limit, prompt_count - offset);
+        if (checkpoint_position > offset && n > checkpoint_position - offset) {
+            n = checkpoint_position - offset;
+        }
         const bool final_chunk = (offset + n == prompt_count);
         const bool masked = final_chunk && decoder.constraint != nullptr;
         if (masked) {
@@ -677,9 +685,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     if (dflash_k == 0u) {
         Status st = run_single_target(decoder, pending_token, out);
         if (!st.ok()) return st;
-        if (decoder.config.eos_token >= 0) {
-            if (out.pending_token == decoder.config.eos_token) out.finished = true;
-        }
+        if (is_stop_token(decoder.config.eos_tokens, out.pending_token)) out.finished = true;
         return out;
     }
 
@@ -1038,7 +1044,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             return Status::invalid_state("constraint produced an invalid token", __FILE__,
                                          __LINE__);
         }
-        out.pending_token = decoder.config.eos_token;
+        out.pending_token = primary_stop_token(decoder.config.eos_tokens);
     }
 
     const uint32_t page_tokens = decoder.sequence->kv_pool()->page_tokens();
@@ -1296,16 +1302,14 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                                     : 0u;
     }
 
-    if (decoder.config.eos_token >= 0) {
-        for (uint32_t i = 0; i < out.emitted_count; ++i) {
-            if (out.emitted[i] == decoder.config.eos_token) {
-                out.emitted_count = i + 1u;
-                out.finished = true;
-                break;
-            }
+    for (uint32_t i = 0; i < out.emitted_count; ++i) {
+        if (is_stop_token(decoder.config.eos_tokens, out.emitted[i])) {
+            out.emitted_count = i + 1u;
+            out.finished = true;
+            break;
         }
-        if (out.pending_token == decoder.config.eos_token) out.finished = true;
     }
+    if (is_stop_token(decoder.config.eos_tokens, out.pending_token)) out.finished = true;
     commit_history_tokens(decoder, out.emitted.data(), out.emitted_count);
     return out;
 }

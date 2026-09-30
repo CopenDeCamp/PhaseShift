@@ -48,11 +48,16 @@ exception は存在しない。`VERSION` は upstream base (`v0.2.5` / `2ea71da`
 
 ## generation stop token
 
-generation 停止判定の source of truth は model config の `eos_token_id` である。
-`tokenizer.eos_token_id` metadata は chat template の別トークン（`<|im_end|>` 等）を指すことが
-あり、両者は一致しない場合がある。chat turn の途中で現れる tokenizer EOS で生成を止めず、
-generation stop token のみで停止する。XGrammar の stop token にも generation stop token を使い、
-tokenizer metadata の EOS は使わない。両者が異なることは検証済みの正常状態である。
+generation 停止判定の source of truth は model の `generation_config.json` の
+`eos_token_id` である。Qwen3.5/3.8 は `[248046 (<|im_end|>), 248044 (<|endoftext|>)]`
+を列挙する。assistant turn は `<|im_end|>` で閉じるため、tool call の直後など
+turn の終端でも正しく停止する。列挙されたいずれかの token を生成した時点で停止する。
+`generation_config.json` が無いモデルでは `text_config.eos_token_id`（単一）へ
+fallback する。
+
+`tokenizer.eos_token_id` metadata も `<|im_end|>` を指すが、これは参照しない。
+停止に使うのは model 自身が宣言した generation stop token のみである。
+XGrammar の stop token にも同じ列挙を使う。
 
 ## request単位の状態
 

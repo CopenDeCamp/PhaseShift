@@ -330,6 +330,19 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
         render = _render_prompt(
             self._processor, messages, tools_for_template,
             enable_thinking=reasoning_enabled)
+        prompt_log = os.environ.get("PHASESHIFT_BACKEND_PROMPT_LOG")
+        if prompt_log:
+            try:
+                import hashlib
+                digest = hashlib.sha256(
+                    ",".join(str(int(t)) for t in render.ids).encode("utf-8")
+                ).hexdigest()[:16]
+                with open(prompt_log, "a", encoding="utf-8") as handle:
+                    handle.write(
+                        f"{digest} len={len(render.ids)} "
+                        f"tools={tools_requested} reasoning={reasoning_enabled}\n")
+            except OSError:
+                pass
         return PreparedRequest(
             prompt=render.ids,
             tools=tools,
@@ -768,6 +781,32 @@ def _model_text_config(model_dir):
     return config.get("text_config", config)
 
 
+def _generation_stop_tokens(model_dir):
+    """Generation stop token ids from generation_config.json.
+
+    Qwen3.5/3.8 list both <|im_end|> (turn end) and <|endoftext|>. Falls back to
+    the single text_config.eos_token_id when no generation config is present.
+    """
+    path = Path(model_dir) / "generation_config.json"
+    if path.is_file():
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                config = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            config = {}
+        eos = config.get("eos_token_id") if isinstance(config, dict) else None
+        if isinstance(eos, bool):
+            eos = None
+        if isinstance(eos, int):
+            return [int(eos)]
+        if isinstance(eos, list):
+            tokens = [int(t) for t in eos if isinstance(t, int) and not isinstance(t, bool)]
+            if tokens:
+                return tokens
+    eos = _model_text_config(model_dir).get("eos_token_id")
+    return [int(eos)] if eos is not None else []
+
+
 EXPECTED_XGRAMMAR_VERSION = "0.2.5.post1"
 
 
@@ -788,18 +827,18 @@ def _write_constraint_tokenizer_info(processor, model_dir):
     text_config = _model_text_config(model_dir)
     tokenizer = getattr(processor, "tokenizer", processor)
     vocab_size = int(text_config.get("vocab_size", 0)) or None
-    eos = text_config.get("eos_token_id")
+    stop_tokens = _generation_stop_tokens(model_dir)
     tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
-    if eos is not None and tokenizer_eos is not None and int(eos) != int(tokenizer_eos):
+    if stop_tokens and tokenizer_eos is not None and int(tokenizer_eos) not in stop_tokens:
         print(
-            f"Generation stop token: {eos} (tokenizer EOS metadata: {tokenizer_eos}); "
-            "using the model generation stop token for XGrammar",
+            f"Generation stop tokens: {stop_tokens} (tokenizer EOS metadata: "
+            f"{tokenizer_eos}); using the model generation stop tokens for XGrammar",
             file=sys.stderr, flush=True)
     try:
         info = xgrammar.TokenizerInfo.from_huggingface(
             tokenizer,
             vocab_size=vocab_size,
-            stop_token_ids=[int(eos)] if eos is not None else None,
+            stop_token_ids=stop_tokens or None,
         )
         serialized = info.serialize_json()
     except Exception as exc:  # noqa: BLE001 - report a clear load failure

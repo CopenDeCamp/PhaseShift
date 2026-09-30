@@ -312,7 +312,7 @@ bool run_case(
     q35rt::SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = draft_k;
     decoder_config.bonus_token_enabled = true;
-    decoder_config.eos_token = -1;
+    decoder_config.eos_tokens.clear();
     auto decoder_result = q35rt::create_spec_decoder(
         executor, mtp, mtp_state, seq_on, gdn_pool, arena, decoder_config, stream);
     if (!decoder_result.ok()) {

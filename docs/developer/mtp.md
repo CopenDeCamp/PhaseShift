@@ -327,8 +327,8 @@ conv / recurrent を `spec_gdn_snapshot`（D2D copy）し、partial accept で�
 6. 全 accept: verify の `final_hidden[actual_k]` を `pending_hidden` にして commit する。
 7. partial accept: GDN を restore し `sequence.position` を戻し、`[pending, accepted
    drafts]` を再 forward して、その `final_hidden` を `pending_hidden` にして commit する。
-8. emitted token と pending token を返す。EOS（`eos_token >= 0`）は emitted を最初の EOS
-   まで truncate し `finished = true`。pending が EOS でも `finished = true`。
+8. emitted token と pending token を返す。stop token（`eos_tokens`）は emitted を最初の
+   stop token まで truncate し `finished = true`。pending が stop token でも `finished = true`。
 
 `SpecIterationOutput` は emitted / pending のほかに 1 update の内訳と状態遷移を返す。
 
@@ -411,7 +411,7 @@ MTP KV 容量は `num_pages * page_tokens`（既定 64 token）である。
 | --- | --- | --- |
 | `num_drafts` | 4 | 1 iteration の最大 draft 数 |
 | `bonus_token_enabled` | true | all-accept 時に bonus token を emit する |
-| `eos_token` | -1 | EOS（負値で無効） |
+| `eos_tokens` | 空 | generation stop token 列（空で無効。いずれかで停止） |
 | `verify_numeric_mode` | `Fast` | verify の numeric mode |
 | `draft_policy` | 無効 | dynamic / discard policy |
 | `ngram_n` | 0 | n-gram tail の n（0 で無効） |
@@ -440,7 +440,7 @@ production CLI / server には MTP の起動 option が無い（serve path は D
 2. MTP state を reset してから `spec_decoder_sync_prompt()` を呼び、
    `prompt_tokens_count - 1` 行を teacher-force して MTP KV を構築する。
    直後に `logical_length == context - 1` を検証する。
-3. `SpecDecoderConfig` は `bonus_token_enabled = true`、`eos_token = -1`、
+3. `SpecDecoderConfig` は `bonus_token_enabled = true`、`eos_tokens` は空、
    `draft_policy.dynamic = false`、
    `verify_numeric_mode = Exact`（library の既定は `Fast`。
    `--verify-mode fast` で `Fast` を指定できる）。

@@ -173,10 +173,16 @@ host-side request objectは解放しない。
   `DFlash2Executor` は `const DFlash2Config*` / `const DFlash2Weights*` を指すため、
   両者は serve 中アドレスを安定させる。serve 終了時に `dflash2_executor_shutdown()` し、
   その後 `Qwen35ComputeRuntime::shutdown()` する。
-- `max_concurrent_requests` は 1。`temperature > 0` / `grammar` / `structural_tag` /
+- `max_concurrent_requests` は compute の指定値をそのまま使う（DFlash2 でも複数
+  受付できる）。inflight は順に1つずつ round され、同時に in-flight な target
+  submit は常に1つで、round ごとに完全 sync する。`temperature > 0` /
+  `grammar` / `structural_tag` /
   `prefix_cache_checkpoint_position` は request ごとに受け付け、constraint state は
   `DFlashServeSession` が所有して decoder へ渡す。constraint の配線は
   `Qwen35ComputeRuntime::create_constraint_state()` を経由する。
+- `--kv-cache-capacity-tokens` が未指定で concurrency > 1 のとき、server は
+  `(concurrency + 1) × (max_seq_len + 1)` へ自動拡張する（DFlash は
+  `ContinuousBatcher` を通らないため KV Banker の admission が効かない）。
 - DFlash の prefix cache checkpoint は prompt boundary（prompt 全体）で保存する。
   `prefix_cache_checkpoint_position` は保存位置の指定としては使われない。
 - `prefix_cache_checkpoint_position` は prefix cache が有効なときだけ backend から送る。

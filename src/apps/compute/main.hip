@@ -589,7 +589,7 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
 
     ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
-    decoder_config.eos_token = static_cast<int32_t>(text_config.eos_token_id);
+    decoder_config.eos_tokens = text_config.stop_tokens;
     decoder_config.verify_numeric_mode = ps::runtime::VerifyNumericMode::Exact;
     decoder_config.ngram_n = static_cast<uint32_t>(dflash2_ngram_n);
     decoder_config.ngram_max_tail = static_cast<uint32_t>(dflash2_ngram_tail);
@@ -628,8 +628,7 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
     const auto t_prefill_end = std::chrono::steady_clock::now();
 
     const auto t_decode_start = std::chrono::steady_clock::now();
-    const int32_t eos_token = decoder_config.eos_token;
-    bool finished = (eos_token >= 0 && pending == eos_token);
+    bool finished = ps::qwen35::is_stop_token(decoder_config.eos_tokens, pending);
     while (!finished && generated.size() < max_new_tokens) {
         const uint32_t remaining =
             static_cast<uint32_t>(max_new_tokens - generated.size());
@@ -681,7 +680,14 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
         printf("DFLASH2_PARTIAL_ACCEPTS=%u\n", timing.partial_accepts);
         printf("DFLASH2_GDN_HISTORY_BYTES=%llu\n",
                static_cast<unsigned long long>(timing.gdn_history_bytes));
-        printf("DFLASH2_GDN_MODE=%s\n", decoder.gdn_history_enabled ? "history" : "rerun");
+        printf("DFLASH2_GDN_SNAPSHOT_BYTES=%llu\n",
+               static_cast<unsigned long long>(decoder.gdn_snapshot_bytes));
+        printf("DFLASH2_GDN_COMPACT_BYTES=%llu\n",
+               static_cast<unsigned long long>(decoder.gdn_compact_bytes));
+        printf("DFLASH2_GDN_MODE=%s\n",
+               decoder.gdn_compact_commit
+                   ? "compact"
+                   : (decoder.gdn_history_enabled ? "history" : "rerun"));
         printf("DFLASH2_ACCEPTED_DRAFTS=%u\n", timing.accepted_drafts);
         printf("DFLASH2_MEAN_ACCEPTED=%.3f\n", mean_accepted);
         printf("DFLASH2_FULL_ACCEPT_RATE=%.3f\n", full_rate);
@@ -966,6 +972,17 @@ void serve_dflash_close_session(ServeGeneration& generation, hipStream_t stream)
                 ? static_cast<float>(t.full_accepts) / rounds : 0.0f;
             const float emitted = t.rounds > 0u
                 ? static_cast<float>(t.generated_tokens) / rounds : 0.0f;
+            const auto& dec = *generation.dflash_session->decoder;
+            fprintf(stderr, "DFLASH2_GDN_MODE=%s\n",
+                    dec.gdn_compact_commit
+                        ? "compact"
+                        : (dec.gdn_history_enabled ? "history" : "rerun"));
+            fprintf(stderr, "DFLASH2_GDN_HISTORY_BYTES=%llu\n",
+                    static_cast<unsigned long long>(t.gdn_history_bytes));
+            fprintf(stderr, "DFLASH2_GDN_SNAPSHOT_BYTES=%llu\n",
+                    static_cast<unsigned long long>(dec.gdn_snapshot_bytes));
+            fprintf(stderr, "DFLASH2_GDN_COMPACT_BYTES=%llu\n",
+                    static_cast<unsigned long long>(dec.gdn_compact_bytes));
             fprintf(stderr, "DFLASH2_ROUNDS=%u\n", t.rounds);
             fprintf(stderr, "DFLASH2_ACCEPTED_DRAFTS=%u\n", t.accepted_drafts);
             fprintf(stderr, "DFLASH2_MEAN_ACCEPTED=%.3f\n", mean);
@@ -1173,15 +1190,16 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
                                      const std::vector<int32_t>& input_ids,
                                      const std::string& grammar,
                                      const std::string& structural_tag,
-                                     const ps::qwen35::runtime::SamplingConfig& sampling) {
+                                     const ps::qwen35::runtime::SamplingConfig& sampling,
+                                     uint32_t prefix_cache_checkpoint_position = 0u) {
     auto& slot_pool = runtime.slot_pool();
     auto& gdn_pool = runtime.gdn_pool();
     auto& kv_pool = runtime.kv_pool();
     auto& arena = runtime.arena();
     const hipStream_t stream = runtime.stream();
     const uint32_t max_seq = runtime.config().max_seq_len;
-    const int32_t eos_token =
-        static_cast<int32_t>(runtime.model().text_config().eos_token_id);
+    const ps::qwen35::StopTokens& eos_tokens =
+        runtime.model().text_config().stop_tokens;
 
     auto session = std::make_unique<DFlashServeSession>();
     auto sequence_result = ps::qwen35::create_paged_sequence_state(
@@ -1225,7 +1243,7 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
 
     ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = dflash.drafts;
-    decoder_config.eos_token = eos_token;
+    decoder_config.eos_tokens = eos_tokens;
     decoder_config.verify_numeric_mode = ps::runtime::VerifyNumericMode::Exact;
     decoder_config.ngram_n = dflash.ngram_n;
     decoder_config.ngram_max_tail = dflash.ngram_tail;
@@ -1266,7 +1284,7 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
 
     auto prefill_result = ps::qwen35::runtime::dflash2_spec_prefill(
         *session->decoder, input_ids.data(), static_cast<uint32_t>(input_ids.size()),
-        restored_tokens);
+        restored_tokens, prefix_cache_checkpoint_position);
     if (!prefill_result.ok()) {
         (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
         (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
@@ -1294,7 +1312,7 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     session->ready = true;
     generation.dflash_session = std::move(session);
     generation.generated.push_back(pending);
-    if (eos_token >= 0 && pending == eos_token) {
+    if (ps::qwen35::is_stop_token(eos_tokens, pending)) {
         generation.finished = true;
         generation.finish_reason = ps::qwen35::runtime::FinishReason::Eos;
     }
@@ -1456,7 +1474,8 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
     if (dflash.enabled) {
         generation.dflash = true;
         const ps::Status open_status = serve_dflash_open_session(
-            dflash, runtime, generation, input_ids, grammar, structural_tag, sampling);
+            dflash, runtime, generation, input_ids, grammar, structural_tag, sampling,
+            prefix_cache_checkpoint_position);
         if (!open_status.ok()) {
             emit_error_with_code(request_id, constraint_error_code(open_status.code()),
                                  open_status.message());
@@ -1893,7 +1912,6 @@ int main(int argc, char** argv) {
                     dflash_config.max_draft_tokens());
             return 2;
         }
-        config.max_concurrent_requests = 1;
     }
 
     std::vector<int32_t> prompt_ids;

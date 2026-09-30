@@ -97,8 +97,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         std::chrono::duration<double, std::milli>(t_load_end - t_load_start).count();
 
     const auto& text_config = model_->text_config();
-    const int32_t generation_stop_token =
-        static_cast<int32_t>(text_config.eos_token_id);
+    const qwen35::StopTokens& generation_stop_tokens = text_config.stop_tokens;
     const uint32_t kv_heads = static_cast<uint32_t>(text_config.num_key_value_heads);
     const uint32_t head_dim = static_cast<uint32_t>(text_config.attention_head_dim);
     const uint32_t num_attn_layers = count_attention_layers(text_config);
@@ -116,7 +115,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         auto compiler_result = qwen35::runtime::TokenConstraintCompiler::create(
             tokenizer_json,
             static_cast<uint32_t>(text_config.vocab_size),
-            generation_stop_token);
+            generation_stop_tokens);
         if (!compiler_result.ok()) {
             return compiler_result.status();
         }
@@ -210,7 +209,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     batcher_config.max_scheduled_requests = exec_config.max_scheduled_requests;
     batcher_config.max_seq_len = max_seq;
     batcher_config.page_tokens = config_.page_tokens;
-    batcher_config.eos_token_id = static_cast<int32_t>(text_config.eos_token_id);
+    batcher_config.eos_token_ids = text_config.stop_tokens;
     batcher_config.constraint_mask_words = constraint_mask_words;
 
     batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(

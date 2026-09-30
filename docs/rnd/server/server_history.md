@@ -113,3 +113,19 @@ negligible である。この測定のために GPU runtime / kernel / instrumen
 - transformers oracle（`chat_single`）の generated_ids は `[3793, 248046, 198, 248044]` であり、
   248046 の後も生成が継続し 248044 で停止する。したがって model config eos と tokenizer eos の
   divergence は検証済みの正常状態である。
+
+### 訂正（後日判明）
+
+この結論は誤りだった。当時の oracle（`tests/e2e/generate_qwen35_4b_oracle.py` の
+`greedy_steps`）は独自の greedy ループに `stop_id` を 1 つだけ渡しており、
+`text_config.eos_token_id`（248044）のみで停止していた。transformers の
+`generate()` は `generation_config.eos_token_id` を尊重し、このモデルでは
+`[248046, 248044]` のいずれかで停止する。したがって oracle は HF の既定挙動を
+再現しておらず、「248046 の後も継続する」は観測者の stop 条件の産物だった。
+
+tool calling ではモデルが `</tool_call><|im_end|>` の後も会話の続きを捏造して
+2 個目の tool call を出す、または `max_tokens` が小さいと捏造途中で打ち切られて
+content に `user\n\nassistant\n<think>` が混入した。turn 終端 `<|im_end|>` を
+stop token に含めることで解消した。詳細は
+[structured_generation.md](../../developer/structured_generation.md#generation-stop-token) を参照。
+

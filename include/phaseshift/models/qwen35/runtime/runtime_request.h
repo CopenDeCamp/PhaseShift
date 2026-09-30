@@ -3,6 +3,7 @@
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
 #include <phaseshift/models/qwen35/runtime/token_constraint.h>
+#include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/core/status.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -72,7 +73,7 @@ enum class CommitAction : uint8_t {
 CommitAction commit_sampled_token(
     RuntimeRequest& request,
     int32_t token,
-    int32_t eos_token_id);
+    const StopTokens& stop_tokens);
 
 CommitAction commit_final_prefill_without_sample(RuntimeRequest& request);
 

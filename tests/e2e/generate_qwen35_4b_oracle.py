@@ -119,7 +119,7 @@ def validate_geometry(model_dir: Path) -> dict:
 
 
 def greedy_steps(model, tokenizer, input_ids: list[int], max_new_tokens: int,
-                 device: str, stop_id: int):
+                 device: str, stop_ids: list[int]):
     import torch
 
     ids = torch.tensor([input_ids], dtype=torch.long, device=device)
@@ -146,16 +146,16 @@ def greedy_steps(model, tokenizer, input_ids: list[int], max_new_tokens: int,
                 "top2_logit": float(top2.values[1].item()),
                 "margin": margin,
             })
-            if next_id == stop_id:
+            if next_id in stop_ids:
                 break
             ids = torch.tensor([[next_id]], dtype=torch.long, device=device)
     return generated, steps
 
 
 def check_case(label: str, model, tokenizer, input_ids, max_new_tokens, device,
-               stop_id: int, min_tokens: int, exact_tokens: int | None):
-    run1, steps1 = greedy_steps(model, tokenizer, input_ids, max_new_tokens, device, stop_id)
-    run2, _ = greedy_steps(model, tokenizer, input_ids, max_new_tokens, device, stop_id)
+               stop_ids: list[int], min_tokens: int, exact_tokens: int | None):
+    run1, steps1 = greedy_steps(model, tokenizer, input_ids, max_new_tokens, device, stop_ids)
+    run2, _ = greedy_steps(model, tokenizer, input_ids, max_new_tokens, device, stop_ids)
     if run1 != run2:
         fail(f"{label}: non-deterministic oracle (run1={run1} run2={run2})")
     if len(run1) < min_tokens:
@@ -166,6 +166,22 @@ def check_case(label: str, model, tokenizer, input_ids, max_new_tokens, device,
     if min_margin < MIN_MARGIN:
         fail(f"{label}: min margin {min_margin:.6f} < {MIN_MARGIN}")
     return run1, steps1[:len(run1)], min_margin
+
+
+def generation_stop_ids(model_dir: Path) -> list[int]:
+    """Generation stop tokens from generation_config.json (text_config fallback)."""
+    generation_config = model_dir / "generation_config.json"
+    if generation_config.is_file():
+        gen = json.loads(generation_config.read_text())
+        eos = gen.get("eos_token_id") if isinstance(gen, dict) else None
+        if isinstance(eos, int):
+            return [int(eos)]
+        if isinstance(eos, list):
+            ids = [int(t) for t in eos if isinstance(t, int)]
+            if ids:
+                return ids
+    cfg = json.loads((model_dir / "config.json").read_text())
+    return [int((cfg.get("text_config", cfg))["eos_token_id"])]
 
 
 def reply_text(processor, generated: list[int]) -> str:
@@ -205,8 +221,7 @@ def main() -> int:
         attn_implementation="eager",
         local_files_only=True,
     ).to(args.device).eval()
-    cfg = json.loads((model_dir / "config.json").read_text())
-    stop_id = int((cfg.get("text_config", cfg))["eos_token_id"])
+    stop_ids = generation_stop_ids(model_dir)
 
     cases = []
 
@@ -216,7 +231,7 @@ def main() -> int:
         try:
             generated, steps, min_margin = check_case(
                 f"raw:{prompt!r}", model, processor, input_ids, 3, args.device,
-                stop_id=stop_id, min_tokens=3, exact_tokens=3)
+                stop_ids=stop_ids, min_tokens=3, exact_tokens=3)
         except SystemExit:
             continue
         decoded = processor.decode(list(generated), skip_special_tokens=True)
@@ -245,7 +260,7 @@ def main() -> int:
         try:
             generated, steps, min_margin = check_case(
                 f"chat_single:{prompt!r}", model, processor, input_ids,
-                CHAT_SINGLE_MAX_TOKENS, args.device, stop_id=stop_id, min_tokens=1,
+                CHAT_SINGLE_MAX_TOKENS, args.device, stop_ids=stop_ids, min_tokens=1,
                 exact_tokens=None)
         except SystemExit:
             continue
@@ -271,7 +286,7 @@ def main() -> int:
     turn1_ids = chat_input_ids(processor, turn1_messages)
     t1_generated, t1_steps, t1_margin = check_case(
         "chat_turn1", model, processor, turn1_ids, CHAT_TURN_MAX_TOKENS,
-        args.device, stop_id=stop_id, min_tokens=1, exact_tokens=None)
+        args.device, stop_ids=stop_ids, min_tokens=1, exact_tokens=None)
     assistant1_raw = processor.decode(list(t1_generated), skip_special_tokens=True)
     assistant1 = reply_text(processor, t1_generated)
     if not assistant1.strip() or "\n" in assistant1:
@@ -296,7 +311,7 @@ def main() -> int:
     turn2_ids = chat_input_ids(processor, turn2_messages)
     t2_generated, t2_steps, t2_margin = check_case(
         "chat_turn2", model, processor, turn2_ids, CHAT_TURN_MAX_TOKENS,
-        args.device, stop_id=stop_id, min_tokens=1, exact_tokens=None)
+        args.device, stop_ids=stop_ids, min_tokens=1, exact_tokens=None)
     assistant2_raw = processor.decode(list(t2_generated), skip_special_tokens=True)
     assistant2 = reply_text(processor, t2_generated)
     if not assistant2.strip() or "\n" in assistant2:

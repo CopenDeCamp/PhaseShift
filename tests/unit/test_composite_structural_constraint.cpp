@@ -260,7 +260,7 @@ int main() {
     TestTokenizer tokenizer = make_tokenizer();
     const std::string serialized = make_tokenizer_info(tokenizer).SerializeJSON();
     auto compiler_result = ps::qwen35::runtime::TokenConstraintCompiler::create(
-        serialized, static_cast<uint32_t>(tokenizer.encoded.size()), tokenizer.stop);
+        serialized, static_cast<uint32_t>(tokenizer.encoded.size()), ps::qwen35::StopTokens{tokenizer.stop});
     CHECK(compiler_result.ok());
     if (compiler_result.ok()) {
         auto& compiler = *compiler_result.value();

@@ -100,6 +100,27 @@ def xgrammar_version() -> str | None:
         return None
 
 
+def generation_stop_tokens() -> list[int]:
+    """Generation stop tokens from generation_config.json (text_config fallback)."""
+    generation_config = model_dir() / "generation_config.json"
+    if generation_config.is_file():
+        config = json.loads(generation_config.read_text())
+        eos = config.get("eos_token_id") if isinstance(config, dict) else None
+        if isinstance(eos, bool):
+            eos = None
+        if isinstance(eos, int):
+            return [int(eos)]
+        if isinstance(eos, list):
+            tokens = [int(t) for t in eos if isinstance(t, int) and not isinstance(t, bool)]
+            if tokens:
+                return tokens
+    with open(model_dir() / "config.json", "r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    text_config = config.get("text_config", config)
+    eos = text_config.get("eos_token_id")
+    return [int(eos)] if eos is not None else []
+
+
 def generation_stop_probe() -> dict:
     """Developer diagnostic for the generation stop token contract."""
     processor = load_processor()
@@ -109,6 +130,7 @@ def generation_stop_probe() -> dict:
     tokenizer = getattr(processor, "tokenizer", processor)
     model_eos = text_config.get("eos_token_id")
     tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
+    stop_tokens = generation_stop_tokens()
 
     def token_repr(token_id):
         if token_id is None:
@@ -132,6 +154,8 @@ def generation_stop_probe() -> dict:
         "tokenizer_eos_metadata": tokenizer_eos,
         "model_eos_token": token_repr(model_eos),
         "tokenizer_eos_token": token_repr(tokenizer_eos),
+        "generation_stop_tokens": stop_tokens,
+        "generation_stop_token_names": [token_repr(t) for t in stop_tokens],
         "oracle_terminal_token": oracle_terminal,
     }
 
@@ -157,8 +181,7 @@ def constraint_tokenizer_info() -> str | None:
         info = xgrammar.TokenizerInfo.from_huggingface(
             tokenizer,
             vocab_size=int(text_config.get("vocab_size", 0)) or None,
-            stop_token_ids=[int(text_config["eos_token_id"])]
-            if text_config.get("eos_token_id") is not None else None,
+            stop_token_ids=generation_stop_tokens() or None,
         )
         import tempfile
 

@@ -54,7 +54,7 @@ int main() {
                                  static_cast<int>(kVocabSize),
                                  std::vector<int32_t>{kStop});
     auto compiler_result = TokenConstraintCompiler::create(info.SerializeJSON(), kVocabSize,
-                                                           kStop);
+                                                           ps::qwen35::StopTokens{kStop});
     CHECK(compiler_result.ok());
     if (!compiler_result.ok()) return 1;
     auto& compiler = *compiler_result.value();

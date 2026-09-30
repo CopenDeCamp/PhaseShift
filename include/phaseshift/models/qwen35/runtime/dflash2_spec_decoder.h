@@ -10,6 +10,7 @@
 #include <phaseshift/models/qwen35/runtime/token_constraint.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
+#include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/runtime/execution/execution_types.h>
 #include <hip/hip_runtime.h>
 
@@ -27,7 +28,7 @@ constexpr uint64_t kDFlash2SpecHistoryBytesMax = (9ull * 1024ull * 1024ull * 102
 
 struct DFlash2SpecDecoderConfig {
     uint32_t num_drafts = 7u;
-    int32_t eos_token = -1;
+    StopTokens eos_tokens;
     ::ps::runtime::VerifyNumericMode verify_numeric_mode =
         ::ps::runtime::VerifyNumericMode::Exact;
     uint32_t ngram_n = 0u;
@@ -54,6 +55,8 @@ struct DFlash2SpecDecoder {
     GdnSpecHistory gdn_history;
     bool gdn_history_enabled = false;
     bool gdn_rerun_reference = false;
+    uint64_t gdn_snapshot_bytes = 0u;
+    uint64_t gdn_compact_bytes = 0u;
 
     bool gdn_compact_commit = false;
     float* gdn_compact_delta = nullptr;
@@ -120,7 +123,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
     uint32_t prompt_count,
-    uint32_t restored_tokens = 0u);
+    uint32_t restored_tokens = 0u,
+    uint32_t checkpoint_position = 0u);
 
 struct DFlash2TargetSnapshot {
     uint32_t position = 0u;

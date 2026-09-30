@@ -18,8 +18,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (Checker, ServerHarness, http_get_json,  # noqa: E402
-                     http_json, http_post_status, localai_binary,
-                     model_dir)
+                     ensure_chat_import, http_json, http_post_status,
+                     localai_binary, model_dir)
+
+codec = ensure_chat_import()
 
 DFLASH2_MODEL_DIR = os.environ.get("PHASESHIFT_DFLASH2_MODEL_DIR")
 KV_DTYPE = os.environ.get("PHASESHIFT_TEST_KV_DTYPE", "psq4")
@@ -150,6 +152,13 @@ def main() -> int:
             checker.check("tool call name",
                           tool_calls[0]["function"]["name"] == "get_weather",
                           str(tool_calls[0])[:300])
+            tool_content = tools["choices"][0]["message"].get("content") or ""
+            reasoning, _ = codec.split_reasoning_final(tool_content)
+            checker.check("tools content has no thinking block",
+                          not reasoning.strip(), repr(tool_content[:300]))
+            checker.check("tools content has no think markup",
+                          codec._THINK_OPEN not in tool_content,
+                          repr(tool_content[:300]))
 
         responses = http_json(f"{harness.base_url}/responses", {
             "model": "phaseshift",

@@ -2,6 +2,7 @@
 
 #include <phaseshift/models/qwen35/runtime/spec_decode.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
+#include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/core/status.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
@@ -13,7 +14,7 @@ namespace ps::qwen35::runtime {
 struct SpecDecoderConfig {
     uint32_t num_drafts = 4u;
     bool bonus_token_enabled = true;
-    int32_t eos_token = -1;
+    StopTokens eos_tokens;
     ::ps::runtime::VerifyNumericMode verify_numeric_mode =
         ::ps::runtime::VerifyNumericMode::Fast;
     MtpDraftPolicy draft_policy;

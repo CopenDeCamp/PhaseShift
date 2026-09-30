@@ -1202,7 +1202,7 @@ int run_mtp(int argc, char** argv) {
         ps::qwen35::runtime::SpecDecoderConfig spec_config;
         spec_config.num_drafts = static_cast<uint32_t>(draft_k);
         spec_config.bonus_token_enabled = true;
-        spec_config.eos_token = -1;
+        spec_config.eos_tokens.clear();
         spec_config.verify_numeric_mode =
             spec_exact ? ps::runtime::VerifyNumericMode::Exact
                        : ps::runtime::VerifyNumericMode::Fast;
