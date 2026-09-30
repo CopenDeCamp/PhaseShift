@@ -438,6 +438,50 @@ draft 受容（E/round）が ±26〜28% 変わるためで、計算コスト差�
 recurrence コストは verify の **+約 7 ms/round（+17%）**である。prefill 側の既存計測は
 `docs/rnd/gdn/optimization_history.md` §7.51（e2e PP で lossy が +3.7% tok/s）を参照。
 
+### 6.6 K/T sweep（compact 経路、2026-09-30）
+
+§6.3 では T のみを sweep し K=7 固定だったため、K と T を同時に sweep した。
+GDN compact log 経路（`PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT=1`、rerun 不使用）で、
+Exact verify・既定 lossy・N=5・window 2048・GEN=256・RUNS=1・6 workload。
+**parity 72/72（failed=0）**。artifact は `artifacts/ngram_tail_gate2/kt_sweep/`。
+
+tok/s（`PHASESHIFT_NGRAM_TAIL_GATE2_GRID="1:8,3:8,5:8,7:0,7:8,7:16"`）:
+
+| workload | k1_t8 | k3_t8 | k5_t8 | k7_t0 | **k7_t8** | k7_t16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| code PP512 | 41.85 | 67.39 | 79.00 | 91.19 | **91.59** | 90.60 |
+| code PP2048 | 53.03 | 87.77 | 106.82 | 124.24 | **127.01** | 124.12 |
+| json PP512 | 73.57 | 92.61 | 105.62 | 96.59 | **106.47** | 102.39 |
+| json PP2048 | 41.95 | 58.50 | 59.76 | **62.17** | 60.89 | 59.14 |
+| prose PP2048 | 43.07 | 58.20 | 58.14 | **60.00** | 59.79 | 60.64 |
+| reasoning PP2048 | 54.53 | 76.08 | 87.97 | **80.97** | 86.18 | 82.50 |
+| **平均** | 51.3 | 73.4 | 82.9 | 85.9 | **88.7** | 86.6 |
+
+E/round（accepted / round）の平均と verify rows（code PP512 / json PP512）:
+
+| K/T | 平均 E/round | rows（code512 / json512） |
+| --- | ---: | --- |
+| k7_t0 | 4.435 | 7.9 / 7.9 |
+| **k7_t8** | 4.856 | 8.4 / 12.1 |
+| k7_t16 | 4.972 | 8.7 / 14.4 |
+
+**判定**
+
+- **K: 7 が最良。** T=8 一定で K を 1→3→5→7 と上げると平均 tok/s が
+  51.3 → 73.4 → 82.9 → 88.7 と単調に改善し、6 workload 中 4 つで K=7 が最高。
+  上限は `Config::max_draft_tokens() = block_size - 1`（DFlash2 block_size=8）で
+  **K=7 が設定可能な最大値**のため、これ以上は選べない。
+- **T: 8 が最良。** 平均 tok/s は T=0 が 85.9、**T=8 が 88.7**、T=16 が 86.6。
+  T を上げると E/round は増える（4.435 → 4.856 → 4.972）が、verify rows も
+  7.9 → 12.1 → 14.4 と伸び、増分がコストを上回るのは T=8 まで。
+  §6.3（rerun 経路）の結論 **T=8 が最良**を compact 経路でも再確認した。
+- workload 依存では json PP512 のみ T=8 の効果が大きく（k7_t0 比 **+10.2%**）、
+  json/prose PP2048 は T=0 がわずかに上回る（-2% 未満）。
+  6 workload 平均では T=8 が T=0 比 **+3.3%**。
+
+**推奨: DFlash2 K=7 + NgramTail T=8（N=5、window 2048）** — 既存推奨と一致し、
+K を sweep しても K=7 が上限かつ最良、T は 8 が山という結論は変わらない。
+
 ## 7. Gate 1 oracle との差
 
 §48 の通り、Gate 1 の `accepted_per_position` を Gate 2 の期待値にしてはならない。

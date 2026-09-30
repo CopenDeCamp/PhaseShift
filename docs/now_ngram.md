@@ -203,6 +203,35 @@ rank-1 更新の性質上、k の 1 要素の誤りは **key 次元の 1 行 × 
 
 ---
 
+## 追記（2026-09-30）: K/T sweep と最良パラメータ
+
+main は `68cbf6e0` のまま進んでおらず、ブランチは既に最新 main 上（rebase 不要）。
+
+harness に `PHASESHIFT_NGRAM_TAIL_GATE2_GRID="K:T,..."`（K/T 自由指定）を追加し、
+compact 経路（rerun 不使用）で K/T を sweep した。6 workload × 6 設定、
+GEN=256 / RUNS=1、**parity 72/72（failed=0）**。
+`artifacts/ngram_tail_gate2/kt_sweep/`、詳細は
+`docs/rnd/spec_decode/ngram_tail_gate2.md` §6.6。
+
+平均 tok/s:
+
+| K/T | k1_t8 | k3_t8 | k5_t8 | k7_t0 | **k7_t8** | k7_t16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 平均 | 51.3 | 73.4 | 82.9 | 85.9 | **88.7** | 86.6 |
+
+- **K=7 が最良かつ上限**: T=8 一定で K を上げるほど単調改善（51.3→73.4→82.9→88.7）。
+  上限は `max_draft_tokens() = block_size - 1`（DFlash2 block_size=8）＝**7**。
+- **T=8 が最良**: T=0 は 85.9、**T=8 は 88.7**、T=16 は 86.6。
+  T は E/round を増やす（4.435→4.856→4.972）が verify rows も伸び
+  （7.9→12.1→14.4）、山は T=8。T=0 比で平均 **+3.3%**、json PP512 は **+10.2%**。
+- 推奨は従来どおり **DFlash2 K=7 + NgramTail T=8（N=5、window 2048）**。
+
+ついでに、compact の history を conv-only 化（rec は compact log の責務）して
+full history による arena 溢れ（5 設目で 30 GB 超）を解消。
+等価性は候補1で確認済みで、correctness 32/32・perf 72/72・既定 32/32・kernel 10/10 を確認。
+
+---
+
 ## 再現
 
 ```bash

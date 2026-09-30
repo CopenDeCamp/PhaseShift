@@ -8,7 +8,8 @@ namespace ps::qwen35::runtime {
 Result<GdnSpecHistory> create_gdn_spec_history(
     gpu::GpuArena& arena,
     const GdnStatePool& pool,
-    uint32_t rows) {
+    uint32_t rows,
+    bool with_recurrent) {
     if (rows == 0u) {
         return Status::invalid_argument("create_gdn_spec_history: rows is zero", __FILE__,
                                         __LINE__);
@@ -23,7 +24,8 @@ Result<GdnSpecHistory> create_gdn_spec_history(
     history.rows = rows;
     history.conv_state_bytes = static_cast<std::size_t>(view.conv_slot_stride) * sizeof(bf16_t);
     history.recurrent_state_bytes =
-        static_cast<std::size_t>(view.recurrent_slot_stride) * sizeof(float);
+        with_recurrent ? static_cast<std::size_t>(view.recurrent_slot_stride) * sizeof(float)
+                       : 0u;
 
     {
         const std::size_t count = static_cast<std::size_t>(rows) * view.conv_slot_stride;
@@ -35,7 +37,7 @@ Result<GdnSpecHistory> create_gdn_spec_history(
         if (!tensor.ok()) return tensor.status();
         history.conv = tensor.release();
     }
-    {
+    if (with_recurrent) {
         const std::size_t count = static_cast<std::size_t>(rows) * view.recurrent_slot_stride;
         auto rec_view = arena.allocate_aligned(count * sizeof(float), 256u);
         if (!rec_view.ok()) return rec_view.status();
@@ -62,7 +64,10 @@ GdnSpecHistoryDeviceView gdn_spec_history_view(
     view.recurrent_history = history.recurrent.data<float>();
     view.capture_rows = capture_rows;
     view.conv_row_stride = static_cast<uint64_t>(history.conv.dim(1));
-    view.recurrent_row_stride = static_cast<uint64_t>(history.recurrent.dim(1));
+    view.recurrent_row_stride =
+        history.recurrent_state_bytes != 0u
+            ? static_cast<uint64_t>(history.recurrent.dim(1))
+            : 0u;
     return view;
 }
 
@@ -101,9 +106,6 @@ Status restore_gdn_spec_history(
     const bf16_t* conv_src =
         history.conv.data<bf16_t>() +
         static_cast<std::size_t>(history_row) * history.conv.dim(1);
-    const float* rec_src =
-        history.recurrent.data<float>() +
-        static_cast<std::size_t>(history_row) * history.recurrent.dim(1);
 
     hipError_t err = hipMemcpyAsync(conv_dst, conv_src, history.conv_state_bytes,
                                     hipMemcpyDeviceToDevice, stream);
@@ -111,6 +113,10 @@ Status restore_gdn_spec_history(
         return Status::hip_error("restore_gdn_spec_history conv copy", hipGetErrorString(err),
                                  __FILE__, __LINE__);
     }
+    if (history.recurrent_state_bytes == 0u) return Status::make_ok();
+    const float* rec_src =
+        history.recurrent.data<float>() +
+        static_cast<std::size_t>(history_row) * history.recurrent.dim(1);
     err = hipMemcpyAsync(rec_dst, rec_src, history.recurrent_state_bytes,
                          hipMemcpyDeviceToDevice, stream);
     if (err != hipSuccess) {

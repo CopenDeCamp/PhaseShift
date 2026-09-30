@@ -392,15 +392,34 @@ int main() {
 
     std::vector<CaseConfig> all_configs;
     if (perf_mode) {
-        all_configs.push_back({"A_k7_t0", 7u, 0u, false});
-        all_configs.push_back({"B_k7_t0_hostd2h", 7u, 0u, true});
-        all_configs.push_back({"C_k7_t8", 7u, 8u, false});
-        if (std::getenv("PHASESHIFT_NGRAM_TAIL_GATE2_DIAG") != nullptr) {
-            all_configs.push_back({"C_k7_t9", 7u, 9u, false});
+        const char* grid_env = std::getenv("PHASESHIFT_NGRAM_TAIL_GATE2_GRID");
+        if (grid_env != nullptr && grid_env[0] != '\0') {
+            for (const std::string& item : split_list(grid_env, ",")) {
+                const std::size_t c = item.find(':');
+                if (c == std::string::npos) continue;
+                const uint32_t kk = static_cast<uint32_t>(
+                    std::strtoul(item.substr(0, c).c_str(), nullptr, 10));
+                const uint32_t tt = static_cast<uint32_t>(
+                    std::strtoul(item.substr(c + 1u).c_str(), nullptr, 10));
+                if (kk == 0u) continue;
+                const std::string name =
+                    "k" + std::to_string(kk) + "_t" + std::to_string(tt);
+                all_configs.push_back({name, kk, tt, false});
+            }
+        } else {
+            all_configs.push_back({"A_k7_t0", 7u, 0u, false});
+            all_configs.push_back({"B_k7_t0_hostd2h", 7u, 0u, true});
+            all_configs.push_back({"C_k7_t8", 7u, 8u, false});
+            if (std::getenv("PHASESHIFT_NGRAM_TAIL_GATE2_DIAG") != nullptr) {
+                all_configs.push_back({"C_k7_t9", 7u, 9u, false});
+            }
+            all_configs.push_back({"C_k7_t16", 7u, 16u, false});
+            all_configs.push_back({"C_k7_t32", 7u, 32u, false});
         }
-        all_configs.push_back({"C_k7_t16", 7u, 16u, false});
-        all_configs.push_back({"C_k7_t32", 7u, 32u, false});
-        setenv("PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE", "1", 1);
+        const char* compact_env = std::getenv("PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT");
+        const bool compact = compact_env != nullptr && compact_env[0] != '\0' &&
+                             compact_env[0] != '0';
+        if (!compact) setenv("PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE", "1", 1);
     } else {
         all_configs.push_back({"k1_t6", 1u, 6u, false});
         all_configs.push_back({"k3_t4", 3u, 4u, false});

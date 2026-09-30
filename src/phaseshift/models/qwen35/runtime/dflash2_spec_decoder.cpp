@@ -196,6 +196,7 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     decoder.gdn_conv_bytes = spec_gdn_conv_bytes(gdn_pool);
     decoder.gdn_rec_bytes = spec_gdn_recurrent_bytes(gdn_pool);
     const bool compact_requested = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT", false);
+    const bool compact_diag = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_DIAG", false);
     const char* rerun_env = std::getenv("PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE");
     decoder.gdn_rerun_reference =
         rerun_env != nullptr && rerun_env[0] != '\0' && rerun_env[0] != '0';
@@ -218,14 +219,15 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
         }
     }
     if (!decoder.gdn_rerun_reference || compact_requested) {
-        auto history_result = create_gdn_spec_history(arena, gdn_pool, history_rows);
+        auto history_result = create_gdn_spec_history(
+            arena, gdn_pool, history_rows, !compact_requested || compact_diag);
         if (!history_result.ok()) return history_result.status();
         decoder.gdn_history = history_result.release();
         decoder.gdn_history_enabled = true;
     }
     if (compact_requested) {
         const uint64_t states = pool_view.num_gdn_states;
-        const bool diag = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_DIAG", false);
+        const bool diag = compact_diag;
         const uint64_t log_rows = kDFlash2SpecMaxVerifyRows;
         const uint64_t vdim = static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
         const uint64_t key_heads = tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16u;

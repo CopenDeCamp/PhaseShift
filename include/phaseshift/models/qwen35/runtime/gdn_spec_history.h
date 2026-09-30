@@ -46,7 +46,8 @@ struct GdnSpecHistory {
 Result<GdnSpecHistory> create_gdn_spec_history(
     gpu::GpuArena& arena,
     const GdnStatePool& pool,
-    uint32_t rows);
+    uint32_t rows,
+    bool with_recurrent = true);
 
 GdnSpecHistoryDeviceView gdn_spec_history_view(
     const GdnSpecHistory& history,
