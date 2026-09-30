@@ -126,7 +126,7 @@ TensorInfo mtp_tensor(std::string_view name, const std::vector<int64_t>& shape) 
         return info;
     }
     if (name == "mtp.fc.weight") {
-        info.role = TensorRole::MtpOutput;
+        info.role = TensorRole::MtpFc;
         return info;
     }
     if (name == "mtp.pre_fc_norm_embedding.weight" || name == "mtp.pre_fc_norm_hidden.weight" ||

@@ -382,7 +382,11 @@ Result<SpecDraftSet> mtp_generate_drafts(
             }
         }
 
-        hidden = executor.hidden_out.data<bf16_t>();
+        const bf16_t* next_hidden =
+            (policy != nullptr && policy->chain_post_norm)
+                ? executor.hidden_out_normed.data<bf16_t>()
+                : executor.hidden_out.data<bf16_t>();
+        hidden = next_hidden;
         token = static_cast<int32_t>(outcome.value().draft_token);
         ++position;
     }

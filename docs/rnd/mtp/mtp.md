@@ -12,7 +12,8 @@
   MTP 1 層、`tie_word_embeddings=true`）
 
 production 経路は `SpecDecoder`（`spec_decoder_step`）で、その呼び出し元は
-現状 **tests のみ**。`phaseshift-cli` / `phaseshift-compute` に MTP の入口は無い。
+tests と `phaseshift-bench mtp --spec`。`phaseshift-cli` / `phaseshift-compute` に
+MTP の入口は無い。
 
 ---
 
@@ -40,6 +41,7 @@ production 経路は `SpecDecoder`（`spec_decoder_step`）で、その呼び出
   verify 本体が partial accept rerun であり M 非依存でないことが判明した
   （[optimization_history.md](optimization_history.md) §7.74）。
   §3.6 の「既定では lossless でない」は §7 の修正で解消した。
+  §3.6 の「bench harness の欠陥」は §8 の修正で解消した。
 
 ## Gate index
 
@@ -233,14 +235,16 @@ MTP head は 1 層自己回帰で、深さ 2 以降の入力が自分の出力�
 
 ### 3.6 production 入口が無い／周辺が古い
 
-- `create_spec_decoder` / `spec_decoder_step` の呼び出し元は tests のみ。
+- `create_spec_decoder` / `spec_decoder_step` の呼び出し元は tests と
+  `phaseshift-bench mtp --spec`。
 - `MtpDraftPolicy` の閾値は §7.76 の pending_hidden 修正**前**の calibration。
   修正後は static K1 が dynamic+discard を上回っており、既定 `dynamic=false`。
-- **bench harness の欠陥**:
-  - `src/apps/bench/mtp.hip` の `--spec`: MTP KV の prefill をせず
-    （`spec_mode` 相では `run_mtp_rows` を呼んでいない）、partial accept で
-    **GDN restore をしない**。→ K1 0.78x / `greedy equivalence: FAIL` はこれが原因。
-    同条件の `tg.hip` が accept 0.65 のところ mtp bench は 0.39 と食い違う。
+- **bench harness の欠陥（2026-09-29 に修正。経緯は §8）**:
+  - `src/apps/bench/mtp.hip` の `--spec` は独自の古い speculative decode loop を持ち、
+    MTP KV の prefill をせず（`spec_mode` 相では `run_mtp_rows` を呼んでいない）、
+    partial accept で **GDN restore をしなかった**。→ K1 0.78x /
+    `greedy equivalence: FAIL` の原因。同条件の `tg.hip` が accept 0.65 のところ
+    mtp bench は 0.39 と食い違った。修正後は production `SpecDecoder` を使う。
   - `test_qwen35_mtp_spec_perf`: arena を prompt ごとに bump 確保して解放しないため
     prompts=4 で K4 が `arena capacity exceeded` になる。
 
@@ -281,7 +285,8 @@ RoPE position は `accepted+1` で進むため all-accept のたびに slot が 
    参照実装の設計は `docs/references/spec_decode_loops.md`。
 3. **verify 幅の動的制御の再調整**（§3.6）。参照側の `RADIANCE_DYNAMIC_WIDTH` 相当。
 4. **production 化**: VERIFY_EXACT 相当の numeric mode を既定にし、CLI から有効化。
-5. **harness の修正**（§3.6）。1〜3 の効果を正しく測る前提。
+5. **harness の修正**（§3.6）→ 完了（§8）。1〜3 の効果は
+   `phaseshift-bench mtp --spec` で正しく測れる。
 
 ---
 
@@ -302,14 +307,22 @@ PHASESHIFT_MTP_PERF_PROMPTS=2 PHASESHIFT_VERIFY_EXACT=1 \
   --arena-gib 24 --context 256 --steps 32 --draft-k 8 \
   --tokens-file tests/data/mtp_perf/prose.psktok --chain pre
 
-# draft/verify/rerun を通した accept（GDN restore あり。正しい harness）
+# production SpecDecoder contract で draft / verify / accept（§8。既定 verify=Exact）
+./build/phaseshift-bench mtp --model-dir models/Qwen3.8-27B-PSQ --device 1 \
+  --arena-gib 24 --context 256 --steps 48 --draft-k 1 \
+  --tokens-file tests/data/mtp_perf/prose.psktok --spec --spec-only
+
+# draft/verify/rerun を通した accept（legacy。GDN restore あり）
 ./build/phaseshift-bench tg --model-dir models/Qwen3.8-27B-PSQ --device 1 \
   --context 256 --tokens 48 --tokens-file tests/data/mtp_perf/prose.psktok \
   --mode greedy --mtp --draft-k 4 --mtp-chain pre \
   --page-tokens 16 --arena-gib 24 --warmup 0 --device 1
 ```
 
-注意: `phaseshift-bench mtp --spec` は §3.6 のとおり計測に使えない。
+注意: `phaseshift-bench mtp --spec` は §8 以降 production `SpecDecoder` contract を
+使うので計測に使える。spec OFF / ON の token 完全一致が条件で、不一致なら
+終了コード非 0。`tg --mtp` は verify numeric mode を `Fast` のまま使うため
+27B-PSQ では greedy からずれる（§3.5 / §7.68）。
 `test_qwen35_mtp_spec_perf` は arena と state 使い回しの問題があり、
 K4/K8 を prompts 4 以上で回すと途中で落ちる。
 
@@ -374,6 +387,76 @@ K4/K8 を prompts 4 以上で回すと途中で落ちる。
 
 - pp2048: 863.79 ms（2370.95 tok/s）
 - tg ctx2048 tok32: 27.32 tok/s
+
+---
+
+## 8. 修正（2026-09-29）: `phaseshift-bench mtp --spec` を production SpecDecoder へ
+
+### 8.1 症状
+
+`phaseshift-bench mtp --spec` が `greedy equivalence: FAIL` となり、
+同条件の `tg --mtp` が accept 0.65 を出す箇所で 0.39 しか出なかった。
+harness が SpecDecoder を使わず、独自の古い speculative decode loop を持っていた。
+
+### 8.2 原因
+
+1. `--spec` の parse が `spec_mode = true; spec_only = true;` であり、
+   MTP prompt KV の teacher-force prefill が `if (!spec_only)` の中にあった。
+   そのため `--spec` では MTP prompt KV が構築されない。
+2. それでも最初の draft は `run_mtp_head(mtp, hid, in_tok, P + k, stream)` を呼び、
+   `prefix_length = context - 1` 相当を前提に attention していた
+   （重大な state contract 違反）。
+3. partial accept 時に `seq.position = P + 1` に戻すだけで、verify 前の
+   GDN recurrent / conv state を restore していなかった。正規 `SpecDecoder` は
+   `spec_gdn_snapshot` → verify → partial accept → `spec_gdn_restore` →
+   accepted prefix rerun を行う。
+4. `run_mtp_head(position)` ベースの loop は、
+   `mtp_forward_step` + `MtpKvState.logical_length` による
+   「logical KV index / absolute RoPE position の分離」を表現できない。
+   accept 後の MTP logical length は `before + min(accepted + 1, K)` であり、
+   absolute position と常に一致するわけではない。
+5. verify batch が `speculative_verify = true` と `verify_numeric_mode` を設定せず、
+   正規 `SpecDecoder` の Verify role / Exact numeric path を通っていなかった。
+
+### 8.3 修正
+
+- `src/apps/bench/mtp.hip` phase 4 を production `SpecDecoder` API へ置き換えた。
+  target prompt prefill → `mtp_kv_reset` → `spec_decoder_sync_prompt` →
+  `spec_decoder_step` のみで update を進める。harness 側の独自 draft / verify /
+  accept / `sequence.position` rollback は削除した。
+- `--spec` は phase 4 の有効化だけとし、legacy phase 2/3 の省略は
+  `--spec-only` が担うように分離した。phase 4 は phase 2 に依存しない。
+- `SpecIterationOutput` に `num_mtp_drafts` / `mtp_length_before` /
+  `mtp_length_after` / `rerun` / `draft_tokens` / `verify_sampled` を追加した。
+- `--spec-debug` を追加。prompt sync 直後の `logical_length == context - 1`、
+  draft 開始前の `logical_length` / absolute RoPE position / `sequence.position`、
+  draft 後の `kv_length_before` / `kv_length_after`、commit 後の
+  `logical_length == before + min(accepted + 1, num_mtp_drafts)` を assert / log する。
+  absolute position と logical KV index を等しいものとして assert しない。
+- `--verify-mode exact|fast`（既定 `Exact`）を追加。
+- spec OFF / ON の token 列完全一致を必須条件にした。不一致時は divergence index・
+  pending token・MTP `logical_length`・`sequence.position`・accepted 数・draft 列・
+  verify sample 列を表示し、終了コード非 0 で終了する。
+- `--chain pre|post` は legacy acceptance sim 専用とし、SpecDecoder 経路の
+  次 draft hidden は常に `hidden_out`（final norm 前）であることを出力する。
+
+### 8.4 検証（27B-PSQ、prose ctx256、TG48、device 1、`--spec --spec-only`）
+
+| K | greedy equivalence | rounds | emitted | accepted | mean accept/update | emitted/update | reject0 | full accept | rerun | draft ms/update | verify ms/update | ms/token | tok/s | speedup |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | PASS | 31 | 49 | 18 | 0.581 | 1.581 | 41.9% | 58.1% | 41.9% | 4.47 | 51.10 | 35.16 | 28.4 | 1.02x |
+| 2 | PASS | 26 | 49 | 23 | 0.885 | 1.885 | 50.0% | 38.5% | 61.5% | 8.29 | 59.22 | 35.83 | 27.9 | 1.00x |
+| 4 | PASS | 24 | 49 | 25 | 1.042 | 2.042 | 50.0% | 4.2% | 95.8% | 15.88 | 73.66 | 43.86 | 22.8 | 0.82x |
+| 8 | PASS | 24 | 49 | 25 | 1.042 | 2.042 | 50.0% | 0.0% | 100.0% | 31.01 | 78.53 | 53.66 | 18.6 | 0.67x |
+
+- target forward/update は K1 1.419 / K2 1.615 / K4 1.958 / K8 2.000。
+  同条件の target-only greedy は 36.0 ms/token。
+- `--verify-mode fast` にすると greedy equivalence が FAIL し、
+  `tg --mtp` と同一の token 列・同一の rounds / reruns / accept
+  （29 / 10 / 0.655 対 29 / 10 / 0.66）を示す。
+  つまり `tg --mtp` の greedy からのずれは state ではなく verify の
+  numeric mode に由来する。
+- required acceptance と MTP required 合成テストは変更前後で PASS。
 
 ---
 
@@ -594,4 +677,236 @@ Gate 5A-5D は draft cost profile と dynamic draft depth の研究であり、�
 （本ファイルには重複記載しない）。
 
 verify-Exact 経路のみの変更であり、decode / prefill の通常経路は不変。
+
+---
+
+## 9. MTP first-position acceptance の原因調査
+
+prose corpus、GPU 1、`Qwen3.8-27B-PSQ`、`--spec --spec-only`、K=1。条件が揃っていない
+数値を比較しないこと。
+
+### 9.1 target hidden の semantic A/B
+
+target graph は `layer_input → OUTPUT_GATHER → selected_hidden → final RMSNorm → logits`
+であり、external output の `selected_hidden` / `layer_input` は final RMSNorm **前**である。
+MTP の入力にどちらを渡すかを A/B した。
+
+| 条件 | PRE（現行） | POST（final RMSNorm 後） |
+| --- | ---: | ---: |
+| ctx256 / TG256 | 0.6623 (102/154) | 0.6842 (104/152) |
+| ctx32 / TG150 | 0.7647 (65/85) | 0.7442 (64/86) |
+
+差は ±2pt で ctx により符号が反転する。**target hidden の PRE / POST は原因ではない。**
+
+### 9.2 vLLM semantic reference との数値 A/B
+
+`tools/reference/export_qwen35_mtp_gate1.py` は vLLM Qwen3.5 MTP semantics を実装した
+reference である。同 exporter の `attention_isolated` は KV 履歴のない T=1 forward なので、
+`--context 1`（MTP KV が空）で同一 `(hidden, token, position=0)` を与えて比較した。31 サンプル。
+
+| 項目 | 結果 |
+| --- | ---: |
+| cos(reference `final_residual`, PhaseShift `hidden_out`) | 0.999949（min 0.999825） |
+| cos(reference `final_norm`, PhaseShift `hidden_out_normed`) | 0.999937（min 0.999822） |
+| draft == reference top1 | 30/31 |
+| P(draft == target) | 11/31 |
+| P(reference top1 == target) | 11/31 |
+
+MTP 層の forward は reference と一致し、MTP 側の PSQ8 `embed_tokens` / `lm_head` も
+target 一致率を変えていない。**MTP 実装に原因はない。**
+
+参考事実:
+
+- `mtp.*` 15 tensor は `Qwen3.8-27B` と `Qwen3.8-27B-PSQ` で bit-identical（MTP 層は非量子化）
+- `mtp.pre_fc_norm_hidden` / `pre_fc_norm_embedding` の weight 平均は負であり、
+  Gemma 形 `(1+w)` でなければ負倍率になる。ONE_PLUS は正しい
+- fc concat は `[embedding_norm, hidden_norm]`（`test_qwen35_mtp_lowering` / `_primitives`）
+- `tie_word_embeddings: False` であり lm_head は独立 tensor
+
+### 9.3 draft chain の A/B
+
+`mtp_generate_drafts()` の step>=2 の入力 hidden を `hidden_out`（現行）と
+`hidden_out_normed` で比較した。per-position は同一 run の accepted histogram から算出する。
+
+| target hidden | chain | P(d1) | P(d2 \| d1) |
+| --- | --- | ---: | ---: |
+| PRE | `hidden_out` | 0.6612 | 0.6875 |
+| PRE | `hidden_out_normed` | 0.6423 | 0.6835 |
+| POST | `hidden_out` | 0.6557 | 0.6750 |
+| POST | `hidden_out_normed` | 0.6557 | 0.6750 |
+
+K=3（POST）は chain pre `0.6729 / 0.6806 / 0.5714`、chain post `0.6667 / 0.6806 / 0.5510`。
+**`hidden_out_normed` は劣化するため採用しない。** vLLM と同じく `hidden_out` を維持する。
+
+### 9.4 判定
+
+first-position acceptance は ctx256 で 0.66、ctx32 で 0.76。同一条件の DFlash2 は 0.841
+（`docs/rnd/dflash2/dflash2.md`）。MTP 実装は reference と一致しているため、差は
+**BF16 checkpoint 用に訓練された MTP が PSQ 化された target を予測している**ことによると
+判断する。残る 0.84 から 0.94-0.97 までの差は比較基準（checkpoint・量子化度・acceptance
+の定義）の違いによる。
+
+acceptance 統計は accepted histogram とそこから算出する conditional で記録する。
+K の異なる run を引き算して per-position を推定しない。
+
+---
+
+## 10. LmHeadCandidateProxy と greedy equivalence
+
+### 10.1 症状
+
+`--tokens-offset 345 --context 1 --steps 4` で `greedy equivalence: FAIL`
+（`emitted 1245` / `expected 4220`）となった。`PHASESHIFT_TARGET_LM_HEAD_PROXY=0` で
+PASS することから `LmHeadCandidateProxy` が原因である。
+
+proxy は INT2 coarse の上位を候補にして PSQ8 で rerank する**近似**であり、真の argmax が
+候補外だと取りこぼす。`test_target_lm_proxy_error_bound` の保証は per-logit の
+Cauchy-Schwarz 誤差境界であって argmax 保存ではない。
+
+### 10.2 argmax 証明は不採用
+
+`upper_v = coarse_v + activation_l2 * error_l2` を exact logit の厳密な上界として全語彙に
+作り、上位 `pool+1` を取り、先頭 `pool` を候補に exact rerank、
+`best > upper[pool+1]` のときだけ採用して外れたら exact 経路へ fallback する証明を
+実装した（`test_target_lm_proxy_fallback` と同型）。greedy equivalence は回復したが、
+計測で次の3点が判明し**採用しなかった**。
+
+**(1) 証明は実データで一度も通らない**
+
+`PHASESHIFT_QWEN35_KERNEL_TRACE` の `sampling` 最適化カウンタは、
+`phaseshift-compute`（max-new-tokens 128）で `PROXY=0` と `PROXY=1 CERTIFY=1` の
+**両方とも 43**。proxy が `SAMPLING` dispatch を消費していない＝`NotApplicable`＝
+証明失敗で常に exact 経路へ落ちていることを意味する。
+`test_target_lm_proxy_fallback` が `certified > 0` を満たすのは合成入力だけで、
+実 lm_head では満たさない。
+
+理由は上界の桁。`activation_l2` は final norm 後の hidden のノルムで約 107、
+INT2（4値）近似の行誤差 `error_l2` を掛けると上界は十〜数百になる。
+対して実際の logit margin は 0〜20。**Cauchy-Schwarz は INT2 の誤差に対して広すぎる。**
+
+**(2) 証明失敗時も proxy の kernel は走る**
+
+GPU busy は exact 1901.4 ms に対し証明ありで 1958.0 ms（+3.0%）。証明が通らず
+discard されるためこれは丸ごと無駄になる。さらに forward ごとの D2H（42 回 × 約 23 ms）で
+wall が 63.55 → 43.99 tok/s（−31%）まで落ちる。
+
+証明用 kernel 自体は軽い（`activation_l2` 0.051 / `target_upper_logits` 0.022 /
+`target_certified_argmax` 0.002 / `compact` 0.002 ms で計 0.077 ms/call）。
+遅いのは kernel ではなく **D2H sync**。
+
+**(3) 候補選択を `coarse` から `upper` に変えると品質が落ちる**
+
+上界 `upper` は行ごとに `error_l2` が加算されるため、`upper` の上位に選ばれるのは
+「error が大きい行」になり候補として劣化する。証明をスキップして proxy の答を
+採用した場合の実測は `DFLASH2_ROUNDS/ACCEPTED` が `42/85` から **`68/59`** に崩れた。
+
+### 10.3 採否
+
+- `LmHeadCandidateProxy` は元の pipeline（候補を `coarse` で選ぶ）に戻す
+- `PHASESHIFT_TARGET_LM_HEAD_PROXY` の既定を `1` → **`0`** に変更（exact 経路）
+- `PHASESHIFT_TARGET_LM_HEAD_PROXY_CERTIFY` は削除（証明しないため）
+
+device 側で証明を完結させても (1) と (2) のため回復しない。証明が通るようになることが
+前提で、そのためには INT2 より狭い誤差境界が要る
+（候補を `coarse` で選び、候補外を追加で exact rerank する二段方式が候補）。
+
+### 10.4 既定 OFF の代償（DFlash2 spec decode）
+
+`LmHeadCandidateProxy` は `batch.speculative_verify` の `ExecutionRole::Verify` で
+効くため、影響は DFlash2 の verify に出る。
+
+`phaseshift-compute --dflash2-drafts 7 --max-new-tokens 256`（GPU 1、3 rep）:
+
+| 条件 | DECODE_TOKENS_PER_SEC | DFLASH2_VERIFY_GPU_MS |
+| --- | ---: | ---: |
+| proxy 既定 ON（`2b90b202` の元実装 / lossy） | **65.20** | 3355.65 |
+| proxy 既定 OFF（exact・**採用**） | **63.55** | 3456.34 |
+
+帰属の切り分け:
+
+- **model 差ではない** — 同一バイナリで旧 model（MTP 全 BF16）を当てても 63.60。
+  MTP は DFlash2 経路で使われない。
+- **binary 差 = 既定変更** — `2b90b202` の proxy 実装を差し戻すと 65.20
+  （3 rep: 65.20 / 65.22 / 65.16）が再現し、同じく `PROXY=0` は 63.64。
+  `PHASESHIFT_TARGET_LM_HEAD_PROXY` の既定 `1` → `0` そのもの。
+
+正しさ契約は完全に一致: `GREEDY_TOKEN_SUM=2446188`、
+`GENERATED_IDS` sha1 `47aebe55d048`、`DFLASH2_ROUNDS=84`、
+`DFLASH2_ACCEPTED_DRAFTS=171`。
+
+ただしこの workload で proxy が生成結果を変えていないにすぎない。
+greedy equivalence を破る実例（10.1）が別に存在するため、
+**−2.38% は argmax を保証する代償**として受け入れた。
+
+---
+
+## 11. MTP quantumization の A/B
+
+MTP（425M params、BF16 で 0.79 GiB）を量子化して draft を速くする検討。
+`--preset psq` の profile（`src/phaseshift/quantization/fpx/profile.cpp` の `psq()`）を
+変更し、`phaseshift-quantizer quantize --preset psq --backend hip --scope text-only`
+で再生成して比較した。比較対象は `models/Qwen3.8-27B-PSQ`（MTP 全 BF16）と生成物。
+
+非 MTP tensor は **1253 本すべてビット一致**であり、差分は MTP のみ。
+
+### 11.1 encoding の決定
+
+| `TensorRole` | 実体 | params | 初期案 | 採用 |
+| --- | --- | ---: | --- | --- |
+| `MtpFc` | `mtp.fc.weight` (5120, 10240) | 52M | PSQ8 | **PSQ4** |
+| `MtpAttention` | `self_attn.{q,k,v,o}_proj` | 68M | PSQ4 | PSQ4 |
+| `MtpFfn` | `mlp.{gate,up,down}_proj` | 267M | PSQ4 | PSQ4 |
+| `MtpNorm` | norm 7本 | 1M | PSQ4 | **BF16**（`load_quantized_small` が 1 次元の量子化を拒否） |
+| `Output` | `lm_head.weight` | 1271M | PSQ8 | PSQ8（従来どおり） |
+
+`test_dflash2_quantization_adapter` に新契約の assert を 4 件追加（74/74 PASS）。
+
+role 名は旧 `MtpOutput` から **`MtpFc` へ rename した**。実体は `mtp.fc`（入力側の
+融合射影、`[H, 2H]`）で **LM head ではない**ため。MTP の LM head は target と共有する
+`lm_head.weight`（`tie_word_embeddings: false` の独立 tensor で `lm_index` は
+`weights.lm_head` を指す）であり、target と同じく **PSQ8**。`embed_tokens` も PSQ8。
+
+manifest の `role` 文字列は書き出しのみでロジックに使われない
+（`try_parse_tensor_role` は呼び出し無し）ため、旧 `mtp_output` を含む既存 model は
+`phaseshift-quantizer verify` で `Validation OK` のまま。**model の再生成は不要**。
+
+### 11.2 Round 1: `mtp.fc` = PSQ8 — 否決
+
+| 条件 | acceptance base / new | draft ms/update base / new |
+| --- | --- | --- |
+| ctx32 K1 | 0.765 / 0.744 | 4.456 / **5.794** |
+| ctx32 K2 | 1.141 / 1.141 | 8.162 / **10.949** |
+| ctx256 K1 | 0.662 / 0.673 | 4.474 / **5.962** |
+| ctx256 K2 | 1.116 / 1.065 | 8.292 / **11.076** |
+
+draft が **+30〜34% 遅化**。`PHASESHIFT_QWEN35_KERNEL_TRACE=1` の
+`KERNEL_TRACE_FALLBACK LINEAR_PSQ8`（base は fallback 0）で原因を特定した。
+`linear_selector.cpp` の `kLinearShapeRules` には
+`{ 5120, 10240, kFamilyBf16 | kFamilyPsq4 }` があり **PSQ8 が未登録**。
+`select_psq8_gemm_config` が `nullopt` を返し `SelectorRejected` で
+`launch_model_dispatch_correctness`（参照実装）へ退避していた。
+rocprofv3 では `model_dispatch_kernel` 89 dispatch / 207 ms（2.33 ms/draft）。
+
+### 11.3 Round 2: MTP linear 8本すべて PSQ4 — 採用
+
+fallback は 0、`greedy equivalence` は全条件 PASS。
+
+| 条件 | acceptance base / new | draft ms/update base / new |
+| --- | --- | --- |
+| ctx32 K1 | 0.765 / 0.786 | 4.453 / **3.552**（−20%） |
+| ctx32 K2 | 1.141 / 1.141 | 8.252 / **6.442**（−22%） |
+| ctx256 K1 | 0.662 / 0.652 | 4.471 / **3.570**（−20%） |
+| ctx256 K2 | 1.116 / 1.151 | 8.281 / **6.484**（−22%） |
+
+acceptance の差は 4 条件すべて標本誤差内
+（n = 85〜154 rounds、`mean accepted/update` の標準誤差は約 ±4〜5pt）。
+
+- draft 速度: **−20〜22%**
+- メモリ: MTP linear 387M が 774 MiB → 約 218 MiB（約 556 MiB 削減）
+- required acceptance: **124/124 PASS**
+
+### 11.4 計測条件
+
+`phaseshift-bench mtp --device 1 --arena-gib 24 --draft-k {1,2} --spec --spec-only`、
+corpus は `tests/data/mtp_perf/prose.psktok`、`--verify-mode` 既定（Exact）。
 

@@ -173,7 +173,7 @@ void test_qwen_contract_unchanged() {
         {"model.language_model.layers.9.linear_attn.conv1d.weight", fpx::TensorRole::GdnSmall, 9},
         {"mtp.layers.1.self_attn.q_proj.weight", fpx::TensorRole::MtpAttention, 1},
         {"mtp.layers.2.mlp.up_proj.weight", fpx::TensorRole::MtpFfn, 2},
-        {"mtp.fc.weight", fpx::TensorRole::MtpOutput, -1},
+        {"mtp.fc.weight", fpx::TensorRole::MtpFc, -1},
         {"mtp.norm.weight", fpx::TensorRole::MtpNorm, -1},
         {"model.visual.blocks.0.attn.q.weight", fpx::TensorRole::Unknown, -1},
         {"totally.unknown.weight", fpx::TensorRole::Unknown, -1},
@@ -201,6 +201,22 @@ void test_qwen_contract_unchanged() {
                                       fpx::TensorRole::Output, 0u, 64u) ==
               fpx::WeightEncoding::PSQ8,
           "qwen_output_stays_psq8");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpFc, 0u, 64u) ==
+              fpx::WeightEncoding::PSQ4,
+          "qwen_mtp_fc_psq4");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpAttention, 0u, 64u) ==
+              fpx::WeightEncoding::PSQ4,
+          "qwen_mtp_attn_psq4");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpFfn, 0u, 64u) ==
+              fpx::WeightEncoding::PSQ4,
+          "qwen_mtp_ffn_psq4");
+    check(fpx::choose_weight_encoding(fpx::FpxPreset::Psq, fpx::Architecture::Qwen35Dense,
+                                      fpx::TensorRole::MtpNorm, 0u, 64u) ==
+              fpx::WeightEncoding::BF16,
+          "qwen_mtp_norm_bf16");
 }
 
 void test_role_strings() {

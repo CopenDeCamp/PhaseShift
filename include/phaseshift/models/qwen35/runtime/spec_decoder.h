@@ -86,6 +86,12 @@ struct SpecIterationOutput {
     bool finished = false;
     uint32_t num_accepted_drafts = 0u;
     uint32_t num_drafts_generated = 0u;
+    uint32_t num_mtp_drafts = 0u;
+    uint32_t mtp_length_before = 0u;
+    uint32_t mtp_length_after = 0u;
+    bool rerun = false;
+    std::vector<int32_t> draft_tokens;
+    std::vector<int32_t> verify_sampled;
 };
 
 Result<SpecIterationOutput> spec_decoder_step(

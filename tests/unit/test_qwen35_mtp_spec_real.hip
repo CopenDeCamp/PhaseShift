@@ -164,10 +164,17 @@ bool run_speculative(
         std::printf("FAIL: spec sync: %s\n", sync.message().c_str());
         return false;
     }
+    const uint32_t sync_expected = static_cast<uint32_t>(prompt.size()) - 1u;
+    if (mtp_state.logical_length != sync_expected) {
+        std::printf("FAIL: prompt sync mtp.logical_length=%u expected=%u\n",
+                    mtp_state.logical_length, sync_expected);
+        return false;
+    }
 
     out.tokens.clear();
     out.tokens.push_back(first);
     int32_t pending = first;
+    uint32_t mtp_before = mtp_state.logical_length;
     while (out.tokens.size() < max_new && pending >= 0) {
         auto step = q35rt::spec_decoder_step(decoder, pending);
         if (!step.ok()) {
@@ -175,6 +182,28 @@ bool run_speculative(
             return false;
         }
         q35rt::SpecIterationOutput value = step.release();
+        const uint32_t mtp_kept =
+            value.num_mtp_drafts > 0u
+                ? std::min(value.num_accepted_drafts + 1u, value.num_mtp_drafts)
+                : 0u;
+        if (value.mtp_length_before != mtp_before ||
+            value.mtp_length_before + mtp_kept != value.mtp_length_after ||
+            value.mtp_length_after != mtp_state.logical_length ||
+            value.rerun != (value.num_accepted_drafts < value.num_drafts_generated) ||
+            (value.num_drafts_generated > 0u &&
+             (value.draft_tokens.size() != value.num_drafts_generated ||
+              value.verify_sampled.size() != value.num_drafts_generated + 1u))) {
+            std::printf(
+                "FAIL: spec iteration state contract: before=%u kept=%u after=%u "
+                "actual=%u accepted=%u drafts=%u rerun=%d draft_tokens=%zu "
+                "verify_sampled=%zu\n",
+                value.mtp_length_before, mtp_kept, value.mtp_length_after,
+                mtp_state.logical_length, value.num_accepted_drafts,
+                value.num_drafts_generated, value.rerun ? 1 : 0,
+                value.draft_tokens.size(), value.verify_sampled.size());
+            return false;
+        }
+        mtp_before = value.mtp_length_after;
         out.tokens.insert(out.tokens.end(), value.emitted_tokens.begin(), value.emitted_tokens.end());
         ++out.transitions;
         if (decoder.config.num_drafts > 0u) {
@@ -333,7 +362,7 @@ int main() {
         std::printf("SKIP: no GPU\n");
         return 77;
     }
-    auto arena_result = ps::gpu::GpuArena::create(0, 16ull * 1024ull * 1024ull * 1024ull);
+    auto arena_result = ps::gpu::GpuArena::create(0, 30ull * 1024ull * 1024ull * 1024ull);
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;

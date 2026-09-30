@@ -17,16 +17,16 @@ WeightEncoding psq(TensorRole role, uint32_t li) {
         case TensorRole::MoeRouterBias:
         case TensorRole::MtpNorm:
         case TensorRole::MtpEmbedding:
-        case TensorRole::MtpOutput:
-        case TensorRole::MtpAttention:
-        case TensorRole::MtpFfn:
             return WeightEncoding::BF16;
+        case TensorRole::MtpFc:
         case TensorRole::AttnQ:
         case TensorRole::AttnO:
         case TensorRole::AttnK:
         case TensorRole::AttnV:
         case TensorRole::FfnGate:
         case TensorRole::FfnUp:
+        case TensorRole::MtpAttention:
+        case TensorRole::MtpFfn:
         case TensorRole::ExpertGate:
         case TensorRole::ExpertUp:
         case TensorRole::SharedExpertGate:
@@ -72,7 +72,7 @@ bool is_block_scaled_linear(TensorRole role) {
         case TensorRole::MoeRouter:
         case TensorRole::MoeRouterBias:
         case TensorRole::MtpEmbedding:
-        case TensorRole::MtpOutput:
+        case TensorRole::MtpFc:
         case TensorRole::MtpAttention:
         case TensorRole::MtpFfn:
         case TensorRole::MtpNorm:
@@ -184,7 +184,7 @@ const char* to_string(TensorRole r) {
         case TensorRole::SharedExpertUp: return "shared_expert_up";
         case TensorRole::SharedExpertDown: return "shared_expert_down";
         case TensorRole::MtpEmbedding: return "mtp_embedding";
-        case TensorRole::MtpOutput: return "mtp_output";
+        case TensorRole::MtpFc: return "mtp_fc";
         case TensorRole::MtpAttention: return "mtp_attention";
         case TensorRole::MtpFfn: return "mtp_ffn";
         case TensorRole::MtpNorm: return "mtp_norm";
@@ -227,7 +227,7 @@ std::optional<TensorRole> try_parse_tensor_role(std::string_view s) {
     if (s == "shared_expert_up") return TensorRole::SharedExpertUp;
     if (s == "shared_expert_down") return TensorRole::SharedExpertDown;
     if (s == "mtp_embedding") return TensorRole::MtpEmbedding;
-    if (s == "mtp_output") return TensorRole::MtpOutput;
+    if (s == "mtp_fc") return TensorRole::MtpFc;
     if (s == "mtp_attention") return TensorRole::MtpAttention;
     if (s == "mtp_ffn") return TensorRole::MtpFfn;
     if (s == "mtp_norm") return TensorRole::MtpNorm;
