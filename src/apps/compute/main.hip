@@ -1919,7 +1919,8 @@ int main(int argc, char** argv) {
         config.max_scheduled_tokens = config.max_seq_len;
         if (dflash_enabled) {
             config.max_scheduled_tokens = config.max_seq_len;
-            config.max_scheduled_output_rows = static_cast<uint32_t>(dflash_config.block_size);
+            config.max_scheduled_output_rows = static_cast<uint32_t>(
+                dflash_config.block_size + dflash2_ngram_tail);
             config.target_hidden_tap_count =
                 static_cast<uint32_t>(dflash_config.num_target_layer_ids);
             for (std::size_t t = 0; t < dflash_config.num_target_layer_ids; ++t) {
@@ -1942,11 +1943,13 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (dflash_enabled) {
+            const unsigned long dflash_rows =
+                static_cast<unsigned long>(dflash_config.block_size) + dflash2_ngram_tail;
             unsigned long dflash_tokens =
-                std::max<unsigned long>(prompt_ids.size(), dflash_config.block_size);
+                std::max<unsigned long>(prompt_ids.size(), dflash_rows);
             dflash_tokens = std::min<unsigned long>(dflash_tokens, 2048UL);
             config.max_scheduled_tokens = static_cast<uint32_t>(dflash_tokens);
-            config.max_scheduled_output_rows = static_cast<uint32_t>(dflash_config.block_size);
+            config.max_scheduled_output_rows = static_cast<uint32_t>(dflash_rows);
             config.target_hidden_tap_count =
                 static_cast<uint32_t>(dflash_config.num_target_layer_ids);
             for (std::size_t t = 0; t < dflash_config.num_target_layer_ids; ++t) {
