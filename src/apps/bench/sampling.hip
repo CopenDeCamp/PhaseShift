@@ -405,16 +405,6 @@ int run_sampling(int argc, char** argv) {
     double mean = 0.0;
     for (double x : per) mean += x;
     mean /= (double)per.size();
-    if (!o.out.empty()) {
-        FILE* f = std::fopen(o.out.c_str(), "a");
-        if (f) {
-            std::fprintf(f, "%s,%u,%u,%u,%s,%s,%d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
-                         o.variant.c_str(), o.vocab, o.outputs, o.partitions,
-                         o.flags.c_str(), o.logit_pattern.c_str(), o.warmup, o.samples,
-                         o.launches, mn, p50, p95, mean);
-            std::fclose(f);
-        }
-    }
     double avg_attempts = 0.0;
     double avg_active = 0.0;
     const bool show_attempts =

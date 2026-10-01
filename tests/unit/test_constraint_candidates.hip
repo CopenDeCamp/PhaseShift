@@ -135,9 +135,17 @@ struct ExactCaseSpec {
     uint32_t seed = 0x9e3779b9u;
     std::vector<uint32_t> counts;
     bool tie_logits = false;
+    bool require_disallowed_argmax = false;
 };
 
-bool run_exact_case(const ExactCaseSpec& spec, const char* label) {
+struct ExactCaseResult {
+    bool launched = false;
+    bool matched = false;
+    bool candidates_allowed = false;
+    bool covers_disallowed_argmax = false;
+};
+
+ExactCaseResult run_exact_case(const ExactCaseSpec& spec, const char* label) {
     const uint32_t rows = spec.rows;
     const uint32_t vocab = spec.vocab;
     const uint32_t k_padded = spec.k_padded;
@@ -244,7 +252,7 @@ bool run_exact_case(const ExactCaseSpec& spec, const char* label) {
                         reinterpret_cast<void*>(dev_full), reinterpret_cast<void*>(dev_rerank)}) {
             if (p) (void)hipFree(p);
         }
-        return false;
+        return ExactCaseResult{};
     }
     (void)hipMemcpy(dev_psq8, psq8.data(), psq8.size(), hipMemcpyHostToDevice);
     (void)hipMemcpy(dev_scale_bytes, scales.data(), scale_count * 2u, hipMemcpyHostToDevice);
@@ -296,13 +304,29 @@ bool run_exact_case(const ExactCaseSpec& spec, const char* label) {
     (void)hipFree(dev_full);
     (void)hipFree(dev_rerank);
     if (!ok)
-        return false;
+        return ExactCaseResult{};
 
     bool match = true;
     bool candidates_allowed = true;
+    bool covers_disallowed_argmax = false;
     for (uint32_t r = 0u; r < rows; ++r) {
         const std::vector<uint32_t>& allowed = rows_allowed[r];
         const float* row_full = full.data() + static_cast<std::size_t>(r) * vocab;
+        int32_t global_argmax = -1;
+        float global_value = -INFINITY;
+        for (uint32_t token = 0u; token < vocab; ++token) {
+            const float value = row_full[token];
+            if (global_argmax < 0 || value > global_value ||
+                (value == global_value && token < static_cast<uint32_t>(global_argmax))) {
+                global_value = value;
+                global_argmax = static_cast<int32_t>(token);
+            }
+        }
+        if (global_argmax >= 0 &&
+            !std::binary_search(allowed.begin(), allowed.end(),
+                                static_cast<uint32_t>(global_argmax))) {
+            covers_disallowed_argmax = true;
+        }
         int32_t want_token = -1;
         float want_value = -INFINITY;
         for (uint32_t token = 0u; token < vocab; ++token) {
@@ -343,7 +367,15 @@ bool run_exact_case(const ExactCaseSpec& spec, const char* label) {
     }
     check(match, label);
     check(candidates_allowed, "candidates contain only allowed tokens");
-    return true;
+    ExactCaseResult result;
+    result.launched = true;
+    result.matched = match;
+    result.candidates_allowed = candidates_allowed;
+    result.covers_disallowed_argmax = covers_disallowed_argmax;
+    if (spec.require_disallowed_argmax) {
+        check(covers_disallowed_argmax, "global argmax excluded from allowed set");
+    }
+    return result;
 }
 
 struct MaskedTopnSpec {
@@ -617,6 +649,17 @@ int main() {
         spec.counts = {33u};
         spec.seed = 0x789abcdeu;
         run_exact_case(spec, "exact vocab 65 unpadded");
+    }
+
+    {
+        ExactCaseSpec spec;
+        spec.rows = 4u;
+        spec.vocab = 512u;
+        spec.k_padded = 128u;
+        spec.counts = {64u};
+        spec.seed = 0x89abcdefu;
+        spec.require_disallowed_argmax = true;
+        run_exact_case(spec, "exact global argmax outside allowed");
     }
 
     for (bool use_radix : {true, false}) {

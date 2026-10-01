@@ -134,6 +134,27 @@ int main() {
                   LmHeadConstrainedPath::None,
               "zero coarse pool falls back");
     }
+    {
+        const uint32_t at_limit[] = {128u};
+        check(select_lm_head_constrained(0u, 1u, 1u, at_limit, 1u, 128u, 32u).path ==
+                  LmHeadConstrainedPath::ExactCandidates,
+              "allowed=128 stays exact at the default threshold");
+        check(select_lm_head_constrained(0u, 1u, 1u, at_limit, 1u, 128u, 32u)
+                      .candidate_capacity == 128u,
+              "allowed=128 candidate capacity");
+        const uint32_t over_limit[] = {129u};
+        check(select_lm_head_constrained(0u, 1u, 1u, over_limit, 1u, 128u, 32u).path ==
+                  LmHeadConstrainedPath::MaskedCoarse,
+              "allowed=129 takes masked coarse");
+        const uint32_t mixed[] = {100u, 129u};
+        check(select_lm_head_constrained(0u, 2u, 2u, mixed, 2u, 128u, 32u).path ==
+                  LmHeadConstrainedPath::None,
+              "mixed allowed=100 and 129 falls back");
+        const uint32_t mixed_low[] = {1u, 40u};
+        check(select_lm_head_constrained(0u, 2u, 2u, mixed_low, 2u, 128u, 32u).path ==
+                  LmHeadConstrainedPath::ExactCandidates,
+              "all rows within the threshold take exact candidates");
+    }
 
     std::printf("test_lm_head_proxy_path: passed=%d failed=%d\n", passed, failed);
     return failed > 0 ? 1 : 0;

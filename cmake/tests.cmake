@@ -566,6 +566,8 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
     # Target lm_head certified proxy: isolated real-head performance (Gate 6/7).
     phaseshift_add_test(NAME test_target_lm_proxy_real_perf SOURCE unit/test_target_lm_proxy_real_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
     target_include_directories(test_target_lm_proxy_real_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    phaseshift_add_test(NAME test_lm_head_constraint_perf SOURCE unit/test_lm_head_constraint_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
+    target_include_directories(test_lm_head_constraint_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Verify lm_head certified proxy: real verify-round shadow (Gate V2/V3).
     phaseshift_add_test(NAME test_verify_lm_proxy_real_verify SOURCE unit/test_verify_lm_proxy_real_verify.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
