@@ -118,7 +118,69 @@ l_i > l_c  または  (l_i == l_c かつ i < c)
 accept する（積集合）。`top_k` だけなら通常の top-k sampling、`top_p` だけなら
 通常の nucleus sampling と一致する。
 
+**top-k の再正規化はしない。** `top_p` は常に full softmax の `Z` を基準に判定し、
+Top-K 集合内で確率を振り直してから nucleus を適用する HF 式の順序ではない。
+
+## active-set top-k path
+
+`top_k > 0` の stochastic row で、全 output row が次の条件を満たす batch は
+active-set path を使う。
+
+- stochastic かつ sampled rows == output rows
+- `top_k` が全 row で同じ値で `1 <= top_k <= 128`
+- constraint が無い
+- radix workspace が確保済み
+
+このとき `DeviceSamplingParams.reserved[0]` の top-k path フラグが立つ。
+correctness backend もこのフラグを見て同じ方式に切り替えるため、
+両 backend は同じ token を返す。
+
+処理は次の順。
+
+```
+exact F32 Radix Top-K           (score 降順、同値なら token id 昇順)
+    ↓
+full-softmax prefix mass で active set を決定
+    ↓
+active set 上で 1 回だけ Gumbel-Max   (attempt = 0)
+```
+
+- `top_k` だけのときは `Z` を計算しない。`lmax` は row max の finite 検査と
+  NaN 検査に使い、full vocab の `exp` scan は行わない。
+- `top_k` と `top_p` を両方指定したときは full vocab の `Z` を 1 回だけ計算し、
+  Top-K 内の prefix が `top_p * Z` 未満の位置までを active set にする。
+  prefix が 0 の token は常に active に入る。
+- active set の各 token の Gumbel score は
+  `(logit - lmax) / temperature + gumbel(RNG(seed, sample_index, 0, token_id))`。
+  score が同値なら token id が小さい方を選ぶ。
+- INT2 は使わない。Top-K selection は常に exact F32。
+
+top-k path が使われない batch（`top_k = 0`、`top_k > 128`、constraint 付き、
+`top_k` が row ごとに異なる、stochastic が混在）は従来の rejection path をそのまま
+使う。
+
+`kSamplingMaxTopK = 128` は
+`include/phaseshift/models/qwen35/kernels/optimized/sampling_limits.h` にある。
+
+### seed と生成列の互換性
+
+active-set path と従来の rejection path は最終的な確率分布を同じにできるが、
+**同じ seed でも返す token 列は一致しない**。従来 path は reject された attempt の
+RNG を消費してから次の attempt に進むが、active-set path は `attempt = 0` だけで
+決まるため。
+
+維持される互換性は次の範囲だけである。
+
+- 同じ実装 + 同じ seed + 同じ sample_index + 同じ logits なら bit exact
+- batch 内の位置が変わっても同じ（RNG key に batch index を入れない）
+- 分布は top-k / top-p の現在の意味論と同じ
+
+Gate 導入前との historical な seed → token 列の一致は保証しない。
+
 ## rejection sampling
+
+active-set path が使われない `top_k` 指定では、従来どおり full softmax から
+sample して accept 集合に外れた token を却下する。
 
 accept されなければ `attempt` を 1 増やして Gumbel-Max をやり直す。full softmax から
 sample して accept 集合に含まれる token だけを残すので、accept 後の分布は
@@ -126,7 +188,8 @@ sample して accept 集合に含まれる token だけを残すので、accept 
 
 accept 確率は accept 集合の mass なので、top-p では `>= top_p`。期待試行回数は
 `<= 1 / top_p` 程度（`top_p = 0.9` で約 1.11）。`top_k` を小さくすると accept 確率は
-top-k 集合の mass まで下がるため、試行回数が増える。
+top-k 集合の mass まで下がるため、試行回数が増える。`top_k = 50` の random logits は
+これが顕著で、active-set path はこの rejection loop を無くすために使う。
 
 上限は `kMaxSamplingAttempts = 4096`。到達した場合は
 `ProgramStatus::DISPATCH_FAILED` を `error_word` に書き、token は `-1` にする
@@ -137,12 +200,17 @@ top-k 集合の mass まで下がるため、試行回数が増える。
 - logits は F32
 - scaled logits と Gumbel score は F32
 - `expf` を使う
-- mass（`Z`、`better_mass`）の accumulation は F64
+- mass（`Z`、`better_mass`、active-set の prefix）の accumulation は F64
 
 ## invalid logits
 
 row max が finite でない、`Z` が finite でない、`Z <= 0` のいずれかなら
 `DISPATCH_FAILED` を書き、token は `-1`。NaN / Inf を黙って sample しない。
+
+active-set path も同じ結果になる。row max の finite 検査と NaN 検査は full vocab を
+1 回走査して行い、`top_p < 1` のときだけ `Z` を計算する。`top_k` だけで
+`Z` を計算しない場合も、NaN を含む row・全 `-Inf` の row・`+Inf` を含む row は
+`DISPATCH_FAILED` になる。
 
 ## greedy fast path
 
@@ -166,17 +234,24 @@ stochastic が 0 なら従来の greedy path を使う。
 `SamplingSelectorInput::stochastic_outputs` は host 側で数えた値を使う。selector の
 判断のために sampling params を D2H しない。
 
+`stochastic_topk_eligible` / `stochastic_top_k` も host 側（`submit_co_batch` の
+`ScheduledRequest::sampling`）で計算し、`HostExecutionContext` を通して渡す。
+device 上の params を D2H して eligibility を判断することはない。
+
 ## 実装の配置
 
 | 役割 | ファイル |
 | --- | --- |
 | public contract | `include/phaseshift/models/qwen35/runtime/sampling_params.h` |
 | device helper / row sampler | `include/phaseshift/models/qwen35/kernels/optimized/sampling_common.h` |
+| top-k path の定数 | `include/phaseshift/models/qwen35/kernels/optimized/sampling_limits.h` |
 | optimized kernel | `include|src/.../kernels/optimized/stochastic_sampling.{h,hip}` |
 | greedy kernel | `include|src/.../kernels/optimized/sampling.{h,hip}` |
+| Top-K selection | `src/.../kernels/dflash2/radix_topn.hip` |
 | correctness backend | `src/.../kernels/correctness/detail/output.inc` |
 | dispatch | `src/.../runtime/sampling_dispatch.hip` |
 | selector | `src/.../runtime/sampling_selector.{h,cpp}` |
 
-correctness backend も optimized kernel と同じ `sampling_sample_row` を呼ぶため、
-RNG と数学は 1 か所にしかない。
+correctness backend と optimized kernel が同じ方式を使うときは
+`sampling_sample_row` / `sampling_topk_active_row` / `sampling_topk_select_reference`
+のいずれかを共有するため、RNG と数学は 1 か所にしかない。

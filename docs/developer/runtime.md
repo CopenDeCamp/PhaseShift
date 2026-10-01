@@ -214,3 +214,10 @@ maskは `ScheduledBatch.constraint_masks`（host, `[output_rows][ceil(vocab/32)]
 maskをdevice bufferへ1回のbatched H2Dで転送し、`HostExecutionContext` / `DeviceBatchContext` の
 `constraint_masks` / `constraint_mask_words` 経由でsampling kernelへ渡す。unconstrained batchは
 mask生成もH2Dも行わない。
+
+mask生成直後にhost側でallowed token数を数え、`ScheduledRequest::constraint_allowed_count`
+へ入れる（unconstrained rowは `UINT32_MAX`）。executorは事前確保済みのhost vector
+`Executor::constraint_allowed_counts_host` をoutput row単位へ展開して
+`HostExecutionContext::constraint_allowed_counts` として渡す。追加のdevice buffer、
+追加のH2D / D2H、追加の同期は無い。LM Headの分岐（[qwen35.md](qwen35.md) §7.1）と
+`PHASESHIFT_CONSTRAINT_TRACE` の分布出力がこのcountを使う。

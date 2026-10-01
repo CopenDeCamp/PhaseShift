@@ -76,6 +76,13 @@ tokenizer metadata の EOS は使わない。両者が異なることは検証�
 - maskはoutput row単位で `[rows][ceil(vocab_size/32)]` のuint32。
 - sampling kernelは `DeviceSamplingParams.reserved[0]` のconstraint flagとmask base pointerを読む。
 - 追加D2H、追加hipStreamSynchronize、requestごとのHIP streamは無い。
+- mask生成直後にhost側でallowed token数を数える（`std::popcount` の総和）。vocab末尾の
+  padding bitは数えない。このcountはGPUへの転送やD2Hを伴わず、
+  `ScheduledRequest::constraint_allowed_count` → output row単位の
+  `HostExecutionContext::constraint_allowed_counts` で渡す。
+  unconstrained rowは `UINT32_MAX`。
+- constraint付きgreedyのLM Headはallowed token数で分岐する（[qwen35.md](qwen35.md) §7.1）。
+  allowedが少ないrowではfull vocab logitsを計算しない。
 - constrained requestはMTPを使わない。DFlash2 speculative decode ではconstraintが
   target verify の各行に適用され、drafter の proposalにも現在の grammar 状態を適用する
   （[dflash2.md](dflash2.md) を参照）。
@@ -93,7 +100,10 @@ CONSTRAINT_CACHE_HIT=0/1
 CONSTRAINT_MASK_WORDS=...
 CONSTRAINT_ROWS=...
 MASK_BYTES=...
+CONSTRAINT_ALLOWED_COUNT p10=... p50=... p90=... p99=... max=... min=... samples=...
 ```
+
+`CONSTRAINT_ALLOWED_COUNT` は起動後の全stepで貯めたallowed token数の分布を出す。
 
 ## 保証範囲
 
