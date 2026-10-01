@@ -1232,6 +1232,13 @@ Executor::Executor(Executor&& other) noexcept
       dflash_target_hidden(std::move(other.dflash_target_hidden)),
       constraint_mask_device(std::move(other.constraint_mask_device)),
       constraint_mask_host(std::move(other.constraint_mask_host)),
+      constraint_allowed_counts_host(std::move(other.constraint_allowed_counts_host)),
+      stochastic_topk_ids(std::move(other.stochastic_topk_ids)),
+      stochastic_topk_logits(std::move(other.stochastic_topk_logits)),
+      stochastic_topk_scratch(std::move(other.stochastic_topk_scratch)),
+      stochastic_topk_active_counts(std::move(other.stochastic_topk_active_counts)),
+      stochastic_topk_partitions(other.stochastic_topk_partitions),
+      stochastic_topk_scratch_bytes(other.stochastic_topk_scratch_bytes),
       keepalive(other.keepalive) {
     if (batch_context_storage.device_struct.allocation_base() != nullptr) {
         batch_context = batch_context_storage.device_struct.data<::ps::runtime::DeviceBatchContext>();
@@ -1280,6 +1287,13 @@ Executor::Executor(Executor&& other) noexcept
     other.dflash_target_hidden = {};
     other.constraint_mask_device = gpu::Tensor{};
     other.constraint_mask_host.clear();
+    other.constraint_allowed_counts_host.clear();
+    other.stochastic_topk_ids = gpu::Tensor{};
+    other.stochastic_topk_logits = gpu::Tensor{};
+    other.stochastic_topk_scratch = gpu::Tensor{};
+    other.stochastic_topk_active_counts = gpu::Tensor{};
+    other.stochastic_topk_partitions = 0;
+    other.stochastic_topk_scratch_bytes = 0;
     other.keepalive = nullptr;
 }
 
@@ -1351,6 +1365,13 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         dflash_target_hidden = std::move(other.dflash_target_hidden);
         constraint_mask_device = std::move(other.constraint_mask_device);
         constraint_mask_host = std::move(other.constraint_mask_host);
+        constraint_allowed_counts_host = std::move(other.constraint_allowed_counts_host);
+        stochastic_topk_ids = std::move(other.stochastic_topk_ids);
+        stochastic_topk_logits = std::move(other.stochastic_topk_logits);
+        stochastic_topk_scratch = std::move(other.stochastic_topk_scratch);
+        stochastic_topk_active_counts = std::move(other.stochastic_topk_active_counts);
+        stochastic_topk_partitions = other.stochastic_topk_partitions;
+        stochastic_topk_scratch_bytes = other.stochastic_topk_scratch_bytes;
         other.batch_context = nullptr;
         other.host_request_staging = nullptr;
         other.host_staging_bytes = 0;
@@ -1387,6 +1408,13 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.dflash_target_hidden = {};
         other.constraint_mask_device = gpu::Tensor{};
         other.constraint_mask_host.clear();
+        other.constraint_allowed_counts_host.clear();
+        other.stochastic_topk_ids = gpu::Tensor{};
+        other.stochastic_topk_logits = gpu::Tensor{};
+        other.stochastic_topk_scratch = gpu::Tensor{};
+        other.stochastic_topk_active_counts = gpu::Tensor{};
+        other.stochastic_topk_partitions = 0;
+        other.stochastic_topk_scratch_bytes = 0;
         keepalive = other.keepalive;
         other.keepalive = nullptr;
     }
