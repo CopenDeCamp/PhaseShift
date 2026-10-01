@@ -100,7 +100,6 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
         self._default_max_output_tokens = DEFAULT_DEFAULT_MAX_OUTPUT_TOKENS
         self._loaded_signature: tuple | None = None
         self._constraint_dir: str | None = None
-        self._prefix_cache_enabled = False
 
     # ------------------------------------------------------------------ health
 
@@ -244,7 +243,6 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
         self._max_seq_len = max_seq_len
         self._default_max_output_tokens = default_max_output_tokens
         self._loaded_signature = signature
-        self._prefix_cache_enabled = prefix_cache_capacity_tokens > 0
         self._constraint_dir = constraint_dir
         return pb.Result(success=True, message="loaded")
 
@@ -351,8 +349,7 @@ class PhaseShiftBackend(pb_grpc.BackendServicer):
             parallel_tool_calls=parallel,
             structural_tag=structural_tag,
             grammar=grammar,
-            cache_checkpoint_position=(
-                render.cache_boundary if self._prefix_cache_enabled else 0),
+            cache_checkpoint_position=render.cache_boundary,
             reasoning_enabled=reasoning_enabled,
             reasoning_effort=reasoning_effort,
         )

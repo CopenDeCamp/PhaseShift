@@ -26,6 +26,10 @@ WEATHER = {"type": "function", "name": "get_weather", "description": "weather",
                           "required": ["city"], "additionalProperties": False},
            "strict": True}
 
+NO_TOOLS_INSTRUCTION = (
+    "You must not call any tool or function. Reply with a short JSON object "
+    "matching the required schema.")
+
 
 def stream_text(events):
     return "".join(event.get("delta", "") for event in events
@@ -61,8 +65,9 @@ def main() -> int:
 
             prompt_text = "Do not use tools. Return the requested structured result."
             events = list(http_sse(url, {
-                "model": "phaseshift", "input": prompt_text,
-                "stream": True, "temperature": 0, "max_output_tokens": 64,
+                "model": "phaseshift", "instructions": NO_TOOLS_INSTRUCTION,
+                "input": prompt_text,
+                "stream": True, "temperature": 0, "max_output_tokens": 256,
                 "text": {"format": TEXT_FORMAT}, "tools": [WEATHER],
                 "tool_choice": "auto"}))
             text = stream_text(events)
@@ -76,8 +81,9 @@ def main() -> int:
                           repr(stream_calls(events)))
 
             non_stream = http_json(url, {
-                "model": "phaseshift", "input": prompt_text,
-                "temperature": 0, "max_output_tokens": 64,
+                "model": "phaseshift", "instructions": NO_TOOLS_INSTRUCTION,
+                "input": prompt_text,
+                "temperature": 0, "max_output_tokens": 256,
                 "text": {"format": TEXT_FORMAT}, "tools": [WEATHER],
                 "tool_choice": "auto"})
             checker.check("stream-text-parity", text.strip() == output_text(non_stream).strip(),

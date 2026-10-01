@@ -18,6 +18,7 @@ from support import (  # noqa: E402
     http_json,
     model_dir,
     prompt_ids,
+    test_arena_gib,
 )
 
 LONG_TEXT = ("The quick brown fox jumps over the lazy dog while the patient "
@@ -75,6 +76,7 @@ def default_profile(checker) -> None:
            "PHASESHIFT_BATCH_TRACE": "1",
            "PHASESHIFT_COMPUTE_LOG": str(compute_log)}
     with ServerHarness(startup_timeout=300.0, use_defaults=True,
+                       arena_override=test_arena_gib(),
                        log_path=server_log, env=env) as server:
         long_ids = prompt_ids(LONG_TEXT)
         checker.check("long-prompt-beyond-4k", len(long_ids) > 4096, str(len(long_ids)))

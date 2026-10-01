@@ -30,6 +30,10 @@ TIME = {"type": "function", "name": "get_time", "description": "time",
                        "required": ["city"], "additionalProperties": False},
         "strict": True}
 
+NO_TOOLS_INSTRUCTION = (
+    "You must not call any tool or function. Reply with a short JSON object "
+    "matching the required schema.")
+
 
 def function_calls(response):
     return [item for item in response.get("output", [])
@@ -98,8 +102,9 @@ def main() -> int:
 
             response = http_json(url, {
                 "model": "phaseshift",
+                "instructions": NO_TOOLS_INSTRUCTION,
                 "input": "Do not use tools. Return the requested structured result.",
-                "temperature": 0, "max_output_tokens": 64,
+                "temperature": 0, "max_output_tokens": 256,
                 "text": {"format": TEXT_FORMAT}, "tools": [WEATHER],
                 "tool_choice": "auto"})
             checker.check("auto-text-structured", structured(response) is not None,

@@ -61,9 +61,11 @@ level 別 token budget は与えない。未知値は引き続き HTTP 400 で�
 ## rendering
 
 `enable_thinking` は full prompt（`add_generation_prompt=True`）と stable prompt
-（`add_generation_prompt=False`）の両方へ渡す。stable prompt は generation prompt tail を
-含まないため thinking on/off で同一であり、prompt-boundary prefix cache の node は変わらない。
-full prompt は tail が異なるため、cache は自然に別 prefix として扱う（metadata key を追加しない）。
+（`add_generation_prompt=False`）の両方へ渡す。boundary は stable prompt の末尾、つまり
+最後に閉じた turn の `<|im_end|>\n` の直後である。thinking on では chat template が
+reasoning-effort の system message を前置するため、stable prompt も boundary も thinking
+off とは異なる（prefix cache の node は mode ごとに分かれる）。full prompt は generation
+prompt tail も異なるため、cache は自然に別 prefix として扱う（metadata key を追加しない）。
 
 Qwen3.5 template の挙動:
 

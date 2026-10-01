@@ -133,10 +133,18 @@ def template_cases(checker, processor):
                   on_text.rstrip().endswith("<think>"), repr(on_text[-40:]))
     checker.check("boundary-off-exact", off.cache_boundary > 0, str(off))
     checker.check("boundary-on-exact", on.cache_boundary > 0, str(on))
-    # The stable history (add_generation_prompt=False) is identical for both
-    # modes; only the generation prompt tail differs.
-    checker.check("boundary-stable-same", off.cache_boundary == on.cache_boundary,
-                  f"{off.cache_boundary} vs {on.cache_boundary}")
+    # The boundary is the end of the rendered history
+    # (add_generation_prompt=False), so it always lands on a closed turn.
+    # enable_thinking=True makes the template prepend the reasoning-effort
+    # system message, so the stable history (and the boundary) is mode-specific.
+    off_history = processor.decode(off.ids[:off.cache_boundary], skip_special_tokens=False)
+    on_history = processor.decode(on.ids[:on.cache_boundary], skip_special_tokens=False)
+    checker.check("boundary-off-at-turn-end",
+                  0 < off.cache_boundary < len(off.ids)
+                  and off_history.endswith("<|im_end|>\n"), repr(off_history[-24:]))
+    checker.check("boundary-on-at-turn-end",
+                  0 < on.cache_boundary < len(on.ids)
+                  and on_history.endswith("<|im_end|>\n"), repr(on_history[-24:]))
     checker.check("full-prompt-differs", len(off.ids) != len(on.ids),
                   f"{len(off.ids)} vs {len(on.ids)}")
 

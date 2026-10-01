@@ -8,9 +8,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import Checker, ComputeHarness, prompt_ids  # noqa: E402
+from support import Checker, ComputeHarness, load_processor  # noqa: E402
 
-FILLER = prompt_ids("The quick brown fox jumps over the lazy dog. " * 80)
+
+def _raw_ids(text: str) -> list[int]:
+    """Plain text continuation ids (no chat template).
+
+    The checkpoint tests exercise raw-token generation; a chat-formatted prompt
+    would be closed by the model with <|im_end|> on the first token, which the
+    generation stop contract now terminates immediately.
+    """
+    return list(load_processor().tokenizer(
+        text, add_special_tokens=False)["input_ids"])
+
+
+FILLER = _raw_ids("The quick brown fox jumps over the lazy dog. " * 80)
 MAX_SEQ_LEN = 1024
 
 

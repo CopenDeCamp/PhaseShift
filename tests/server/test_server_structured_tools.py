@@ -37,6 +37,10 @@ TIME = {"type": "function", "function": {
                    "required": ["city"], "additionalProperties": False},
     "strict": True}}
 
+NO_TOOLS_INSTRUCTION = (
+    "You must not call any tool or function. Reply with a short JSON object "
+    "matching the required schema.")
+
 
 def message(response):
     return response["choices"][0]["message"]
@@ -106,12 +110,16 @@ def main() -> int:
                               calls(response)[0]["function"]["name"] == "get_weather",
                               repr(calls(response)[0]))
 
-            # auto text branch.
+            # auto text branch: an explicit no-tools instruction makes the model
+            # deterministically take the structured-text side of the composed
+            # constraint instead of the tool branch.
             response = http_json(url, {
                 "model": "phaseshift",
-                "messages": [{"role": "user", "content":
-                              "Do not use tools. Return the requested structured result."}],
-                "temperature": 0, "max_tokens": 64,
+                "messages": [
+                    {"role": "system", "content": NO_TOOLS_INSTRUCTION},
+                    {"role": "user", "content":
+                     "Do not use tools. Return the requested structured result."}],
+                "temperature": 0, "max_tokens": 256,
                 "response_format": RESPONSE_FORMAT, "tools": [WEATHER],
                 "tool_choice": "auto",
             })

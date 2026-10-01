@@ -28,6 +28,10 @@ WEATHER = {"type": "function", "function": {
                    "required": ["city"], "additionalProperties": False},
     "strict": True}}
 
+NO_TOOLS_INSTRUCTION = (
+    "You must not call any tool or function. Reply with a short JSON object "
+    "matching the required schema.")
+
 
 def reconstruct(chunks):
     calls: dict[int, dict] = {}
@@ -59,10 +63,12 @@ def main() -> int:
             url = f"{server.base_url}/chat/completions"
 
             prompt_text = "Do not use tools. Return the requested structured result."
+            messages = [{"role": "system", "content": NO_TOOLS_INSTRUCTION},
+                        {"role": "user", "content": prompt_text}]
             events = list(http_sse(url, {
                 "model": "phaseshift",
-                "messages": [{"role": "user", "content": prompt_text}],
-                "stream": True, "temperature": 0, "max_tokens": 64,
+                "messages": messages,
+                "stream": True, "temperature": 0, "max_tokens": 256,
                 "response_format": RESPONSE_FORMAT, "tools": [WEATHER],
                 "tool_choice": "auto"}))
             content, calls = reconstruct(events)
@@ -78,8 +84,8 @@ def main() -> int:
             # exact parity with the non-stream response.
             non_stream = http_json(url, {
                 "model": "phaseshift",
-                "messages": [{"role": "user", "content": prompt_text}],
-                "temperature": 0, "max_tokens": 64,
+                "messages": messages,
+                "temperature": 0, "max_tokens": 256,
                 "response_format": RESPONSE_FORMAT, "tools": [WEATHER],
                 "tool_choice": "auto"})
             non_content = non_stream["choices"][0]["message"].get("content") or ""

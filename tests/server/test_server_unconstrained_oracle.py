@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Gate 8R: unconstrained greedy oracle regression.
 
-Re-runs the committed Qwen3.5 transformers oracle for the raw_compute case and
+Re-runs the committed Qwen3.5-4B transformers oracle for the raw_compute case and
 requires exact generated token parity. This guards the unconstrained path
 against accidental changes from the constraint integration.
+
+The oracle fixture is model-specific, so the harness runs the Qwen3.5-4B model
+(``PHASESHIFT_ORACLE_MODEL_DIR``, default ``models/Qwen3.5-4B``) rather than the
+serving model. When that external model is absent the test reports an explicit
+SKIP instead of comparing against the wrong model.
 """
 
 from __future__ import annotations
@@ -14,17 +19,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from support import REPO_ROOT, Checker, ComputeHarness  # noqa: E402
+from support import REPO_ROOT, Checker, ComputeHarness, oracle_model_dir  # noqa: E402
 
 
 def main() -> int:
     checker = Checker("unconstrained-oracle")
+    oracle_model = oracle_model_dir()
+    if not oracle_model.is_dir():
+        print(
+            f"[SKIP] unconstrained-oracle: oracle model not found: {oracle_model} "
+            "(set PHASESHIFT_ORACLE_MODEL_DIR)",
+            file=sys.stderr)
+        return 0
     fixture = json.loads(
         (REPO_ROOT / "tests" / "e2e" / "fixtures" / "qwen35_4b_oracle.json").read_text())
     case = next(c for c in fixture["cases"] if c["name"] == "raw_compute")
     oracle_ids = list(case["generated_ids"])
 
-    harness = ComputeHarness(max_concurrent_requests=1, max_seq_len=64, device=1)
+    harness = ComputeHarness(max_concurrent_requests=1, max_seq_len=64, device=1,
+                             model_path=oracle_model)
     try:
         harness.start()
         harness.wait_ready()

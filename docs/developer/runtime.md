@@ -185,8 +185,9 @@ host-side request objectは解放しない。
   `ContinuousBatcher` を通らないため KV Banker の admission が効かない）。
 - DFlash の prefix cache checkpoint は prompt boundary（prompt 全体）で保存する。
   `prefix_cache_checkpoint_position` は保存位置の指定としては使われない。
-- `prefix_cache_checkpoint_position` は prefix cache が有効なときだけ backend から送る。
-  無効時は 0 である。
+- backend は chat template が確定した stable prompt boundary を常に
+  `prefix_cache_checkpoint_position` として送る。prefix cache が無効でも同じ位置で prefill
+  chunk を切るため、生成列は prefix cache の有効・無効に依存しない。
 
 詳細は [dflash2.md](dflash2.md) を参照。
 
@@ -197,9 +198,10 @@ GDN pool を専用に所有し、checkpoint を D2D で snapshot / restore す�
 sequence slot・GDN slot には影響しない。
 
 request は任意の `prefix_cache_checkpoint_position` を指定できる。指定すると scheduler は
-その位置を跨がないように prefill chunk を切り、chunk 実行後に `input_tokens[0:N]` の snapshot
-を保存する。この場合 terminal checkpoint は保存しない。指定が無い request は従来どおり
-terminal checkpoint を保存する。詳細は [prefix_cache.md](prefix_cache.md) を参照。
+その位置を跨がないように prefill chunk を切り、prefix cache が有効なら chunk 実行後に
+`input_tokens[0:N]` の snapshot を保存する。この場合 terminal checkpoint は保存しない。
+指定が無い request は従来どおり terminal checkpoint を保存する。詳細は
+[prefix_cache.md](prefix_cache.md) を参照。
 
 ## Grammar constraints
 

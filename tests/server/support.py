@@ -62,6 +62,14 @@ def model_dir() -> Path:
     return REPO_ROOT / "models" / "Qwen3.5-4B"
 
 
+def oracle_model_dir() -> Path:
+    """Model that the committed Qwen3.5-4B oracle fixture was generated from."""
+    env = os.environ.get("PHASESHIFT_ORACLE_MODEL_DIR")
+    if env:
+        return Path(env)
+    return REPO_ROOT / "models" / "Qwen3.5-4B"
+
+
 _CONSTRAINT_INFO_CACHE: dict[str, str | None] = {}
 _PROCESSOR_CACHE: dict[str, object] = {}
 
@@ -334,7 +342,8 @@ class ComputeHarness:
                  kv_cache_dtype: str = "bf16",
                  prefix_cache_trace: bool = False,
                  dflash2_model_dir: str | None = None,
-                 dflash2_drafts: int = 7):
+                 dflash2_drafts: int = 7,
+                 model_path: Path | str | None = None):
         self.log_path = log_path
         self.arena_gib = arena_gib
         self.max_seq_len = max_seq_len
@@ -351,6 +360,7 @@ class ComputeHarness:
         self.prefix_cache_trace = prefix_cache_trace
         self.dflash2_model_dir = dflash2_model_dir
         self.dflash2_drafts = dflash2_drafts
+        self.model_path = Path(model_path) if model_path is not None else None
         self.proc: subprocess.Popen | None = None
         self.stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
@@ -361,7 +371,7 @@ class ComputeHarness:
             raise Failure(f"phaseshift-compute not found: {binary}")
         argv = [
             str(binary),
-            "--model-dir", str(model_dir()),
+            "--model-dir", str(self.model_path or model_dir()),
             "--serve-stdio",
             "--max-seq-len", str(self.max_seq_len),
             "--arena-gib", str(self.arena_gib),
@@ -496,6 +506,20 @@ def _test_device(default: int) -> int:
     return int(raw)
 
 
+def test_arena_gib(default: int = 24) -> int:
+    """Arena size for default-profile server tests.
+
+    ``--arena-gib`` sizes the single GPU pool that also holds the weights, so the
+    server default (16) cannot load the 27B PSQ target. Tests that exercise the
+    production default profile still size the arena for the host via
+    ``PHASESHIFT_TEST_ARENA_GIB``.
+    """
+    raw = os.environ.get("PHASESHIFT_TEST_ARENA_GIB")
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw)
+
+
 class ServerHarness:
     """Starts the phaseshift-server launcher and waits for readiness."""
 
@@ -509,7 +533,8 @@ class ServerHarness:
                  use_defaults: bool = False,
                  kv_cache_dtype: str = "bf16",
                  dflash2_model_dir: str | None = None,
-                 dflash2_drafts: int = 7):
+                 dflash2_drafts: int = 7,
+                 arena_override: int | None = None):
         self.log_path = log_path or (Path("/tmp") / f"phaseshift-server-{os.getpid()}.log")
         self.env = dict(os.environ)
         if env:
@@ -526,6 +551,7 @@ class ServerHarness:
         self.kv_cache_dtype = kv_cache_dtype
         self.dflash2_model_dir = dflash2_model_dir
         self.dflash2_drafts = dflash2_drafts
+        self.arena_override = arena_override
         self.proc: subprocess.Popen | None = None
         self.port = free_port()
         self.base_url = ""
@@ -557,6 +583,8 @@ class ServerHarness:
                 "--prefix-cache-max-entries", str(self.prefix_cache_max_entries),
                 "--kv-cache-dtype", self.kv_cache_dtype,
             ]
+        elif self.arena_override is not None:
+            argv += ["--arena-gib", str(self.arena_override)]
         if self.dflash2_model_dir is not None:
             argv += ["--dflash2-model-dir", str(self.dflash2_model_dir),
                      "--dflash2-drafts", str(self.dflash2_drafts)]

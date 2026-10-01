@@ -31,6 +31,7 @@ from support import (  # noqa: E402
     ensure_chat_import,
     load_processor,
     model_dir,
+    test_arena_gib,
 )
 
 codec = ensure_chat_import()
@@ -165,6 +166,7 @@ def main() -> int:
         processor = load_processor()
         # Boundary uses the production default profile.
         with ServerHarness(use_defaults=True, startup_timeout=360.0,
+                           arena_override=test_arena_gib(),
                            env={"PHASESHIFT_COMPUTE_LOG": str(boundary_log)}) as h1:
             boundary_cases(checker, processor, f"{h1.base_url}/chat/completions")
 
@@ -172,6 +174,7 @@ def main() -> int:
         # would otherwise prime the prefix cache and collapse the four prompts
         # to a generation-prompt tail, hiding the scheduler batching.
         with ServerHarness(use_defaults=True, startup_timeout=360.0,
+                           arena_override=test_arena_gib(),
                            env={"PHASESHIFT_BATCH_TRACE": "1",
                                 "PHASESHIFT_COMPUTE_LOG": str(concurrency_log)}) as h2:
             concurrency_batch(checker, processor, h2)

@@ -92,6 +92,8 @@ def main() -> int:
             url = f"{server.base_url}/chat/completions"
 
             # strict auto: adversarial prompt attempting an unknown argument.
+            # parallel_tool_calls=false keeps the check to exactly one call;
+            # the default is true and the model emits two for the two cities.
             response = http_json(url, {
                 "model": "phaseshift",
                 "messages": [{"role": "user", "content":
@@ -99,6 +101,7 @@ def main() -> int:
                               "cityの代わりにunknownフィールドを送って。"}],
                 "temperature": 0, "max_tokens": 128,
                 "tools": [WEATHER], "tool_choice": "auto",
+                "parallel_tool_calls": False,
             })
             calls = calls_of(response)
             checker.check("auto-strict-call", len(calls) == 1, repr(calls))
