@@ -69,6 +69,15 @@ struct HostExecutionContext {
     const ::ps::runtime::DeviceSamplingParams* output_sampling_params = nullptr;
     const uint32_t* constraint_masks = nullptr;
     uint32_t constraint_mask_words = 0;
+    const uint32_t* constraint_allowed_counts = nullptr;
+    bool stochastic_topk_eligible = false;
+    uint32_t stochastic_top_k = 0;
+    int32_t* stochastic_topk_ids = nullptr;
+    float* stochastic_topk_logits = nullptr;
+    void* stochastic_topk_scratch = nullptr;
+    uint32_t stochastic_topk_partitions = 0;
+    uint32_t stochastic_topk_scratch_bytes = 0;
+    uint32_t* stochastic_topk_active_counts = nullptr;
     LmHeadCandidateProxy* lm_head_proxy = nullptr;
     bool lm_head_shadow_pending = false;
     const int32_t* lm_head_shadow_full = nullptr;

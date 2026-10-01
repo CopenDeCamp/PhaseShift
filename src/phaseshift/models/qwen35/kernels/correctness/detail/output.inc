@@ -64,8 +64,22 @@ __device__ __forceinline__ ProgramStatus exec_gather_or_sample(
         }
         const float* row_logits =
             logits + static_cast<size_t>(row) * in.row_stride;
-        sampling_sample_row(row_logits, vocab, params, constraint, sampled_tokens + row,
-                            env.error_word);
+        if (sampling_topk_path_enabled(env.context->output_sampling_params[row]) &&
+            params.top_k > 0u && !constraint.active && params.top_k <= kSamplingMaxTopK) {
+            __shared__ int32_t top_ids[kSamplingMaxTopK];
+            __shared__ float top_values[kSamplingMaxTopK];
+            sampling_topk_select_reference(row_logits, vocab, params.top_k, top_ids,
+                                           top_values);
+            SamplingTopKView view;
+            view.ids = top_ids;
+            view.logits = top_values;
+            view.count = params.top_k;
+            sampling_topk_active_row(row_logits, vocab, params, constraint, view,
+                                     sampled_tokens + row, env.error_word);
+        } else {
+            sampling_sample_row(row_logits, vocab, params, constraint, sampled_tokens + row,
+                                env.error_word);
+        }
     }
     return ProgramStatus::COMPLETE;
 }

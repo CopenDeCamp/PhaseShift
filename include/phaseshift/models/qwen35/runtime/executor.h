@@ -147,6 +147,13 @@ struct Executor {
     std::array<gpu::Tensor, kMaxTargetHiddenTaps> dflash_target_hidden;
     gpu::Tensor constraint_mask_device;
     std::vector<uint32_t> constraint_mask_host;
+    std::vector<uint32_t> constraint_allowed_counts_host;
+    gpu::Tensor stochastic_topk_ids;
+    gpu::Tensor stochastic_topk_logits;
+    gpu::Tensor stochastic_topk_scratch;
+    gpu::Tensor stochastic_topk_active_counts;
+    uint32_t stochastic_topk_partitions = 0;
+    std::size_t stochastic_topk_scratch_bytes = 0;
 
     void* keepalive = nullptr;
 

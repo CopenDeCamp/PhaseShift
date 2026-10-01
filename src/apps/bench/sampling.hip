@@ -1,5 +1,6 @@
 #include <phaseshift/models/qwen35/kernels/optimized/sampling.h>
 #include <phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
 #include <phaseshift/core/gpu/cleanup.h>
 #include <phaseshift/core/memory/types.h>
@@ -46,7 +47,8 @@ struct Options {
 void usage(FILE* f) {
     std::fprintf(f,
                  "usage: phaseshift-bench sampling [options]\n"
-                 "  --variant correctness|single|partitioned|stochastic\n"
+                 "  --variant correctness|single|partitioned|stochastic|"
+                 "stochastic-rejection|stochastic-radix\n"
                  "  --vocab N\n"
                  "  --outputs N\n"
                  "  --partitions N\n"
@@ -96,10 +98,15 @@ struct Env {
     void* err = nullptr;
     void* partials = nullptr;
     void* attempts = nullptr;
+    void* top_ids = nullptr;
+    void* top_vals = nullptr;
+    void* topk_scratch = nullptr;
+    void* active = nullptr;
     P prog{};
     B binding{};
     ~Env() {
-        for (auto* q : {logits, sampling, out, bc, vals, scratch, err, partials, attempts})
+        for (auto* q : {logits, sampling, out, bc, vals, scratch, err, partials, attempts,
+                        top_ids, top_vals, topk_scratch, active})
             if (q) ps::gpu::discard_cleanup_result(hipFree(q));
     }
 };
@@ -139,6 +146,21 @@ bool build_env(Env& e, const Options& o) {
     if (hipMalloc(&e.err, sizeof(uint32_t)) != hipSuccess) return false;
     if (hipMalloc(&e.partials, (size_t)o.outputs * o.partitions * 8) != hipSuccess)
         return false;
+    const bool radix_variant = o.variant == "stochastic-radix";
+    if (radix_variant) {
+        const uint32_t top_k =
+            o.top_k > 0u && o.top_k <= ::ps::kernel::kSamplingMaxTopK
+                ? o.top_k
+                : ::ps::kernel::kSamplingMaxTopK;
+        if (hipMalloc(&e.top_ids, (size_t)o.outputs * top_k * 4) != hipSuccess) return false;
+        if (hipMalloc(&e.top_vals, (size_t)o.outputs * top_k * 4) != hipSuccess)
+            return false;
+        const uint32_t partitions = ::ps::kernel::dflash2_radix_default_partitions(o.vocab);
+        const size_t radix_bytes =
+            ::ps::kernel::dflash2_radix_topn_scratch_bytes(o.outputs, partitions, o.vocab);
+        if (hipMalloc(&e.topk_scratch, radix_bytes) != hipSuccess) return false;
+        if (hipMalloc(&e.active, (size_t)o.outputs * 4) != hipSuccess) return false;
+    }
 
     std::vector<float> l(n);
     fill_logits(l, o.logit_pattern, o.vocab, o.outputs, o.seed);
@@ -146,10 +168,10 @@ bool build_env(Env& e, const Options& o) {
         return false;
 
     std::vector<::ps::runtime::DeviceSamplingParams> sp(o.outputs);
-    const uint8_t sample_mode =
-        (o.variant == "stochastic" || (o.variant == "correctness" && o.temperature > 0.0f))
-            ? 2u
-            : 1u;
+    const bool stochastic_variant =
+        o.variant == "stochastic" || o.variant == "stochastic-rejection" ||
+        o.variant == "stochastic-radix" || (o.variant == "correctness" && o.temperature > 0.0f);
+    const uint8_t sample_mode = stochastic_variant ? 2u : 1u;
     for (size_t m = 0; m < sp.size(); ++m) {
         uint8_t mode = sample_mode;
         if (o.flags == "none") mode = 0;
@@ -256,6 +278,36 @@ hipError_t launch_partitioned(const Env& e, uint32_t partitions, hipStream_t s) 
         a, (::ps::kernel::ArgMaxPair*)e.partials, e.outputs * partitions, partitions, s);
 }
 
+hipError_t launch_stochastic_radix(const Env& e, const Options& o, hipStream_t s) {
+    if (e.top_ids == nullptr || e.top_vals == nullptr || e.topk_scratch == nullptr ||
+        e.active == nullptr)
+        return hipErrorInvalidValue;
+    const uint32_t top_k =
+        o.top_k > 0u && o.top_k <= ::ps::kernel::kSamplingMaxTopK
+            ? o.top_k
+            : ::ps::kernel::kSamplingMaxTopK;
+    const uint32_t partitions = ::ps::kernel::dflash2_radix_default_partitions(e.vocab);
+    const size_t radix_bytes =
+        ::ps::kernel::dflash2_radix_topn_scratch_bytes(e.outputs, partitions, e.vocab);
+    hipError_t err = ::ps::kernel::launch_dflash2_radix_topn(
+        (const float*)e.logits, e.outputs, e.vocab, e.vocab, top_k, (int32_t*)e.top_ids,
+        (float*)e.top_vals, partitions, e.topk_scratch, radix_bytes, s);
+    if (err != hipSuccess) return err;
+    ::ps::kernel::StochasticTopKSamplingArgs a;
+    a.logits = (const float*)e.logits;
+    a.sampling = (const ::ps::runtime::DeviceSamplingParams*)e.sampling;
+    a.sampled_tokens = (int32_t*)e.out;
+    a.top_ids = (const int32_t*)e.top_ids;
+    a.top_logits = (const float*)e.top_vals;
+    a.outputs = e.outputs;
+    a.vocab_size = e.vocab;
+    a.logits_row_stride = e.vocab;
+    a.top_k = top_k;
+    a.error_word = (uint32_t*)e.err;
+    a.active_count_out = (uint32_t*)e.active;
+    return ::ps::kernel::launch_stochastic_topk_sampling_f32(a, s);
+}
+
 }  // namespace
 
 int run_sampling(int argc, char** argv) {
@@ -290,7 +342,8 @@ int run_sampling(int argc, char** argv) {
         else { usage(stderr); return 2; }
     }
     if (o.variant != "correctness" && o.variant != "single" && o.variant != "partitioned" &&
-        o.variant != "stochastic") {
+        o.variant != "stochastic" && o.variant != "stochastic-rejection" &&
+        o.variant != "stochastic-radix") {
         usage(stderr);
         return 2;
     }
@@ -309,8 +362,9 @@ int run_sampling(int argc, char** argv) {
         if (f) {
             if (std::ftell(f) == 0)
                 std::fprintf(f,
-                             "variant,vocab,outputs,partitions,flags,logit_pattern,warmup,"
-                             "samples,launches_per_sample,min_us,p50_us,p95_us,mean_us\n");
+                             "variant,vocab,outputs,partitions,flags,logit_pattern,temperature,"
+                             "top_p,top_k,warmup,samples,launches_per_sample,min_us,p50_us,"
+                             "p95_us,mean_us,avg_attempts,avg_active\n");
             std::fclose(f);
         }
     }
@@ -318,7 +372,9 @@ int run_sampling(int argc, char** argv) {
     auto launch = [&](hipStream_t s) -> hipError_t {
         if (o.variant == "correctness") return launch_correctness(e, s);
         if (o.variant == "single") return launch_single(e, s);
-        if (o.variant == "stochastic") return launch_stochastic(e, s);
+        if (o.variant == "stochastic" || o.variant == "stochastic-rejection")
+            return launch_stochastic(e, s);
+        if (o.variant == "stochastic-radix") return launch_stochastic_radix(e, o, s);
         return launch_partitioned(e, o.partitions, s);
     };
     for (int i = 0; i < o.warmup; ++i) {
@@ -349,18 +405,12 @@ int run_sampling(int argc, char** argv) {
     double mean = 0.0;
     for (double x : per) mean += x;
     mean /= (double)per.size();
-    if (!o.out.empty()) {
-        FILE* f = std::fopen(o.out.c_str(), "a");
-        if (f) {
-            std::fprintf(f, "%s,%u,%u,%u,%s,%s,%d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
-                         o.variant.c_str(), o.vocab, o.outputs, o.partitions,
-                         o.flags.c_str(), o.logit_pattern.c_str(), o.warmup, o.samples,
-                         o.launches, mn, p50, p95, mean);
-            std::fclose(f);
-        }
-    }
     double avg_attempts = 0.0;
-    if (o.variant == "stochastic") {
+    double avg_active = 0.0;
+    const bool show_attempts =
+        o.variant == "stochastic" || o.variant == "stochastic-rejection";
+    const bool show_active = o.variant == "stochastic-radix";
+    if (show_attempts) {
         std::vector<uint32_t> att(o.outputs);
         if (hipMemcpy(att.data(), e.attempts, sizeof(uint32_t) * o.outputs,
                       hipMemcpyDeviceToHost) == hipSuccess) {
@@ -368,12 +418,39 @@ int run_sampling(int argc, char** argv) {
             avg_attempts /= (double)o.outputs;
         }
     }
-    std::printf(
-        "%-11s v=%-6u out=%-4u P=%-3u flags=%-6s pat=%-7s T=%.2f p=%.2f k=%-4u "
-        "p50=%.2fus p95=%.2fus mean=%.2fus attempts=%.2f\n",
-        o.variant.c_str(), o.vocab, o.outputs, o.partitions, o.flags.c_str(),
-        o.logit_pattern.c_str(), o.temperature, o.top_p, o.top_k, p50, p95, mean,
-        avg_attempts);
+    if (show_active && e.active != nullptr) {
+        std::vector<uint32_t> act(o.outputs);
+        if (hipMemcpy(act.data(), e.active, sizeof(uint32_t) * o.outputs,
+                      hipMemcpyDeviceToHost) == hipSuccess) {
+            for (uint32_t x : act) avg_active += (double)x;
+            avg_active /= (double)o.outputs;
+        }
+    }
+    if (!o.out.empty()) {
+        FILE* f = std::fopen(o.out.c_str(), "a");
+        if (f) {
+            std::fprintf(
+                f, "%s,%u,%u,%u,%s,%s,%.4f,%.4f,%u,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                o.variant.c_str(), o.vocab, o.outputs, o.partitions, o.flags.c_str(),
+                o.logit_pattern.c_str(), o.temperature, o.top_p, o.top_k, o.warmup,
+                o.samples, o.launches, mn, p50, p95, mean, avg_attempts, avg_active);
+            std::fclose(f);
+        }
+    }
+    if (show_active) {
+        std::printf(
+            "%-18s v=%-6u out=%-4u flags=%-6s pat=%-7s T=%.2f p=%.2f k=%-4u "
+            "p50=%.2fus p95=%.2fus mean=%.2fus active=%.2f\n",
+            o.variant.c_str(), o.vocab, o.outputs, o.flags.c_str(), o.logit_pattern.c_str(),
+            o.temperature, o.top_p, o.top_k, p50, p95, mean, avg_active);
+    } else {
+        std::printf(
+            "%-18s v=%-6u out=%-4u P=%-3u flags=%-6s pat=%-7s T=%.2f p=%.2f k=%-4u "
+            "p50=%.2fus p95=%.2fus mean=%.2fus attempts=%.2f\n",
+            o.variant.c_str(), o.vocab, o.outputs, o.partitions, o.flags.c_str(),
+            o.logit_pattern.c_str(), o.temperature, o.top_p, o.top_k, p50, p95, mean,
+            avg_attempts);
+    }
     ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     return 0;
 }

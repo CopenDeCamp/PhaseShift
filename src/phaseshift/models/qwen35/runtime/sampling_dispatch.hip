@@ -3,6 +3,7 @@
 #include <phaseshift/models/qwen35/runtime/sampling_selector.h>
 #include <phaseshift/models/qwen35/kernels/optimized/sampling.h>
 #include <phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
 #include <hip/hip_runtime.h>
 
@@ -57,9 +58,50 @@ Result<OptimizedLaunchResult> resolve_sampling(
     si.stochastic_outputs = ctx.actual_stochastic_outputs;
     si.scratch_pair_capacity =
         ctx.scratch != nullptr ? (ctx.scratch_floats / 2u) : 0u;
+    si.stochastic_topk_eligible = ctx.stochastic_topk_eligible;
+    si.stochastic_top_k = ctx.stochastic_top_k;
+    si.stochastic_topk_workspace =
+        ctx.stochastic_topk_ids != nullptr && ctx.stochastic_topk_logits != nullptr &&
+        ctx.stochastic_topk_scratch != nullptr && ctx.stochastic_topk_scratch_bytes > 0u;
 
     SamplingChoice choice = select_sampling_implementation(si);
     if (choice.implementation == SamplingImplementation::Correctness) return kNone;
+
+    if (choice.implementation == SamplingImplementation::StochasticRadixTopK) {
+        if (ctx.stochastic_topk_ids == nullptr || ctx.stochastic_topk_logits == nullptr ||
+            ctx.stochastic_topk_scratch == nullptr ||
+            ctx.stochastic_topk_scratch_bytes == 0u ||
+            ctx.stochastic_topk_partitions == 0u || ctx.stochastic_top_k == 0u)
+            return kNone;
+        const hipError_t rerr = ::ps::kernel::launch_dflash2_radix_topn(
+            static_cast<const float*>(in.ptr), outputs, vocab, in.row_stride,
+            ctx.stochastic_top_k, ctx.stochastic_topk_ids, ctx.stochastic_topk_logits,
+            ctx.stochastic_topk_partitions, ctx.stochastic_topk_scratch,
+            ctx.stochastic_topk_scratch_bytes, stream);
+        if (rerr != hipSuccess)
+            return Status::hip_error("stochastic topk radix launch", hipGetErrorString(rerr),
+                                     __FILE__, __LINE__);
+        ::ps::kernel::StochasticTopKSamplingArgs targs;
+        targs.logits = static_cast<const float*>(in.ptr);
+        targs.sampling = ctx.output_sampling_params;
+        targs.sampled_tokens = static_cast<int32_t*>(out.ptr);
+        targs.top_ids = ctx.stochastic_topk_ids;
+        targs.top_logits = ctx.stochastic_topk_logits;
+        targs.outputs = outputs;
+        targs.vocab_size = vocab;
+        targs.logits_row_stride = in.row_stride;
+        targs.top_k = ctx.stochastic_top_k;
+        targs.error_word = ctx.error_word;
+        targs.active_count_out = ctx.stochastic_topk_active_counts;
+        const hipError_t serr =
+            ::ps::kernel::launch_stochastic_topk_sampling_f32(targs, stream);
+        if (serr != hipSuccess)
+            return Status::hip_error("stochastic topk sampling launch",
+                                     hipGetErrorString(serr), __FILE__, __LINE__);
+        record_physical_launch(2);
+        record_optimized_op();
+        return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
+    }
 
     if (choice.implementation == SamplingImplementation::StochasticSingleBlock) {
         ::ps::kernel::StochasticSamplingF32Args sargs;

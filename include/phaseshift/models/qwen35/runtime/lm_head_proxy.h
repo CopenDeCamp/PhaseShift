@@ -32,16 +32,40 @@ public:
                   hipStream_t stream);
     Status select_shadow(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
                          hipStream_t stream);
+    Status select_constrained_exact(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
+                                    const uint32_t* masks, uint32_t mask_words,
+                                    uint32_t candidate_capacity, int32_t* out_ids,
+                                    hipStream_t stream);
+    Status select_constrained_exact_shadow(const bf16_t* normed, uint32_t rows,
+                                           uint32_t row_stride, const uint32_t* masks,
+                                           uint32_t mask_words, uint32_t candidate_capacity,
+                                           hipStream_t stream);
+    Status select_constrained_masked(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
+                                     const uint32_t* masks, uint32_t mask_words,
+                                     int32_t* out_ids, hipStream_t stream);
+    Status select_constrained_masked_shadow(const bf16_t* normed, uint32_t rows,
+                                            uint32_t row_stride, const uint32_t* masks,
+                                            uint32_t mask_words, hipStream_t stream);
     Status compare_shadow(const int32_t* full_ids, uint32_t rows, hipStream_t stream);
     Status shutdown() noexcept;
 
     bool valid() const noexcept { return int2_codes_ != nullptr; }
     uint32_t max_rows() const noexcept { return max_rows_; }
+    uint32_t candidate_capacity() const noexcept { return candidate_capacity_; }
+    uint32_t coarse_pool() const noexcept { return pool_; }
 
 private:
     void move_from(LmHeadCandidateProxy& other) noexcept;
     Status run_select(const bf16_t* normed, uint32_t rows, uint32_t row_stride,
                       int32_t* out_ids, hipStream_t stream);
+    Status run_select_constrained_exact(const bf16_t* normed, uint32_t rows,
+                                        uint32_t row_stride, const uint32_t* masks,
+                                        uint32_t mask_words, uint32_t candidate_capacity,
+                                        int32_t* out_ids, hipStream_t stream);
+    Status run_select_constrained_masked(const bf16_t* normed, uint32_t rows,
+                                         uint32_t row_stride, const uint32_t* masks,
+                                         uint32_t mask_words, int32_t* out_ids,
+                                         hipStream_t stream);
 
     const uint8_t* weight_codes_ = nullptr;
     const uint8_t* weight_scales_ = nullptr;
@@ -51,6 +75,7 @@ private:
     uint32_t scale_stride_ = 0;
     uint32_t max_rows_ = 0;
     uint32_t pool_ = 0;
+    uint32_t candidate_capacity_ = 0;
     uint32_t partitions_ = 0;
     uint32_t radix_partitions_ = 0;
     std::size_t radix_scratch_bytes_ = 0;
@@ -77,6 +102,7 @@ private:
 uint32_t target_lm_head_proxy_mode();
 uint32_t target_lm_head_proxy_decode_mode();
 uint32_t target_lm_head_proxy_pool();
+uint32_t target_lm_head_proxy_constraint_threshold();
 
 enum class LmHeadProxyPath : uint8_t {
     None = 0,
@@ -97,6 +123,50 @@ inline LmHeadProxyPath lm_head_proxy_path(::ps::runtime::ExecutionRole role,
     if (verify_path)
         return mode == 2u ? LmHeadProxyPath::None : LmHeadProxyPath::Fast;
     return mode == 2u ? LmHeadProxyPath::Shadow : LmHeadProxyPath::Fast;
+}
+
+enum class LmHeadConstrainedPath : uint8_t {
+    None = 0,
+    ExactCandidates = 1,
+    MaskedCoarse = 2,
+};
+
+struct LmHeadConstrainedSelection {
+    LmHeadConstrainedPath path = LmHeadConstrainedPath::None;
+    uint32_t candidate_capacity = 0u;
+};
+
+inline LmHeadConstrainedSelection select_lm_head_constrained(
+    uint32_t stochastic_outputs, uint32_t sampled_outputs, uint32_t outputs,
+    const uint32_t* allowed_counts, uint32_t rows, uint32_t small_threshold,
+    uint32_t coarse_pool) {
+    LmHeadConstrainedSelection selection;
+    if (allowed_counts == nullptr || rows == 0u || small_threshold == 0u)
+        return selection;
+    if (stochastic_outputs != 0u)
+        return selection;
+    if (outputs == 0u || sampled_outputs != outputs)
+        return selection;
+    uint32_t min_count = UINT32_MAX;
+    uint32_t max_count = 0u;
+    for (uint32_t i = 0u; i < rows; ++i) {
+        const uint32_t count = allowed_counts[i];
+        if (count == UINT32_MAX || count == 0u)
+            return selection;
+        if (count < min_count)
+            min_count = count;
+        if (count > max_count)
+            max_count = count;
+    }
+    if (max_count <= small_threshold) {
+        selection.path = LmHeadConstrainedPath::ExactCandidates;
+        selection.candidate_capacity = max_count;
+        return selection;
+    }
+    if (min_count > small_threshold && coarse_pool != 0u && min_count >= coarse_pool) {
+        selection.path = LmHeadConstrainedPath::MaskedCoarse;
+    }
+    return selection;
 }
 
 }  // namespace ps::qwen35::runtime

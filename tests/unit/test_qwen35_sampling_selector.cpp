@@ -40,6 +40,37 @@ int main() {
     const SamplingImplementation S = SamplingImplementation::SingleBlock;
     const SamplingImplementation P = SamplingImplementation::Partitioned;
     const SamplingImplementation St = SamplingImplementation::StochasticSingleBlock;
+    const SamplingImplementation R = SamplingImplementation::StochasticRadixTopK;
+
+    auto mk_topk = [](uint32_t vocab, uint32_t outputs, uint32_t stochastic, uint32_t k,
+                      bool eligible, bool workspace) {
+        SamplingSelectorInput in = mk_stochastic(vocab, outputs, outputs, stochastic, 8192u);
+        in.stochastic_topk_eligible = eligible;
+        in.stochastic_top_k = k;
+        in.stochastic_topk_workspace = workspace;
+        return in;
+    };
+
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 8, 50u, true, true)), R, 0, "radix topk eligible out=8");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 1, 1, 20u, true, true)), R, 0, "radix topk eligible out=1");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 8, 128u, true, true)), R, 0, "radix topk k=128");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 8, 50u, true, false)), St, 0, "radix topk no workspace");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 8, 50u, false, true)), St, 0, "radix topk not eligible");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 8, 0u, true, true)), St, 0, "radix topk k=0");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 8, 129u, true, true)), St, 0, "radix topk k over max");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 8, 4096u, true, true)), St, 0, "radix topk k huge");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 3, 50u, true, true)), St, 0, "radix topk partial stochastic");
+    expect(select_sampling_implementation(
+               mk_topk(248320u, 8, 0, 50u, true, true)), P, 64, "radix topk no stochastic");
 
     expect(select_sampling_implementation(mk(123456789u, 1, 1, 8192u)), C, 0,
            "unknown vocab allgreedy");

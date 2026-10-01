@@ -119,6 +119,33 @@ int main() {
     CHECK(state.accept_token(kStop));
     CHECK(state.is_terminated());
 
+    uint32_t manual_allowed = 0u;
+    for (uint32_t id = 0; id < kVocabSize; ++id) {
+        if (constraint_token_allowed(mask.data(), kVocabSize, id)) {
+            ++manual_allowed;
+        }
+    }
+    CHECK(constraint_allowed_count(mask.data(), compiler.mask_words(), kVocabSize) ==
+          manual_allowed);
+
+    std::vector<uint32_t> synthetic(3, 0xFFFFFFFFu);
+    CHECK(constraint_allowed_count(synthetic.data(), 3u, 70u) == 70u);
+    CHECK(constraint_allowed_count(synthetic.data(), 3u, 64u) == 64u);
+    CHECK(constraint_allowed_count(synthetic.data(), 3u, 96u) == 96u);
+    CHECK(constraint_allowed_count(synthetic.data(), 3u, 33u) == 33u);
+    CHECK(constraint_allowed_count(synthetic.data(), 3u, 1u) == 1u);
+    CHECK(constraint_allowed_count(synthetic.data(), 3u, 0u) == 0u);
+    CHECK(constraint_allowed_count(nullptr, 3u, 96u) == 0u);
+    CHECK(constraint_allowed_count(synthetic.data(), 0u, 96u) == 0u);
+
+    std::vector<uint32_t> sparse(3, 0u);
+    sparse[0] = 0x00000001u;
+    sparse[1] = 0x80000000u;
+    sparse[2] = 0x00000003u;
+    CHECK(constraint_allowed_count(sparse.data(), 3u, 64u) == 2u);
+    CHECK(constraint_allowed_count(sparse.data(), 3u, 65u) == 3u);
+    CHECK(constraint_allowed_count(sparse.data(), 3u, 96u) == 4u);
+
     // Invalid grammar is a fail-closed error, never a silent unconstrained path.
     auto invalid = compiler.create_gbnf_state("root ::= [");
     CHECK(!invalid.ok());

@@ -120,6 +120,7 @@ phaseshift_add_test(NAME test_dflash2_coarse_topn SOURCE unit/test_dflash2_coars
 phaseshift_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_psq8_rerank SOURCE unit/test_dflash2_psq8_rerank.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
+phaseshift_add_test(NAME test_constraint_candidates SOURCE unit/test_constraint_candidates.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_error_bound SOURCE unit/test_target_lm_proxy_error_bound.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_upper_topn SOURCE unit/test_target_lm_proxy_upper_topn.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_target_lm_proxy_certificate SOURCE unit/test_target_lm_proxy_certificate.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
@@ -219,6 +220,7 @@ phaseshift_add_test(NAME test_qwen35_sampling_params SOURCE unit/test_qwen35_sam
 target_include_directories(test_qwen35_sampling_params PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_qwen35_sampling_rng SOURCE unit/test_qwen35_sampling_rng.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_stochastic_sampling SOURCE kernels/optimized/test_stochastic_sampling.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu)
+phaseshift_add_test(NAME test_stochastic_topk SOURCE kernels/optimized/test_stochastic_topk.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 
 
 # Default required build unit. Required acceptance builds only this target.
@@ -257,6 +259,7 @@ add_custom_target(
         test_dflash2_coarse_topn
         test_dflash2_radix_topn
         test_dflash2_psq8_rerank
+        test_constraint_candidates
         test_target_lm_proxy_error_bound
         test_target_lm_proxy_upper_topn
         test_target_lm_proxy_certificate
@@ -308,6 +311,7 @@ add_custom_target(
         test_qwen35_sampling_params
         test_qwen35_sampling_rng
         test_stochastic_sampling
+        test_stochastic_topk
         test_qwen35_mtp_lowering
         test_qwen35_lowering_contract
         test_qwen35_mtp_primitives
@@ -562,6 +566,8 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
     # Target lm_head certified proxy: isolated real-head performance (Gate 6/7).
     phaseshift_add_test(NAME test_target_lm_proxy_real_perf SOURCE unit/test_target_lm_proxy_real_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
     target_include_directories(test_target_lm_proxy_real_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    phaseshift_add_test(NAME test_lm_head_constraint_perf SOURCE unit/test_lm_head_constraint_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
+    target_include_directories(test_lm_head_constraint_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Verify lm_head certified proxy: real verify-round shadow (Gate V2/V3).
     phaseshift_add_test(NAME test_verify_lm_proxy_real_verify SOURCE unit/test_verify_lm_proxy_real_verify.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)

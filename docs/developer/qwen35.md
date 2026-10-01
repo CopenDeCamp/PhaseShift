@@ -310,9 +310,40 @@ Auto モードでは `execute_program` が `lm_head_proxy`、単体 launcher の
  設定して起動する（verify の proxy は decode と logits が一致せず、DFlash2 の生成列が
  target-only greedy から分岐するため。[dflash2.md](dflash2.md) を参照）。
  明示指定した値は DFlash2 有効時でも尊重する。
-- constraint（`constraint_masks` / `constraint_mask_words`）がある経路は常に off。
 - pool は `PHASESHIFT_TARGET_LM_HEAD_PROXY_POOL`（既定 32、`kDflash2Int2MaxPool` まで）。
 - Top-N は `dflash2_radix_topn_preferred(pool)` で legacy / radix を選ぶ。
+
+constraint 付きの batch は `lm_head_proxy_path` を使わず、
+`select_lm_head_constrained(role, stochastic, sampled, outputs, allowed_counts, rows,
+small_threshold, coarse_pool)` が決める（同じヘッダ）。
+
+適用は `role == Decode`、`stochastic_outputs == 0`、`sampled == outputs`、
+全 output row が constraint 付き、allowed count が全 row で 1 以上のときだけ。
+それ以外（mixed な constrained / unconstrained row、stochastic constraint、
+allowed 0、small / large が混在）は従来の full path へ fallback する。
+constraint で処理を諦めて制約を無視する fallback は無い。
+
+| 条件 | 経路 |
+| --- | --- |
+| `max(allowed) <= small_threshold` | ExactCandidates |
+| `min(allowed) > small_threshold` かつ `min(allowed) >= coarse_pool` | MaskedCoarse |
+| それ以外 | full path へ fallback |
+
+- **ExactCandidates**: activation quantize → constraint mask から allowed token を
+  token id 昇順に candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。
+  INT2 coarse を計算しない。候補集合が全 allowed token を含む限り、
+  full PSQ8 の constrained argmax と同じ token を返す（exact）。
+- **MaskedCoarse**: activation quantize → INT2 coarse full-vocab → constraint mask で
+  許可外を `-INFINITY` に潰す → Radix Top-N → PSQ8 exact rerank → argmax。
+  INT2 は candidate 生成にしか使わず、final score は PSQ8。
+  `min(allowed) >= coarse_pool` を要するのは、Top-N の候補が埋まらないと
+  未使用スロットに不正な ID が入るため。
+- `small_threshold` は `PHASESHIFT_TARGET_LM_HEAD_PROXY_CONSTRAINT_THRESHOLD`
+  （既定 128 = `kDflash2Int2MaxPool`、これより大きくはならない）。
+- candidate capacity は batch 内の `max(allowed)`。バッファは
+  `kDflash2Int2MaxPool` で確保する。
+- mode=2 のときは同じ経路の候補を proxy 自有 buffer へ書き、production output は
+  従来どおり full PSQ8 側にする。比較と集計は unconstrained と同じ shadow 機構を使う。
 
 適用時も前提は同じで、weight は PSQ8 / preshuffled / `weight_scale_group == 32` /
 `k_padded % 32 == 0`、pattern は `ACTIVATION_QUANTIZE_W4A8` → `LINEAR_PSQ8` →

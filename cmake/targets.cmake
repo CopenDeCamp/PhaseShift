@@ -104,6 +104,7 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/optimized/gdn/conv1d.hip
     src/phaseshift/models/qwen35/kernels/optimized/sampling.hip
     src/phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.hip
+    src/phaseshift/models/qwen35/kernels/optimized/constraint_candidates.hip
     src/phaseshift/models/qwen35/kernels/dflash2/candidate_selector.hip
     src/phaseshift/models/qwen35/kernels/dflash2/feature_concat.hip
     src/phaseshift/models/qwen35/kernels/dflash2/grouped_dynamic_conv.hip
