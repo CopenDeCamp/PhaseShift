@@ -554,11 +554,19 @@ OpenCodeのproject config（`opencode.jsonc`）にOpenAI-compatible providerを�
       "env": ["PHASESHIFT_API_KEY"],
       "package": "@opencode/ai/providers/openai-compatible",
       "settings": {"baseURL": "http://127.0.0.1:8000/v1"},
-      "models": {"phaseshift": {"name": "PhaseShift"}}
+      "models": {"phaseshift": {
+        "name": "PhaseShift",
+        "limit": {"context": 32768, "output": 8192}
+      }}
     }
   }
 }
 ```
+
+`limit` は server の `--max-seq-len` に合わせる。OpenCodeは既定で32000のoutput
+budgetを要求するが、serverは明示 `max_tokens` が残りcontext windowを超えるrequestを
+fail-closedで拒否するため、`limit` を指定しないとagent promptでHTTP 400になる。
+`limit.output` は `--max-seq-len` から実際のprompt長を引いた残りに収まる必要がある。
 
 `PHASESHIFT_API_KEY` は任意のdummy値でよい（PhaseShiftは認証を行わない）。
 modelは `phaseshift/phaseshift` を選ぶ。

@@ -24,11 +24,19 @@ PROVIDER_CONFIG = """{{
       "env": ["PHASESHIFT_API_KEY"],
       "package": "@opencode/ai/providers/openai-compatible",
       "settings": {{"baseURL": "{base_url}"}},
-      "models": {{"phaseshift": {{"name": "PhaseShift"}}}}
+      "models": {{"phaseshift": {{"name": "PhaseShift",
+        "limit": {{"context": {context}, "output": {output}}}}}}}
     }}
   }}
 }}
 """
+
+# OpenCode otherwise asks for a 32000-token output budget, which exceeds the
+# server context for any non-trivial agent prompt (the server fails closed on an
+# explicit max_tokens beyond the remaining window). Declaring the model limit
+# keeps the requested budget inside the served context.
+MODEL_CONTEXT = 32768
+MODEL_OUTPUT = 8192
 
 
 def opencode_binary():
@@ -38,7 +46,8 @@ def opencode_binary():
 def run_opencode(workspace: Path, message: str, base_url: str, env: dict,
                  timeout: int = 1500) -> subprocess.CompletedProcess:
     (workspace / "opencode.jsonc").write_text(
-        PROVIDER_CONFIG.format(base_url=base_url))
+        PROVIDER_CONFIG.format(base_url=base_url, context=MODEL_CONTEXT,
+                               output=MODEL_OUTPUT))
     child_env = dict(env)
     child_env["PWD"] = str(workspace)
     return subprocess.run(
@@ -105,7 +114,7 @@ def main() -> int:
     compute_log = base / "compute.log"
     try:
         with ServerHarness(
-                max_seq_len=16384, arena_gib=24,
+                max_seq_len=MODEL_CONTEXT, arena_gib=24,
                 prefix_cache_capacity_tokens=16384,
                 prefix_cache_max_entries=8,
                 device=int(os.environ.get("PHASESHIFT_TEST_DEVICE", "0")),
