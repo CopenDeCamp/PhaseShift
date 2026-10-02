@@ -1,7 +1,9 @@
 #pragma once
 #include <phaseshift/core/memory/tensor.h>
 #include <phaseshift/quantization/quantization_types.h>
+#include <phaseshift/weights/tensor_partition.h>
 #include <cstdint>
+#include <optional>
 
 namespace ps::weights {
 
@@ -31,6 +33,7 @@ struct MatrixWeight {
     uint32_t scale_row_stride_bytes = 0;
     uint32_t weight_scale_group = 0;
     bool preshuffled = false;
+    std::optional<TensorPartitionDesc> partition;
 };
 
 inline quantization::QuantSpecId encoding_to_quant_spec(MatrixEncoding enc) noexcept {

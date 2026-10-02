@@ -45,6 +45,23 @@ fpx format / quant reference / io / core / gpu
 ```
 
 - model側はencodingの分岐（`if PSQ4` 等）を持たない。
+
+### Tensor partition
+
+`WeightLoadOptions.partition_plan` は load 時の logical TP partition を与える。
+順序は常に
+
+```text
+global canonical → logical partition → rank-local canonical → preshuffle → upload
+```
+
+であり、`partition_plan == nullptr` では現行の global load path がそのまま走る
+（追加の host copy なし）。manifest（`format_version = 3`）は global canonical の
+ままであり、TP degree を disk artifact へ焼き込まない。
+詳細と validation は [tensor_partition.md](tensor_partition.md) を参照。
+現行 Qwen35 の top-level load path（`load_qwen35_weights_from_*`）は
+partition plan を受け付けない（multi-GPU lowering 未対応のため
+`Status::unsupported` で停止する）。
 - `tie_word_embeddings` は config.json の root → `text_config` の順に読み、
   どちらにも無ければ false とする（`read_qwen35_tie_word_embeddings` /
   `include/phaseshift/models/qwen35/model/qwen35_config.h`）。runtime の

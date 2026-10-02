@@ -29,6 +29,13 @@ struct NativeQuantHost {
 
 // Mandatory backend preshuffle: canonical SoA -> native SoA (permutation).
 // Supports the PSQ4 and PSQ8 layouts consumed by the gfx1201 WMMA kernels.
+//
+// Input contract: the CanonicalQuantView passed here is the whole logical
+// tensor owned by the caller. Under tensor parallelism that logical tensor is
+// the rank-local canonical tensor, i.e. callers must run
+//     global canonical -> logical partition -> local CanonicalQuantView
+// before invoking this function. The preshuffle never sees tp_rank / tp_size
+// and never partitions its input.
 bool preshuffle_native(const CanonicalQuantView& v, NativeQuantHost& out);
 
 // Test-only inverse of the preshuffle (native -> canonical) for round-trip

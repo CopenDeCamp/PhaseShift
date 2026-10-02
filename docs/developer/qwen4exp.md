@@ -390,6 +390,17 @@ moe_out = routed_acc + shared
 
 MoE 層に dense FFN は存在しない。routed + shared のみである。
 
+### 7.5 tensor partition（EP 分散の表現）
+
+routed expert の fused tensor は、将来の EP 分散のために
+`TensorPartitionDesc` の axis=0 single-range partition で表現できる
+（例: `gate_up_proj` `[512,1280,2560]` を EP=2 で
+`ranges = {{0,256}}` / `{{256,256}}`、local `[256,1280,2560]`）。
+descriptor と N-D canonical slicing は generic weights layer にあり、
+Qwen4Exp 専用ではない。詳細は
+[tensor_partition.md](tensor_partition.md) を参照。
+現時点の contract は表現のみであり、EP / multi-GPU execution は未実装である。
+
 ---
 
 ## 8. Gated Residual / HyperConnection

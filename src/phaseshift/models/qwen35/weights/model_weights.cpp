@@ -485,6 +485,11 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(
     hipStream_t stream,
     const Qwen35LoadOptions& options) {
 
+    if (options.weights.partition_plan != nullptr) {
+        return Status::unsupported(
+            "qwen35 single-GPU weight load path does not accept a tensor partition plan",
+            __FILE__, __LINE__);
+    }
     if (ps::weights::is_quantized_model_dir(model_dir)) {
         return load_qwen35_weights_from_quantized_safetensors(model_dir, arena, stream, options);
     }
@@ -497,6 +502,11 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
     hipStream_t stream,
     const Qwen35LoadOptions& options)
 {
+    if (options.weights.partition_plan != nullptr) {
+        return Status::unsupported(
+            "qwen35 single-GPU weight load path does not accept a tensor partition plan",
+            __FILE__, __LINE__);
+    }
     auto reader_result = ps::quantization::fpx::QuantizedModelReader::open(
         model_dir, options.verify_quantized_payload_crc);
     if (!reader_result.ok()) return reader_result.status();

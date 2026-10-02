@@ -48,6 +48,8 @@ target_compile_options(phaseshift_io PRIVATE -Wall -Wextra -Wpedantic -Werror=re
 # layers, never on models/.
 add_library(phaseshift_weights STATIC
     src/phaseshift/weights/weight_loader.cpp
+    src/phaseshift/weights/tensor_partition.cpp
+    src/phaseshift/weights/canonical_partition.cpp
 )
 target_compile_features(phaseshift_weights PRIVATE cxx_std_20)
 target_include_directories(phaseshift_weights PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -157,6 +159,7 @@ target_compile_options(phaseshift_qwen35_state PRIVATE -Wall -Wextra -Wpedantic 
 set(
     PHASESHIFT_QWEN35_SOURCES
     src/phaseshift/models/qwen35/weights/model_weights.cpp
+    src/phaseshift/models/qwen35/weights/tensor_parallel_plan.cpp
     src/phaseshift/models/qwen35/model/qwen35_config.cpp
     src/phaseshift/models/qwen35/model/qwen35_model.cpp
     src/phaseshift/models/qwen35/model/lower_to_primitives.cpp

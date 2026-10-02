@@ -14,8 +14,14 @@ Qwen35 model        Qwen35 kernels
      ↓                    ↓
 Generic weights loader
     safetensors / quantized safetensors
-    BF16・PSQ4 / PSQ8 の
-    format解釈 / canonical validation / preshuffle / GPU upload
+    ↓
+canonical validation
+    ↓
+optional logical partition
+    ↓
+native preshuffle
+    ↓
+GPU upload
      ↓                    ↓
 Qwen35 state  ────────────┤
      ↓                    ↓
@@ -34,6 +40,9 @@ weights loader（`phaseshift_weights`）の依存は下方向のみ:
 phaseshift_weights -> phaseshift_fpx_format / phaseshift_quant_reference / phaseshift_io / phaseshift_core / phaseshift_gpu
 phaseshift_qwen35  -> phaseshift_weights
 ```
+
+weight の canonical → partition → preshuffle → upload の順序 contract は
+[tensor_partition.md](tensor_partition.md) を参照。
 
 CMake targetの一覧は `cmake/targets.cmake` を参照。
 
