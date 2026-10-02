@@ -137,6 +137,10 @@ add_library(phaseshift_runtime STATIC
     src/phaseshift/runtime/graph/primitive_graph.cpp
     src/phaseshift/runtime/stream_bridge.cpp
     src/phaseshift/runtime/program/program.cpp
+    src/phaseshift/runtime/tp/tp_execution.cpp
+    src/phaseshift/runtime/tp/tp_barrier_group.cpp
+    src/phaseshift/runtime/tp/tp_transports.cpp
+    src/phaseshift/runtime/tp/hip_peer_tp_transport.hip
 )
 target_compile_features(phaseshift_runtime PRIVATE cxx_std_20)
 target_include_directories(phaseshift_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -161,6 +165,7 @@ set(
     src/phaseshift/models/qwen35/weights/model_weights.cpp
     src/phaseshift/models/qwen35/weights/tensor_parallel_plan.cpp
     src/phaseshift/models/qwen35/model/qwen35_config.cpp
+    src/phaseshift/models/qwen35/model/tensor_parallel_context.cpp
     src/phaseshift/models/qwen35/model/qwen35_model.cpp
     src/phaseshift/models/qwen35/model/lower_to_primitives.cpp
     src/phaseshift/models/qwen35/dflash2/config.cpp
@@ -186,6 +191,7 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/kv_capacity_manager.cpp
     src/phaseshift/models/qwen35/runtime/kv_banker.cpp
     src/phaseshift/models/qwen35/runtime/continuous_batcher.cpp
+    src/phaseshift/models/qwen35/runtime/tensor_parallel.cpp
     src/phaseshift/models/qwen35/runtime/prefix_cache.cpp
     src/phaseshift/models/qwen35/runtime/program_executor.hip
     src/phaseshift/models/qwen35/runtime/executor.hip

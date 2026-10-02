@@ -567,6 +567,55 @@ Status execute_program_range(
     return Status::make_ok();
 }
 
+Status execute_program_tp_ranges(
+    const ::ps::runtime::Program& program,
+    HostExecutionContext& ctx,
+    hipStream_t stream,
+    const ::ps::runtime::TpExecutionSchedule& schedule,
+    ::ps::runtime::TpBarrierHook* barrier,
+    int rank) {
+    if (barrier == nullptr) {
+        return Status::invalid_state("tp barrier hook not bound", __FILE__, __LINE__);
+    }
+    if (schedule.segments.empty()) {
+        return Status::invalid_argument("tp execution schedule is empty", __FILE__, __LINE__);
+    }
+    if (schedule.segments.front().dispatch_begin != 0 ||
+        schedule.segments.back().dispatch_end != program.dispatches.size()) {
+        return Status::invalid_argument(
+            "tp execution schedule does not cover the program", __FILE__, __LINE__);
+    }
+    uint32_t next_begin = 0;
+    for (const ::ps::runtime::TpProgramSegment& segment : schedule.segments) {
+        if (segment.dispatch_begin != next_begin ||
+            segment.dispatch_end < segment.dispatch_begin ||
+            segment.dispatch_end > program.dispatches.size()) {
+            return Status::invalid_argument("tp segment range is not contiguous",
+                                            __FILE__, __LINE__);
+        }
+        next_begin = segment.dispatch_end;
+        Status st = execute_program_range(program, ctx, stream, segment.dispatch_begin,
+                                          segment.dispatch_end);
+        if (!st.ok()) return st;
+        if (segment.barrier_after == ::ps::runtime::TpBarrierKind::None) continue;
+        auto resolved = resolve_host_value(program, segment.combine_value, ctx);
+        if (!resolved.ok()) return resolved.status();
+        const HostResolvedValue& value = resolved.value();
+        if (value.ptr == nullptr || value.feature_count == 0 || value.row_stride == 0) {
+            return Status::invalid_state("tp combine value is empty", __FILE__, __LINE__);
+        }
+        ::ps::runtime::TpSumTarget target;
+        target.ptr = value.ptr;
+        target.rows = probe_rows(value, ctx);
+        target.row_stride = value.row_stride;
+        target.feature_count = value.feature_count;
+        target.dtype = value.dtype;
+        st = barrier->arrive(rank, target, stream);
+        if (!st.ok()) return st;
+    }
+    return Status::make_ok();
+}
+
 Status execute_program(
     const ::ps::runtime::Program& program,
     HostExecutionContext& ctx,

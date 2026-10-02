@@ -657,3 +657,13 @@ n-gram context はトークン ID (integer) を保持するため dtype が異�
 `lower_to_primitives` は QSA attention の gated query (`q_proj` 2x + sigmoid gate) と
 partial rotary をすでに扱う。GDN の conv / recurrence / grouped RMSNorm (ONE_PLUS) も
 primitive として存在する。これらは geometry と activation の差分で再利用する。
+
+## 15. tensor partition / TP execution
+
+routed expert を将来 EP で分散する場合の weight storage geometry の正本は
+[tensor_partition.md](tensor_partition.md) である
+（`TensorPartitionDesc` による axis=0 single-range partition で表現できる）。
+Qwen3.8 Dense 向けの TP execution runtime は
+[tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
+現時点で Qwen3.8-Flash-Next / MoE / EP の execution は未実装である。
+

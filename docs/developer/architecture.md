@@ -34,6 +34,20 @@ Runtime core
 `phaseshift_qwen35_kernels` は `phaseshift_runtime` にlinkする一方、
 `phaseshift_runtime` は `phaseshift_core` / `phaseshift_gpu` だけを使う。
 
+Tensor Parallel を使う場合の scheduler / rank runtime の関係（TP-Exec-1）:
+
+```text
+ContinuousBatcher (global 1個)
+      |
+  TpCoordinator
+   /      \
+Rank0    Rank1          (1 rank = 1 device-local runtime: arena / stream /
+  |        |              rank-local weight / KV pool / GDN state / Executor)
+Executor Executor
+```
+
+詳細は [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
+
 weights loader（`phaseshift_weights`）の依存は下方向のみ:
 
 ```text

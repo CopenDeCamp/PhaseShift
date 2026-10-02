@@ -89,6 +89,7 @@ Result<gpu::Tensor> load_quantized_small(
     const quantization::fpx::QuantizedModelReader& reader,
     const std::string& name,
     gpu::GpuArena& arena,
-    hipStream_t stream);
+    hipStream_t stream,
+    const WeightLoadOptions& options = {});
 
 }  // namespace ps::weights

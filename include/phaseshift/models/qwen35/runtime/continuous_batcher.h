@@ -7,6 +7,7 @@
 #include <phaseshift/models/qwen35/runtime/kv_banker.h>
 #include <phaseshift/models/qwen35/runtime/prefix_cache.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
+#include <phaseshift/models/qwen35/runtime/tp_batch_hook.h>
 #include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/core/status.h>
 #include <hip/hip_runtime.h>
@@ -92,6 +93,10 @@ class ContinuousBatcher {
         return config_.admission_policy;
     }
 
+    void set_tp_batch_hook(TpBatchHook* hook) noexcept {
+        tp_batch_hook_ = hook;
+    }
+
     KVCapacitySnapshot kv_capacity_snapshot() const;
 
  private:
@@ -110,6 +115,7 @@ class ContinuousBatcher {
 
     KVCapacityManager capacity_;
     PrefixCache* prefix_cache_ = nullptr;
+    TpBatchHook* tp_batch_hook_ = nullptr;
 
     uint64_t next_id_ = 0;
 

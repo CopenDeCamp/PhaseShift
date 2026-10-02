@@ -45,6 +45,9 @@ fpx format / quant reference / io / core / gpu
 ```
 
 - model側はencodingの分岐（`if PSQ4` 等）を持たない。
+- tensor partition（weights 層）と TP execution は
+  [tensor_partition.md](tensor_partition.md) / [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
+  canonical payload / preshuffle / quantization math は TP の影響を受けない。
 
 ### Tensor partition
 

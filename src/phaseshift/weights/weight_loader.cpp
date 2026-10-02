@@ -724,11 +724,25 @@ Result<gpu::Tensor> load_quantized_small(
     const QuantizedModelReader& reader,
     const std::string& name,
     gpu::GpuArena& arena,
-    hipStream_t stream)
+    hipStream_t stream,
+    const WeightLoadOptions& options)
 {
     auto view_result = reader.resolve(name);
     if (!view_result.ok()) return view_result.status();
-    const QuantizedTensorView& v = view_result.value();
+
+    OwnedCanonicalTensor partitioned_payload;
+    QuantizedTensorView partitioned_view;
+    const QuantizedTensorView* resolved = &view_result.value();
+    if (options.partition_plan != nullptr) {
+        auto it = options.partition_plan->tensors.find(resolved->name);
+        if (it != options.partition_plan->tensors.end()) {
+            Status partition_status = materialize_rank_local_canonical(
+                it->second, *resolved, partitioned_payload, partitioned_view);
+            if (!partition_status.ok()) return partition_status;
+            resolved = &partitioned_view;
+        }
+    }
+    const QuantizedTensorView& v = *resolved;
 
     if (v.encoding != QuantizedEncoding::Bf16) {
         return Status::invalid_argument(

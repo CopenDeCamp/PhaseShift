@@ -26,6 +26,14 @@ public:
         hipStream_t stream,
         const Qwen35LoadOptions& options = {});
 
+    static Result<Qwen35Model> load_tensor_parallel_from_safetensors(
+        const std::string& model_dir,
+        std::uint32_t tp_size,
+        std::uint32_t tp_rank,
+        gpu::GpuArena& arena,
+        hipStream_t stream,
+        const Qwen35LoadOptions& options = {});
+
     [[nodiscard]]
     const Qwen35ModelWeights&
     weights() const noexcept {
