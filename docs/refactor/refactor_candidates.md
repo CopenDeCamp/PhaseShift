@@ -215,5 +215,50 @@
 
 1. `PHASESHIFT_PA_PROBE=ON` でも dump が生成されない経緯(呼び出しが revert で落ちたか)。
 2. GDN compact commit の現行 parity(`docs/now_ngram.md` の revert 記録と `docs/developer/dflash2.md` の一致記載の矛盾)。
-3. `test_dflash2_draft_vocab_profile` の required / DEPENDS 不在。
-4. required acceptance が production 非到達機能(MTP)の契約を保持している件の方針。
+
+---
+
+## 実行状況(2026-10-03, branch `refactor/src-trash-isolation`)
+
+棚卸しの後、以下を srcTrash へ隔離した。詳細・理由・restore 手順は
+[srcTrash/README.md](../../srcTrash/README.md) を参照。
+
+| Phase | commit 内容 | 対象 | 結果 |
+| --- | --- | --- | --- |
+| 1 | archive obsolete rnd tools | `tools/rnd/` ほか 61ファイル | build のみ(PASS) |
+| 2 | archive paged attention pruning poc | `paged_prune.cpp` + PA probe 221行 | 134/134 PASS |
+| 3 | remove ngram tail from active runtime | NgramTail 一式 + CLI 2本 | 133/133 PASS |
+| 4 | remove gpu mcu placeholder | `DecodeBackend::GpuMcu` + dead helper | 132/132 PASS |
+| 5 | archive unused mtp runtime | MTP runtime / bench / tests / docs | 128/128 PASS |
+| 6 | split exact constrained lm head path | proxy 隔離 + ExactCandidates 分離 | 122/122 PASS |
+| 7 | archive dflash2 int2 and fixed vocab paths | INT2 / 固定語彙 + radix/psq8 分離 | 117/117 PASS |
+
+### 承認済みの逸脱
+
+1. **MTP lowering は KEEP**:`lower_qwen35_mtp_to_primitives` /
+   `validate_mtp_geometry` は loader 幾何の contract として残置。
+   完全削除は MTP tensor skip-load と同梱の別 ticket。
+2. **MTP 層ロードを opt-in 化**:`Qwen35LoadOptions::load_mtp_layers`
+   (既定 OFF)。production は MTP tensor を読まなくなった。
+3. `tests/support/dflash2_int2_test_common.h` は ExactCandidates の required test
+   が使うため KEEP(R7/R8 相当の test support)。
+4. `test_qwen35_mtp_lowering` は lowering KEEP に合わせて残置。
+
+### Phase 8 検証(実機)
+
+- required acceptance **117/117 PASS**(0 skip / 0 fail)
+- `phaseshift-compute`(DFlash2)正しさ契約: `GENERATED_IDS` sha1 `47aebe55d048`、
+  `DFLASH2_ROUNDS=84`、`DFLASH2_ACCEPTED_DRAFTS=171`、`DFLASH2_GDN_MODE=compact` が一致
+- `phaseshift-bench tg` `GREEDY_TOKEN_SUM=2446188` が一致
+  (既存docs値との比較であり性能の再計測は行っていない)
+- `tests/server/test_compute_constraints.py` 18/18 PASS
+  (`invalid-grammar-no-fallback` を含む = fail-open なし)
+- `ctest -L e2e` は optional tests 未 build(`PHASESHIFT_BUILD_OPTIONAL_TESTS=OFF`)かつ
+  fixture `models/Qwen3.5-4B` 不在のため**未実施**
+
+### 残存する削除候補(今回の隔離対象外)
+
+- ISOLATE 判定のまま: HIP Graph(`PHASESHIFT_HIP_GRAPH`)、Responses API、
+  `decode_perf_stats` / `kv_calib_dump` の env 計測系
+- 判断待ち: MTP の完全削除(lowering / weight loader を含む)、Python xgrammar の
+  条件化、`tools/bench_server_reasoning_constraints.py` の存続

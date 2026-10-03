@@ -189,5 +189,16 @@
 
 - 隔離した独立ファイル: tools 61 / tests 34 / src 11 / include 7 / docs 3
 - 隔離した断片(fragment): 7
-- required acceptance: 隔離前 134件 → 隔離後 128件(NgramTail 1 + GpuMcu 1 +
-  MTP 4 + proxy 6 + INT2/draft-vocab 6 のうち登録分を反映)
+- required acceptance(実測): 隔離前 **134件 PASS** → 隔離後 **117件 PASS**
+  - Phase 3 (NgramTail): `test_ngram_tail` −1 → 133
+  - Phase 4 (GpuMcu): `test_compute_decode_backend_gpu_mcu` −1 → 132
+  - Phase 5 (MTP): `mtp_primitives` / `mtp_kv_cache` / `mtp_state` / `spec_transaction` −4 → 128
+  - Phase 6 (LM head proxy): `target_lm_proxy_{error_bound,upper_topn,certificate,fallback}` /
+    `verify_lm_proxy_direct` / `lm_head_proxy_path` −6 → 122
+  - Phase 7 (INT2 / fixed vocab): `dflash2_draft_vocab_profile` / `prepare_draft_vocab` /
+    `dflash2_int2_pack` / `dflash2_int2_coarse_head` / `dflash2_coarse_topn` −5 → 117
+- 正しさ契約の再現(Phase 8 実機確認):
+  - `phaseshift-compute`(DFlash2) `GENERATED_IDS` sha1 `47aebe55d048`、
+    `DFLASH2_ROUNDS=84`、`DFLASH2_ACCEPTED_DRAFTS=171`、`DFLASH2_GDN_MODE=compact` が一致
+  - `phaseshift-bench tg` `GREEDY_TOKEN_SUM=2446188` が一致
+  - `tests/server/test_compute_constraints.py` 18/18 PASS(`invalid-grammar-no-fallback` 含む)
