@@ -93,23 +93,24 @@ static void destroy_pair(int device, void*& buffer, hipStream_t& stream,
 static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_a,
                      hipEvent_t ready_a, void* buffer_b, hipStream_t stream_b,
                      hipEvent_t ready_b, std::uint64_t rows, std::uint32_t features,
-                     ValueDType dtype, const std::string& tag) {
+                     ValueDType dtype, const std::string& tag, std::uint32_t row_stride = 0) {
     const std::size_t elem = dtype == ValueDType::F32 ? 4u : 2u;
-    const std::size_t bytes = static_cast<std::size_t>(rows) * features * elem;
+    const std::size_t stride = row_stride == 0 ? features : row_stride;
+    const std::size_t bytes = static_cast<std::size_t>(rows) * stride * elem;
 
     std::vector<std::uint8_t> host_a(bytes);
     std::vector<std::uint8_t> host_b(bytes);
     if (dtype == ValueDType::F32) {
         auto* fa = reinterpret_cast<float*>(host_a.data());
         auto* fb = reinterpret_cast<float*>(host_b.data());
-        for (std::uint64_t i = 0; i < rows * features; ++i) {
+        for (std::uint64_t i = 0; i < rows * stride; ++i) {
             fa[i] = static_cast<float>((i * 17u) % 251u) * 0.05f - 6.0f;
             fb[i] = static_cast<float>((i * 29u) % 241u) * 0.05f - 6.0f;
         }
     } else {
         auto* ba = reinterpret_cast<std::uint16_t*>(host_a.data());
         auto* bb = reinterpret_cast<std::uint16_t*>(host_b.data());
-        for (std::uint64_t i = 0; i < rows * features; ++i) {
+        for (std::uint64_t i = 0; i < rows * stride; ++i) {
             const float va =
                 static_cast<float>((i * 37u + 11u) % 1009u) * (1.0f / 64.0f) - 8.0f;
             const float vb =
@@ -141,7 +142,7 @@ static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_
     TpSumTarget target_a;
     target_a.ptr = buffer_a;
     target_a.rows = rows;
-    target_a.row_stride = features;
+    target_a.row_stride = stride;
     target_a.feature_count = features;
     target_a.dtype = dtype;
     TpSumTarget target_b = target_a;
@@ -153,7 +154,8 @@ static void run_case(TpTransport* transport, void* buffer_a, hipStream_t stream_
     TpSumInvocation invocation{targets, streams, ready};
 
     const std::string case_tag = tag + " rows=" + std::to_string(rows) +
-                                 " features=" + std::to_string(features);
+                                 " features=" + std::to_string(features) +
+                                 " stride=" + std::to_string(stride);
     Status st = transport->sum_hidden(invocation);
     check(st.ok(), case_tag + " sum_hidden: " + st.message());
     if (!st.ok()) return;
@@ -238,6 +240,8 @@ int main() {
                  kFeatures, ValueDType::F32, transport->name());
         run_case(transport, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b, 137,
                  kFeatures, ValueDType::F32, transport->name());
+        run_case(transport, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b, 64,
+                 kFeatures, ValueDType::BF16, transport->name(), kFeatures + 16);
     }
 
     HostMediatedTpTransport host_transport(devices);
@@ -247,6 +251,8 @@ int main() {
     }
     run_case(&host_transport, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b,
              9, kFeatures, ValueDType::F32, "host-mediated");
+    run_case(&host_transport, buffer_a, stream_a, ready_a, buffer_b, stream_b, ready_b,
+             17, kFeatures, ValueDType::BF16, "host-mediated padded", kFeatures + 64);
 
     destroy_pair(0, buffer_a, stream_a, ready_a);
     destroy_pair(1, buffer_b, stream_b, ready_b);

@@ -1,12 +1,85 @@
 #pragma once
 
+#include <phaseshift/core/memory/types.h>
 #include <phaseshift/runtime/tp/tp_execution.h>
+
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace ps::runtime {
 
 inline uint64_t tp_target_bytes(const TpSumTarget& target) {
     return target.rows * static_cast<uint64_t>(target.row_stride) *
            value_dtype_bytes(target.dtype);
+}
+
+inline float tp_bf16_bits_to_f32(std::uint16_t v) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(v) << 16;
+    float out = 0.0f;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+inline void tp_load_bf16_f32(std::vector<float>& accum, const void* src,
+                             std::size_t count) {
+    const auto* s = static_cast<const std::uint16_t*>(src);
+    for (std::size_t i = 0; i < count; ++i) {
+        accum[i] = tp_bf16_bits_to_f32(s[i]);
+    }
+}
+
+inline void tp_accumulate_bf16_f32(std::vector<float>& accum, const void* src,
+                                   std::size_t count) {
+    const auto* s = static_cast<const std::uint16_t*>(src);
+    for (std::size_t i = 0; i < count; ++i) {
+        accum[i] += tp_bf16_bits_to_f32(s[i]);
+    }
+}
+
+inline void tp_load_f32(std::vector<float>& accum, const void* src, std::size_t count) {
+    const auto* s = static_cast<const float*>(src);
+    std::memcpy(accum.data(), s, count * sizeof(float));
+}
+
+inline void tp_accumulate_f32(std::vector<float>& accum, const void* src,
+                              std::size_t count) {
+    const auto* s = static_cast<const float*>(src);
+    for (std::size_t i = 0; i < count; ++i) {
+        accum[i] += s[i];
+    }
+}
+
+inline void tp_store_bf16(void* dst, const std::vector<float>& accum,
+                          std::size_t count) {
+    auto* d = static_cast<std::uint16_t*>(dst);
+    for (std::size_t i = 0; i < count; ++i) {
+        d[i] = f32_to_bf16_rne(accum[i]);
+    }
+}
+
+inline void tp_store_f32(void* dst, const std::vector<float>& accum,
+                         std::size_t count) {
+    std::memcpy(dst, accum.data(), count * sizeof(float));
+}
+
+inline void tp_reduce_f32_accumulate(const std::vector<const void*>& srcs,
+                                     std::size_t count, ValueDType dtype, void* out) {
+    if (srcs.empty() || count == 0 || out == nullptr) return;
+    std::vector<float> accum(count, 0.0f);
+    if (dtype == ValueDType::F32) {
+        tp_load_f32(accum, srcs[0], count);
+        for (std::size_t r = 1; r < srcs.size(); ++r) {
+            tp_accumulate_f32(accum, srcs[r], count);
+        }
+        tp_store_f32(out, accum, count);
+    } else {
+        tp_load_bf16_f32(accum, srcs[0], count);
+        for (std::size_t r = 1; r < srcs.size(); ++r) {
+            tp_accumulate_bf16_f32(accum, srcs[r], count);
+        }
+        tp_store_bf16(out, accum, count);
+    }
 }
 
 inline Status validate_tp_sum_invocation(const TpSumInvocation& invocation,

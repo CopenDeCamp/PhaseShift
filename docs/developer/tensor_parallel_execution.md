@@ -165,39 +165,64 @@ class TpTransport {
 ```
 
 - model knowledge なし（buffer 群 + streams + ready events だけを扱う）。
+- reduction は全 rank の partial を **f32 で累積し、最後に 1 回だけ bf16 へ丸める**。
+  rank 数によらず丸めは 1 回で、peer 経路と host 経路が同じ contract を共有する
+  （`tp_reduce_f32_accumulate` / `test_tp_reduction`）。
 - 実装:
-  - `HipPeerTpTransport` — rank0 上で BF16/F32 reduction kernel（peer read）+
-    peer write の copy kernel で broadcast。segment 完了 event と stream wait で
-    順序を保証する（device sync は使わない）。
-  - `HostMediatedTpTransport` — reference/correctness 用途。全 stream を同期し
-    host 上で加算して両 rank へ書き戻す。性能値として扱わない。
-- **capability self-test**: `verify()` は runtime buffer と同じ条件で16回の
-  exchange を実行し、1回でも不一致なら `unsupported` を返す。
+  - `HipPeerTpTransport`（**peer write ベース**）
+    - rank r>0 は自分の partial を leader (rank0) の scratch へ **peer write** し、
+      leader が自分の partial と scratch を **local で** reduce する。
+    - leader は結果を自分の buffer と broadcast 用 buffer に書き、各 rank の
+      buffer へ **peer write** で broadcast する。
+    - kernel load による peer read は使わない。
+    - leader は reduction 完了 event だけを待ち、broadcast は transport stream 上で
+      overlap させる。peer は broadcast 完了 event を待つ。host / device sync は
+      使わない。
+  - `HostMediatedTpTransport`（reference / fallback）— pinned staging へ D2H し
+    host 上で f32 加算して H2D する。
+- **capability self-test**: `verify()` は runtime buffer と同じ条件
+  （8 KiB / 128 KiB / 1 MiB を各 4 round）で peer write + reduce + broadcast を
+  実際に実行し、1 回でも不一致なら `unsupported` を返す。
   `TpCoordinator::initialize` は rank runtime 作成後に `verify()` を呼び、
   失敗時は stderr に明示してから `HostMediatedTpTransport` へ切り替える
-  （silent fallback ではない）。このホストでは peer read が不安定
-  （`hipDeviceCanAccessPeer` は1を返すが read がゼロを返す）なため、
-  実測では常に host-mediated が選ばれる。
+  （silent fallback ではない）。
+- `PHASESHIFT_TP_TRANSPORT=auto|p2p|host` で backend を強制できる（既定 auto）。
 - RCCL は必須 dependency にしていない。将来 `RcclTpTransport` を追加できる。
+
+### R9700 における peer read の制約
+
+本ホスト（R9700 x2、PCIe switch 経由、large BAR 32G、`pcie_p2p=Y`）では
+`hipDeviceCanAccessPeer` は両方向 1 を返すが、**kernel からの peer load は
+正しいデータを返さない**（ゼロまたは別データ。サイズ・実行ごとに変動）。
+`hipMemcpyPeerAsync` も不安定で、`HSA_FORCE_FINE_GRAIN_PCIE=1` は改善しない。
+一方 **kernel からの peer store は 4 KiB〜1 MiB / 両方向 / 1000 回で再現性を
+もって正常**である。本 transport は peer store のみで構成している。
+切り分けの記録は [docs/rnd/tp_exec2_p2p.md](../rnd/tp_exec2_p2p.md)。
 
 ### transport microbenchmark
 
 ```sh
-phaseshift-bench tp-reduce [--rows 1,2,...] [--features 5120] [--iters 50]
+phaseshift-bench tp-reduce [--rows 1,2,...] [--features 5120] [--iters N]
+                           [--backend auto|p2p|host] [--check]
 ```
 
-帯域定義は `2 * payload / elapsed`。correctness Gate に性能目標はない。
-本ホスト（R9700 x2、peer 不安定 → host-mediated reference）の実測:
+帯域定義は `2 * payload_bytes / elapsed`。`--check` は backend ごとの目標
+（hip-p2p: 大 payload で >= 8.0 GB/s かつ rows=1 で <= 250 us、
+host-mediated: 大 payload で >= 1.2 GB/s かつ rows=1 で <= 400 us）を判定する。
+本ホスト（R9700 x2）の実測:
 
 ```text
-rows=1      payload=10240 B    us=1695   GB/s=0.01
-rows=64     payload=655360 B   us=5150   GB/s=0.25
-rows=1024   payload=10485760 B us=18475  GB/s=1.14
-rows=2048   payload=20971520 B us=31353  GB/s=1.34
+backend        rows   payload        measured
+hip-p2p        1      10240 B        185 us
+hip-p2p        256    2621440 B      393 us   / 13.3 GB/s
+hip-p2p        2048   20971520 B     1710 us  / 24.5 GB/s
+host-mediated  1      10240 B        127 us
+host-mediated  256    2621440 B      1193 us  / 4.4 GB/s
+host-mediated  2048   20971520 B     22000 us / 1.9 GB/s
 ```
 
-host-mediated は同期とホスト転送が支配的で、この用途では reference のみに
-留める。P2P backend が安定する環境では同一 benchmark で測定する。
+peer write 経路は大 payload で host 経由より約 13 倍高速。小 payload（rows=1）
+では kernel 数と cross-device event の往復のため host 経由と同程度〜やや遅い。
 
 ## 7. scheduler / sampling
 
@@ -265,10 +290,10 @@ prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
 
 ### 未対応 / 非目標
 
-Multi-GPU Executor の一般化、RCCL / AllReduce / AllGather / AllToAll、
-P2P 性能最適化、通信と計算の overlap、graph capture との併用
-（`PHASESHIFT_HIP_GRAPH` は TP schedule と非併用）、DFlash2 + TP、
-MTP 分散実行、vocab parallel、distributed sampling、prefix cache、
+Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAll）、
+通信と計算の本格的な overlap（現在は broadcast の overlap のみ）、
+graph capture との併用（`PHASESHIFT_HIP_GRAPH` は TP schedule と非併用）、
+DFlash2 + TP、MTP 分散実行、vocab parallel、distributed sampling、prefix cache、
 structured generation / server 統合、Expert Parallel / MoE、
 PSQ3、pipeline parallel、TP=4 production support。
 
@@ -277,6 +302,7 @@ PSQ3、pipeline parallel、TP=4 production support。
 | test | label | 内容 |
 | --- | --- | --- |
 | `test_qwen35_tp_context` | cpu;required | TP local geometry validation / schedule・collective boundary 生成 |
+| `test_tp_reduction` | cpu;required | f32 accumulate reduction の single-round 丸め contract |
 | `test_qwen35_tensor_parallel_plan` | cpu;required | Qwen35 plan builder（local geometry / head pair / GDN coverage） |
 | `test_tensor_partition` / `test_canonical_partition` | cpu;required | weight storage 側（[tensor_partition.md](tensor_partition.md) 参照） |
 | `test_weight_load` | gpu1;required | 既存 single-GPU 回帰 + partition plan なし path |

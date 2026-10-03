@@ -4,15 +4,18 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
 using ps::Status;
+using ps::runtime::HipPeerTpTransport;
 using ps::runtime::HostMediatedTpTransport;
 using ps::runtime::TpSumInvocation;
 using ps::runtime::TpSumTarget;
@@ -22,12 +25,32 @@ using ps::runtime::create_tp_transport;
 
 namespace {
 
+struct BenchTarget {
+    double min_gbps_large = 0.0;
+    double max_us_rows1 = 0.0;
+    bool enforced = false;
+};
+
+BenchTarget target_for(const std::string& backend) {
+    if (backend == "hip-p2p") {
+        return BenchTarget{8.0, 250.0, true};
+    }
+    if (backend == "host-mediated") {
+        return BenchTarget{1.2, 400.0, true};
+    }
+    return BenchTarget{0.0, 0.0, false};
+}
+
 void usage() {
-    std::printf("usage: phaseshift-bench tp-reduce [--rows 1,2,...] [--features N] [--iters N]\n");
+    std::printf("usage: phaseshift-bench tp-reduce [--rows 1,2,...] [--features N] "
+                "[--iters N] [--backend auto|p2p|host] [--check]\n");
     std::printf("  measures tp sum_hidden latency for the implemented transports\n");
     std::printf("  default rows: 1,2,4,8,16,32,64,128,256,512,1024,2048\n");
     std::printf("  default features: 5120 (Qwen3.8 hidden), dtype bf16\n");
     std::printf("  bandwidth definition: 2 * payload_bytes / elapsed (one read + one write)\n");
+    std::printf("  --check enforces the backend target and fails when it is missed\n");
+    std::printf("  targets: hip-p2p >= 8.0 GB/s (large rows) and <= 250 us (rows=1)\n");
+    std::printf("           host-mediated >= 1.2 GB/s (large rows) and <= 400 us (rows=1)\n");
 }
 
 std::vector<uint64_t> parse_rows(const char* text) {
@@ -80,20 +103,35 @@ void free_pair(BenchPair& pair) {
     }
 }
 
-Status upload(int device, void* buffer, const std::vector<std::uint8_t>& host) {
+Status upload(int device, void* buffer, const std::vector<std::uint8_t>& host,
+              hipStream_t stream) {
     auto scope = ps::gpu::ScopedDevice::create(device);
     if (!scope.ok()) return scope.status();
-    if (hipMemcpy(buffer, host.data(), host.size(), hipMemcpyHostToDevice) != hipSuccess) {
+    if (hipMemcpyAsync(buffer, host.data(), host.size(), hipMemcpyHostToDevice, stream) !=
+        hipSuccess) {
         return Status::hip_error("tp-reduce upload", hipGetErrorString(hipGetLastError()),
                                  __FILE__, __LINE__);
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess) {
+        return Status::hip_error("tp-reduce upload sync",
+                                 hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
     }
     return Status::make_ok();
 }
 
-void run_backend(TpTransport* transport, const char* backend, BenchPair& pair,
-                 const std::vector<std::uint8_t>& host_a,
-                 const std::vector<std::uint8_t>& host_b, uint64_t rows,
-                 uint32_t features, int iters) {
+struct RowResult {
+    uint64_t rows = 0;
+    double us = 0.0;
+    double gbps = 0.0;
+    bool ok = false;
+};
+
+RowResult run_row(TpTransport* transport, BenchPair& pair,
+                  const std::vector<std::uint8_t>& host_a,
+                  const std::vector<std::uint8_t>& host_b, uint64_t rows,
+                  uint32_t features, int iters) {
+    RowResult result;
+    result.rows = rows;
     const std::size_t bytes = static_cast<std::size_t>(rows) * features * 2u;
     TpSumTarget target_a;
     target_a.ptr = pair.buffer_a;
@@ -108,17 +146,20 @@ void run_backend(TpTransport* transport, const char* backend, BenchPair& pair,
     std::vector<hipEvent_t> ready{pair.ready_a, pair.ready_b};
     TpSumInvocation invocation{targets, streams, ready};
 
-    const auto run_once = [&]() -> Status {
-        Status st = upload(0, pair.buffer_a, host_a);
+    const auto reset = [&]() -> Status {
+        Status st = upload(0, pair.buffer_a, host_a, pair.stream_a);
         if (!st.ok()) return st;
-        st = upload(1, pair.buffer_b, host_b);
+        st = upload(1, pair.buffer_b, host_b, pair.stream_b);
         if (!st.ok()) return st;
         if (hipEventRecord(pair.ready_a, pair.stream_a) != hipSuccess ||
             hipEventRecord(pair.ready_b, pair.stream_b) != hipSuccess) {
             return Status::hip_error("tp-reduce record", hipGetErrorString(hipGetLastError()),
                                      __FILE__, __LINE__);
         }
-        st = transport->sum_hidden(invocation);
+        return Status::make_ok();
+    };
+    const auto run_sum = [&]() -> Status {
+        Status st = transport->sum_hidden(invocation);
         if (!st.ok()) return st;
         if (hipStreamSynchronize(pair.stream_a) != hipSuccess ||
             hipStreamSynchronize(pair.stream_b) != hipSuccess) {
@@ -128,31 +169,59 @@ void run_backend(TpTransport* transport, const char* backend, BenchPair& pair,
         return Status::make_ok();
     };
 
-    Status warmup = run_once();
-    if (!warmup.ok()) {
-        std::printf("  %s rows=%llu FAILED: %s\n", backend,
-                    static_cast<unsigned long long>(rows), warmup.message().c_str());
-        return;
-    }
+    Status st = reset();
+    if (!st.ok()) return result;
+    st = run_sum();
+    if (!st.ok()) return result;
+    result.ok = true;
 
-    const auto start = std::chrono::steady_clock::now();
+    double total_us = 0.0;
     for (int it = 0; it < iters; ++it) {
-        Status st = run_once();
-        if (!st.ok()) {
-            std::printf("  %s rows=%llu FAILED: %s\n", backend,
-                        static_cast<unsigned long long>(rows), st.message().c_str());
-            return;
-        }
+        st = reset();
+        if (!st.ok()) return result;
+        const auto start = std::chrono::steady_clock::now();
+        st = run_sum();
+        const auto stop = std::chrono::steady_clock::now();
+        if (!st.ok()) return result;
+        total_us += std::chrono::duration<double, std::micro>(stop - start).count();
     }
-    const auto stop = std::chrono::steady_clock::now();
-    const double total_us =
-        std::chrono::duration<double, std::micro>(stop - start).count();
-    const double us_per_iter = total_us / iters;
-    const double payload = static_cast<double>(bytes);
-    const double gbps = (2.0 * payload * iters) / total_us / 1e3;
-    std::printf("  %-14s rows=%-5llu payload=%-9llu us=%.1f GB/s=%.2f\n", backend,
-                static_cast<unsigned long long>(rows),
-                static_cast<unsigned long long>(bytes), us_per_iter, gbps);
+    result.us = total_us / iters;
+    result.gbps = (2.0 * static_cast<double>(bytes)) / result.us / 1e3;
+    return result;
+}
+
+bool run_backend(TpTransport* transport, BenchPair& pair,
+                 const std::vector<std::uint8_t>& host_a,
+                 const std::vector<std::uint8_t>& host_b,
+                 const std::vector<uint64_t>& rows, uint32_t features, int iters,
+                 bool check) {
+    const std::string backend = transport->name();
+    std::printf("backend: %s\n", backend.c_str());
+    BenchTarget target = target_for(backend);
+    double us_rows1 = 0.0;
+    double gbps_large = 0.0;
+    for (uint64_t r : rows) {
+        RowResult result = run_row(transport, pair, host_a, host_b, r, features, iters);
+        std::printf("  %-14s rows=%-5llu payload=%-9llu us=%.1f GB/s=%.2f\n",
+                    backend.c_str(), static_cast<unsigned long long>(r),
+                    static_cast<unsigned long long>(r) * features * 2u, result.us,
+                    result.gbps);
+        if (!result.ok) {
+            std::printf("  %-14s rows=%-5llu FAILED\n", backend.c_str(),
+                        static_cast<unsigned long long>(r));
+            return false;
+        }
+        if (r == 1) us_rows1 = result.us;
+        if (r == rows.back()) gbps_large = result.gbps;
+    }
+    if (!target.enforced) return true;
+    const bool gbps_ok = gbps_large >= target.min_gbps_large;
+    const bool us_ok = us_rows1 <= target.max_us_rows1;
+    std::printf("target %-14s GB/s>=%.2f (%s) us(rows=1)<=%.0f (%s) -> %s\n",
+                backend.c_str(), target.min_gbps_large, gbps_ok ? "PASS" : "FAIL",
+                target.max_us_rows1, us_ok ? "PASS" : "FAIL",
+                (gbps_ok && us_ok) ? "PASS" : "FAIL");
+    return !check || (gbps_ok && us_ok);
 }
 
 }
@@ -161,6 +230,8 @@ int run_tp_reduce(int argc, char** argv) {
     std::vector<uint64_t> rows{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048};
     uint32_t features = 5120;
     int iters = 50;
+    std::string backend = "auto";
+    bool check = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -173,6 +244,10 @@ int run_tp_reduce(int argc, char** argv) {
             features = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--iters" && i + 1 < argc) {
             iters = std::atoi(argv[++i]);
+        } else if (arg == "--backend" && i + 1 < argc) {
+            backend = argv[++i];
+        } else if (arg == "--check") {
+            check = true;
         } else {
             std::fprintf(stderr, "unknown option: %s\n", arg.c_str());
             usage();
@@ -183,6 +258,11 @@ int run_tp_reduce(int argc, char** argv) {
         std::fprintf(stderr, "invalid rows/features/iters\n");
         return 1;
     }
+    if (backend != "auto" && backend != "p2p" && backend != "host") {
+        std::fprintf(stderr, "invalid backend: %s\n", backend.c_str());
+        return 1;
+    }
+    std::sort(rows.begin(), rows.end());
 
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count < 2) {
@@ -209,43 +289,52 @@ int run_tp_reduce(int argc, char** argv) {
     }
 
     const std::vector<int> devices{0, 1};
-    auto selection = create_tp_transport(devices);
-    if (!selection.ok()) {
-        std::fprintf(stderr, "failed to create tp transport: %s\n",
-                     selection.status().message().c_str());
-        free_pair(pair);
-        return 1;
-    }
-    TpTransport* selected = selection.value().transport.get();
-    const Status verify = selected->verify();
-    const bool peer_usable = verify.ok();
-    if (!peer_usable) {
-        std::printf("[tp] peer transport self-test failed (%s); measuring the "
-                    "host-mediated reference transport\n",
-                    verify.message().c_str());
-    }
-
     std::printf("tp-reduce devices=0,1 features=%u dtype=bf16 iters=%d\n", features,
                 iters);
     std::printf("bandwidth definition: 2 * payload_bytes / elapsed\n");
 
-    if (peer_usable) {
-        std::printf("backend: %s\n", selected->name());
-        for (uint64_t r : rows) {
-            run_backend(selected, selected->name(), pair, host_a, host_b, r, features,
-                        iters);
+    bool all_ok = true;
+    bool measured = false;
+
+    if (backend == "auto" || backend == "p2p") {
+        std::unique_ptr<TpTransport> peer;
+        if (backend == "p2p") {
+            ::setenv("PHASESHIFT_TP_TRANSPORT", "p2p", 1);
+        }
+        auto selection = create_tp_transport(devices);
+        if (selection.ok() && std::string(selection.value().transport->name()) == "hip-p2p") {
+            const Status verify = selection.value().transport->verify();
+            if (verify.ok()) {
+                peer = std::move(selection.value().transport);
+            } else {
+                std::printf("[tp] hip-p2p self-test failed (%s)\n", verify.message().c_str());
+            }
+        }
+        if (backend == "p2p") {
+            if (peer == nullptr) {
+                std::printf("hip-p2p is not usable on this host\n");
+                all_ok = false;
+            }
+        }
+        if (peer != nullptr) {
+            measured = true;
+            all_ok = run_backend(peer.get(), pair, host_a, host_b, rows, features, iters,
+                                 check) &&
+                     all_ok;
         }
     }
 
-    HostMediatedTpTransport host_transport(devices);
-    if (!peer_usable || std::string(host_transport.name()) != selected->name()) {
-        std::printf("backend: %s\n", host_transport.name());
-        for (uint64_t r : rows) {
-            run_backend(&host_transport, host_transport.name(), pair, host_a, host_b, r,
-                        features, iters);
+    if (backend == "auto" || backend == "host" || !measured) {
+        HostMediatedTpTransport host_transport(devices);
+        if (check && backend == "p2p") {
+            std::printf("skipping host-mediated measurement for --backend p2p\n");
+        } else {
+            all_ok = run_backend(&host_transport, pair, host_a, host_b, rows, features,
+                                 iters, check) &&
+                     all_ok;
         }
     }
 
     free_pair(pair);
-    return 0;
+    return all_ok ? 0 : 1;
 }
