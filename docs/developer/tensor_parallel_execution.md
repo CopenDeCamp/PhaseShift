@@ -169,19 +169,22 @@ class TpTransport {
   rank 数によらず丸めは 1 回で、peer 経路と host 経路が同じ contract を共有する
   （`tp_reduce_f32_accumulate` / `test_tp_reduction`）。
 - 実装:
-  - `HipPeerTpTransport`（**peer write ベース**）
-    - rank r>0 は自分の partial を leader (rank0) の scratch へ **peer write** し、
-      leader が自分の partial と scratch を **local で** reduce する。
-    - leader は結果を自分の buffer と broadcast 用 buffer に書き、各 rank の
-      buffer へ **peer write** で broadcast する。
-    - kernel load による peer read は使わない。
-    - leader は reduction 完了 event だけを待ち、broadcast は transport stream 上で
-      overlap させる。peer は broadcast 完了 event を待つ。host / device sync は
-      使わない。
+  - `HipPeerTpTransport`（**peer write ベースの対称 push reduce**）
+    - rank r は自分の partial を、自分以外の各 rank の inbox へ kernel からの
+      **peer write** で送る（送り先 inbox は受信側 rank の device 上にある）。
+    - 各 rank は受け取った inbox と自分の partial を **local で** f32 加算し、
+      1 回だけ bf16 へ丸めて自分の buffer を更新する。他 rank のメモリは read しない。
+    - leader を置かず全 rank が同じ 2 kernel（send / add）を並列に実行する。
+      各 rank は自分の compute stream 上で send を enqueue し、送信完了 event を
+      record する。受信側は他 rank の送信完了 event だけを `hipStreamWaitEvent` で
+      待ってから add する。host / device sync は使わない。
+    - inbox は受信側 device に確保し、barrier ごとに parity を交互にして
+      send / add のオーバーラップと再利用 hazard の回避を両立する。
+    - `ready` event には依存しない（stream 順序で segment 完了が保証される）。
   - `HostMediatedTpTransport`（reference / fallback）— pinned staging へ D2H し
     host 上で f32 加算して H2D する。
 - **capability self-test**: `verify()` は runtime buffer と同じ条件
-  （8 KiB / 128 KiB / 1 MiB を各 4 round）で peer write + reduce + broadcast を
+  （8 KiB / 128 KiB / 1 MiB を各 4 round）で peer write send + local add を
   実際に実行し、1 回でも不一致なら `unsupported` を返す。
   `TpCoordinator::initialize` は rank runtime 作成後に `verify()` を呼び、
   失敗時は stderr に明示してから `HostMediatedTpTransport` へ切り替える
@@ -211,22 +214,14 @@ phaseshift-bench tp-reduce [--rows 1,2,...] [--features 5120] [--iters N]
 ```
 
 帯域定義は `2 * payload_bytes / elapsed`。`--check` は backend ごとの目標
-（hip-p2p: 大 payload で >= 8.0 GB/s かつ rows=1 で <= 250 us、
+（hip-p2p: 大 payload で >= 20.0 GB/s かつ rows=1 で <= 150 us、
 host-mediated: 大 payload で >= 1.2 GB/s かつ rows=1 で <= 400 us）を判定する。
-本ホスト（R9700 x2）の実測:
+実測値と再現条件は R&D record
+[docs/rnd/tp_exec2_p2p.md](../rnd/tp_exec2_p2p.md) を参照する。
 
-```text
-backend        rows   payload        measured
-hip-p2p        1      10240 B        185 us
-hip-p2p        256    2621440 B      393 us   / 13.3 GB/s
-hip-p2p        2048   20971520 B     1710 us  / 24.5 GB/s
-host-mediated  1      10240 B        127 us
-host-mediated  256    2621440 B      1193 us  / 4.4 GB/s
-host-mediated  2048   20971520 B     22000 us / 1.9 GB/s
-```
-
-peer write 経路は大 payload で host 経由より約 13 倍高速。小 payload（rows=1）
-では kernel 数と cross-device event の往復のため host 経由と同程度〜やや遅い。
+対称 push 型は leader 直列型より小 payload の latency と大 payload の帯域の
+両方で優る。小 payload（rows=1）でも host 経由を上回るため、decode の
+per-step barrier でも peer 経路をそのまま使える。
 
 ## 7. scheduler / sampling
 
@@ -295,7 +290,8 @@ prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
 ### 未対応 / 非目標
 
 Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAll）、
-通信と計算の本格的な overlap（現在は broadcast の overlap のみ）、
+通信と計算の本格的な overlap（各 barrier 内の send / add は並列だが、segment の
+計算との overlap は未対応）、
 graph capture との併用（`PHASESHIFT_HIP_GRAPH` は TP schedule と非併用）、
 DFlash2 + TP、MTP 分散実行、vocab parallel、distributed sampling、prefix cache、
 structured generation / server 統合、Expert Parallel / MoE、

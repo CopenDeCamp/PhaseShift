@@ -33,7 +33,7 @@ struct BenchTarget {
 
 BenchTarget target_for(const std::string& backend) {
     if (backend == "hip-p2p") {
-        return BenchTarget{8.0, 250.0, true};
+        return BenchTarget{20.0, 150.0, true};
     }
     if (backend == "host-mediated") {
         return BenchTarget{1.2, 400.0, true};
@@ -49,7 +49,7 @@ void usage() {
     std::printf("  default features: 5120 (Qwen3.8 hidden), dtype bf16\n");
     std::printf("  bandwidth definition: 2 * payload_bytes / elapsed (one read + one write)\n");
     std::printf("  --check enforces the backend target and fails when it is missed\n");
-    std::printf("  targets: hip-p2p >= 8.0 GB/s (large rows) and <= 250 us (rows=1)\n");
+    std::printf("  targets: hip-p2p >= 20.0 GB/s (large rows) and <= 150 us (rows=1)\n");
     std::printf("           host-mediated >= 1.2 GB/s (large rows) and <= 400 us (rows=1)\n");
 }
 

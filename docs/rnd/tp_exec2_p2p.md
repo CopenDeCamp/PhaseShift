@@ -88,6 +88,40 @@ host sync を各 barrier で使わず、`hipStreamWaitEvent`（cross-device 可�
 record は同 device event で行う）だけで peer write → local reduce → peer broadcast を
 連結した場合も、10 KiB / 160 KiB / 10 MiB / 20 MiB で PASS。
 
+### Gate 13: leader 直列型から対称 push 型へ
+
+TP-Exec-2 の初期実装は、leader (rank0) に partial を集めて local reduce し、
+broadcast する **leader 直列型 peer-write** だった。これは peer write のみを使う点で
+健全だが、critical path が「peer の copy → leader の reduce → leader の broadcast」と
+leader を経由して直列化し、barrier ごとの kernel 数と cross-device event 往復も多い。
+
+peer read が使えない以上、reduction は「local read + posted peer write」だけで
+構成するのが本質である。そこで leader を廃し、全 rank が自分の partial を
+各 peer の inbox へ送り、受け取った inbox を各 rank が local で加算する
+**対称 push 型**へ作り直した。
+
+```text
+rank r : partial_r --(peer write)--> rank q の inbox      (q != r)   全 rank 並列
+rank r : local f32 add(partial_r, 受信 inbox) -> partial_r           全 rank 並列
+```
+
+- 各 rank は自分の compute stream 上で send を enqueue し、送信完了 event を record する。
+- 受信側は他 rank の送信完了 event だけを `hipStreamWaitEvent` で待って add する。
+- `ready` event には依存しない（stream 順序で segment 完了が保証される）。
+- inbox は受信側 device に確保し、barrier ごとに parity を交互にする。
+
+leader 直列型と対称 push 型の実測比較（features=5120, bf16, iters=50、同一ホスト）:
+
+```text
+方式           rows   payload        measured
+leader 直列型  1      10240 B        185 us
+leader 直列型  2048   20971520 B     1710 us / 24.5 GB/s
+対称 push 型   1      10240 B        88 us
+対称 push 型   2048   20971520 B     955 us  / 43.9 GB/s
+```
+
+小 payload の latency と大 payload の帯域の両方が改善したため、対称 push 型を採用する。
+
 ## 判断
 
 判定表（READ / WRITE / hipMemcpyPeer）:
@@ -110,16 +144,14 @@ record は同 device event で行う）だけで peer write → local reduce →
 採用した構成（`HipPeerTpTransport`）:
 
 ```text
-rank r>0 : partial --(peer store)--> leader scratch
-leader   : local f32 reduce(partial, scratch) -> out / broadcast buffer
-leader   : broadcast buffer --(peer store)--> rank r buffer
+rank r : partial_r --(peer write)--> rank q の inbox      (q != r)   全 rank 並列
+rank r : local f32 add(partial_r, 受信 inbox) -> partial_r           全 rank 並列
 ```
 
-- kernel peer load は使わない。
+- kernel peer load は使わない。受信側は自分の inbox を local read するだけ。
 - reduction は f32 で累積し、最後に 1 回だけ bf16 へ丸める。
-- leader は reduction 完了 event のみ待ち、broadcast は transport stream 上で
-  overlap する。
-- self-test は同じ peer store + reduce + broadcast を 8 KiB / 128 KiB / 1 MiB ×
+- 各 rank は他 rank の送信完了 event のみ待って add する。host / device sync は使わない。
+- self-test は同じ peer store send + local add を 8 KiB / 128 KiB / 1 MiB ×
   4 round で実行して検証する。
 
 ## 現在への影響
@@ -127,21 +159,20 @@ leader   : broadcast buffer --(peer store)--> rank r buffer
 - `docs/developer/tensor_parallel_execution.md` §6 が transport の現在 contract。
 - `HipPeerTpTransport` は本ホストで self-test に通り、TP runtime が実際に
   P2P 経路で動作する（tiny model TP execution / Qwen3.8-27B TP=2 E2E とも PASS）。
-- `phaseshift-bench tp-reduce` の実測（features=5120, bf16）:
+- `phaseshift-bench tp-reduce` の実測（features=5120, bf16, iters=50）:
 
 ```text
 backend        rows   payload        measured
-hip-p2p        1      10240 B        185 us
-hip-p2p        2048   20971520 B     1710 us  / 24.5 GB/s
-host-mediated  1      10240 B        127 us
-host-mediated  2048   20971520 B     22000 us / 1.9 GB/s
+hip-p2p        1      10240 B        88 us
+hip-p2p        2048   20971520 B     955 us  / 43.9 GB/s
+host-mediated  1      10240 B        130 us
+host-mediated  2048   20971520 B     22700 us / 1.85 GB/s
 ```
 
-- 目標（`--check`）: hip-p2p は大 payload で >= 8.0 GB/s かつ rows=1 で
-  <= 250 us、host-mediated は大 payload で >= 1.2 GB/s かつ rows=1 で <= 400 us。
-- 小 payload（rows=1 の decode barrier）では P2P の kernel 数と
-  cross-device event 往復のため host 経由と同程度〜やや遅い。大 payload
-  （prefill / 大きい batch）では約 13 倍高速。
+- 目標（`--check`）: hip-p2p は大 payload で >= 20.0 GB/s かつ rows=1 で
+  <= 150 us、host-mediated は大 payload で >= 1.2 GB/s かつ rows=1 で <= 400 us。
+- 対称 push 型は小 payload（rows=1 の decode barrier）でも host 経由を上回る。
+  大 payload（prefill / 大きい batch）では約 23 倍高速。
 - RCCL backend は引き続き未導入。本ホストの P2P 制約は driver 依存であり、
   安定した peer read が得られる環境では同じ interface でより良い backend を
   追加できる。

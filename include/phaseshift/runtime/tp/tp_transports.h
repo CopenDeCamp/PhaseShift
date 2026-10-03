@@ -2,6 +2,7 @@
 
 #include <phaseshift/runtime/tp/tp_execution.h>
 
+#include <array>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -26,18 +27,11 @@ private:
     Status enqueue_sum(const TpSumInvocation& invocation);
 
     std::vector<int> devices_;
-    hipStream_t transport_stream_ = nullptr;
-    hipEvent_t reduce_done_ = nullptr;
-    std::vector<hipEvent_t> bcast_done_;
-    std::vector<hipEvent_t> scratch_done_;
-    std::vector<void*> scratch_;
-    void* leader_result_ = nullptr;
-    std::size_t leader_result_bytes_ = 0;
-    void* src_ptr_dev_ = nullptr;
-    void* src_ptr_host_[2] = {nullptr, nullptr};
-    std::size_t src_ptr_capacity_ = 0;
-    std::size_t src_ptr_parity_ = 0;
-    std::vector<const void*> host_src_ptrs_;
+    std::vector<std::vector<hipEvent_t>> sent_;
+    std::vector<std::vector<std::array<void*, 2>>> inbox_;
+    std::vector<std::array<void*, 2>> inbox_ptrs_dev_;
+    std::size_t inbox_bytes_ = 0;
+    std::size_t parity_ = 0;
     std::vector<void*> probe_buffers_;
     std::vector<hipStream_t> probe_streams_;
     std::vector<hipEvent_t> probe_ready_;
