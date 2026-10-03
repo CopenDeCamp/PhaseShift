@@ -50,9 +50,8 @@ backend contract は `host` のみ。
 - `--dump-logits`
 - `--dflash2-drafts` が `block_size - 1` を超える
 
-target の lm_head proxy（`PHASESHIFT_TARGET_LM_HEAD_PROXY`）は DFlash2 有効時に
-未指定なら `0`（proxy 停止）として起動する。明示指定した場合はその値を使う。
-理由は [../developer/dflash2.md](../developer/dflash2.md) の verify 数値契約を参照。
+constrained な LM head の候補展開最適化（`PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT`）は
+既定 0（無効）である。有効時も制約の正しさは full path の sampling filter が担保する。
 
 `--serve-stdio` と `--kv-cache-dtype psq4` は併用できる。serve mode では
 `grammar` / `structural_tag` / `prefix_cache_checkpoint_position` / `temperature > 0`

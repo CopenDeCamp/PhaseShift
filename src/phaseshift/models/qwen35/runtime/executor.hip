@@ -353,10 +353,8 @@ Status build_host_execution_context(
         static_cast<uint32_t>(executor.stochastic_topk_scratch_bytes);
     ctx.stochastic_topk_active_counts =
         executor.stochastic_topk_active_counts.data<uint32_t>();
-    ctx.lm_head_proxy = executor.lm_head_proxy.valid() ? &executor.lm_head_proxy : nullptr;
-    ctx.lm_head_shadow_pending = false;
-    ctx.lm_head_shadow_full = nullptr;
-    ctx.lm_head_shadow_rows = 0;
+    ctx.constraint_lm_head =
+        executor.constraint_lm_head.valid() ? &executor.constraint_lm_head : nullptr;
     ctx.min_visible_tokens = min_visible_tokens;
     ctx.max_visible_tokens = max_visible_tokens;
     return Status::make_ok();
@@ -1194,7 +1192,7 @@ Executor::Executor(Executor&& other) noexcept
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
-      lm_head_proxy(std::move(other.lm_head_proxy)),
+      constraint_lm_head(std::move(other.constraint_lm_head)),
       host_request_staging(other.host_request_staging),
       host_staging_bytes(other.host_staging_bytes),
       host_pending_staging(other.host_pending_staging),
@@ -1338,7 +1336,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.host_parameter_table = nullptr;
         host_parameter_slots = std::move(other.host_parameter_slots);
         host_model_state = other.host_model_state;
-        lm_head_proxy = std::move(other.lm_head_proxy);
+        constraint_lm_head = std::move(other.constraint_lm_head);
         dispatch_staging = other.dispatch_staging;
         other.dispatch_staging = nullptr;
         dispatch_staging_bytes = other.dispatch_staging_bytes;
@@ -1435,7 +1433,7 @@ Status executor_shutdown(Executor& ex) noexcept {
         if (first_error.ok() && !ka_status.ok()) first_error = ka_status;
     }
     {
-        Status proxy_status = ex.lm_head_proxy.shutdown();
+        Status proxy_status = ex.constraint_lm_head.shutdown();
         if (first_error.ok() && !proxy_status.ok()) first_error = proxy_status;
     }
     if (ex.host_sampled_staging != nullptr) {
@@ -1825,20 +1823,19 @@ Result<Executor> create_model_executor(
     if (MO > N) MO = N;
     ex.config.max_scheduled_output_rows = MO;
 
-    if (runtime::target_lm_head_proxy_mode() != 0u) {
+    if (runtime::constraint_lm_head_exact_enabled()) {
         const ps::weights::MatrixWeight& lm = model.weights().lm_head;
         if (lm.encoding == ps::weights::MatrixEncoding::Psq8 && lm.preshuffled &&
             lm.weight_scale_group == 32u) {
-            runtime::LmHeadProxyWeightView view{};
+            runtime::ConstraintLmHeadWeightView view{};
             view.codes = lm.codes.data<uint8_t>();
             view.scales = lm.scales.data<uint8_t>();
             view.vocab = lm.rows;
             view.cols = lm.cols;
             view.k_padded = lm.k_padded;
             view.scale_stride_bytes = lm.storage_scale_stride_bytes;
-            Status pst = ex.lm_head_proxy.init(view, MO, runtime::target_lm_head_proxy_pool(),
-                                               nullptr);
-            if (!pst.ok()) return pst;
+            Status cst = ex.constraint_lm_head.init(view, MO, nullptr);
+            if (!cst.ok()) return cst;
         }
     }
 

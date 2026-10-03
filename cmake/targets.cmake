@@ -215,7 +215,7 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/sampling_selector.cpp
     src/phaseshift/models/qwen35/runtime/sampling_dispatch.hip
     src/phaseshift/models/qwen35/runtime/decode_perf_stats.cpp
-    src/phaseshift/models/qwen35/runtime/lm_head_proxy.hip
+    src/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.hip
     src/phaseshift/models/qwen35/dflash2/executor.hip
 )
 target_compile_features(phaseshift_qwen35_runtime PRIVATE cxx_std_20)

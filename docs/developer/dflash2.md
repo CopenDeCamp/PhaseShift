@@ -954,14 +954,12 @@ DFlash2 有効時の既定構成は **DFlash2 K=7**、target verify は
 `phaseshift-cli` / `phaseshift-server` は `--dflash2-model-dir` と `--dflash2-drafts` のみ
 `phaseshift-compute` へ転送する（= compute の既定をそのまま使う）。
 
-### lm_head proxy（DFlash2 有効時）
+### constrained lm_head（DFlash2 有効時）
 
-DFlash2 有効時は `PHASESHIFT_TARGET_LM_HEAD_PROXY` が未指定・空文字のときだけ
-`0`（proxy 停止）を設定して起動する。明示指定した値は尊重する。
-
-理由: target verify の lm_head proxy は decode（M=1）と verify（M>1）で logits が
-一致しないため、既定の Verify Fast proxy を使うと DFlash2 の生成列が target-only greedy と
-分岐する。`GENERATED_IDS` の target-only 一致契約は proxy 停止でのみ成立する。
+DFlash2 有効時も constrained LM head の候補展開最適化
+（`PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT`）は既定 0（無効）である。
+target verify の数値契約は [../developer/qwen35.md](qwen35.md) §7.1 と
+`VerifyNumericMode::Exact` に従う。
 
 ### invalid combinations（model load 前に exit 2）
 
@@ -1028,7 +1026,7 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 | `PHASESHIFT_DFLASH2_INT2_DIAG` | off | INT2 診断出力 |
 | `PHASESHIFT_DFLASH2_INT2_TIMING` | off | INT2 区間 timing 出力 |
 | `PHASESHIFT_DFLASH2_RADIX_TOPN` | auto | 0 で従来 topn、1 で radix topn、未指定は pool crossover |
-| `PHASESHIFT_TARGET_LM_HEAD_PROXY` | 1（Verify Fast） | DFlash2 有効時の `phaseshift-compute` は未指定なら 0 を設定する。明示指定を尊重 |
+| `PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT` | 0（無効） | constrained LM head 候補展開の opt-in |
 
 target verify の GDN recurrence は `PHASESHIFT_GDN_RECURRENCE_MULTIROW`（既定 on、0 で
 serial 強制）で切り替わる。
@@ -1076,8 +1074,7 @@ DFlash mode の出力を扱える。
 - DFlash ring に入るのは target が consume して commit した row だけ（commit-only）。
 - step 終了時に `context.next_position == sequence.position`、
   `context.length == min(sequence.position, capacity)`。
-- `GENERATED_IDS` は target-only greedy と完全一致する（`PHASESHIFT_TARGET_LM_HEAD_PROXY`
-  停止時。DFlash2 有効時の既定がこれである）。
+- `GENERATED_IDS` は target-only greedy と完全一致する。
 - target verify は Exact 数値モードで行う。
 - drafter kernel は D2D memcpy による relay を行わない。
 - hot-path enqueue API は sync / D2H / H2D / allocation を行わない。
