@@ -578,6 +578,24 @@ int main() {
         }
     }
 
+    // Qwen3.8-27B TP=2 local geometries (optimized selector allowlist).
+    {
+        const uint32_t tp2_n[] = {8704u, 5120u, 3072u, 5120u, 512u, 5120u};
+        const uint32_t tp2_k[] = {5120u, 8704u, 5120u, 3072u, 5120u, 5120u};
+        for (std::size_t i = 0; i < 6; ++i) {
+            Case c;
+            gen_random(1, tp2_n[i], tp2_k[i], false, 1, 1, 1, c);
+            char label[128];
+            std::snprintf(label, sizeof(label), "tp2 rows=1 N=%u K=%u", tp2_n[i], tp2_k[i]);
+            run_case(c, arena, stream, label);
+        }
+        Case c;
+        gen_random(64, 8704, 5120, false, 1, 1, 1, c);
+        char label[128];
+        std::snprintf(label, sizeof(label), "tp2 rows=64 N=8704 K=5120");
+        run_case(c, arena, stream, label);
+    }
+
     // production 2D prefill dispatch (rows>=512, N>=512, k%64==0)
     for (uint32_t cfg : {0u, 1u, 2u}) {
         const uint32_t rows = cfg == 2u ? 1024u : 512u;

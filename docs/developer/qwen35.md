@@ -360,7 +360,7 @@ candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。候補�
 - **rope**: `try_launch_rope` — head_dim=256 / rotary=64 / features%256==0 で pointer/stride aligned かつ inv_freq table が存在するなら専用 pair kernel、でなければ generic kernel を自動選択する。inv_freq table は Executor / MtpExecutor が model setup 時に `launch_rope_inv_freq_init` で生成し、`HostExecutionContext.rope_inv_freq` 経由で渡す
 - **output_gather**: `try_launch_output_gather`
 
-各 launcher は selector（`select_*_implementation` / `select_*_config`）で `Correctness` / `Optimized` を判定し、`Optimized` でなければ `NotApplicable` を返す。量子化 linear は対応 weight が native layout に preshuffle 済みであることも検証する。
+各 launcher は selector（`select_*_implementation` / `select_*_config`）で `Correctness` / `Optimized` を判定し、`Optimized` でなければ `NotApplicable` を返す。量子化 linear は対応 weight が native layout に preshuffle 済みであることも検証する。Tensor Parallel の local geometry は半分の次元になるため、`linear_selector` / `paged_attention_selector` / `gdn_recurrence_selector` には TP=2 の validated shape を個別に登録する（[tensor_parallel_execution.md](tensor_parallel_execution.md) §10）。
 
 ---
 

@@ -49,6 +49,13 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 17408, 5120, kFamilyBf16 | kFamilyPsq4 | kFamilyPsq8 | kFamilyFp8 | kFamilyMxfp4 },
     { 248320, 2560, kFamilyBf16 | kFamilyPsq8 },
     { 248320, 5120, kFamilyBf16 | kFamilyPsq8 },
+    { 8704, 5120, kFamilyPsq4 },
+    { 5120, 8704, kFamilyPsq4 | kFamilyPsq8 },
+    { 3072, 5120, kFamilyPsq4 | kFamilyPsq8 },
+    { 512, 5120, kFamilyPsq4 },
+    { 5120, 3072, kFamilyPsq4 | kFamilyPsq8 },
+    { 5120, 5120, kFamilyPsq4 | kFamilyPsq8 },
+    { 24, 5120, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {

@@ -285,6 +285,45 @@ void test_mxfp4() {
           "mxfp4 small out_features -> RowBlock1");
 }
 
+void test_tp2_shapes() {
+    check(sel_psq4(1, 8704, 5120, 5120).has_value(),
+          "tp2 psq4 8704x5120 rows=1 -> config");
+    check(sel_psq4(1, 5120, 8704, 8704).has_value(),
+          "tp2 psq4 5120x8704 rows=1 -> config");
+    check(sel_psq8(1, 5120, 8704, 8704).has_value(),
+          "tp2 psq8 5120x8704 rows=1 -> config");
+    check(sel_psq4(1, 3072, 5120, 5120).has_value(),
+          "tp2 psq4 3072x5120 rows=1 -> config");
+    check(sel_psq8(1, 3072, 5120, 5120).has_value(),
+          "tp2 psq8 3072x5120 rows=1 -> config");
+    check(sel_psq4(1, 512, 5120, 5120).has_value(),
+          "tp2 psq4 512x5120 rows=1 -> config");
+    check(sel_psq4(1, 5120, 3072, 3072).has_value(),
+          "tp2 psq4 5120x3072 rows=1 -> config");
+    check(sel_psq8(1, 5120, 3072, 3072).has_value(),
+          "tp2 psq8 5120x3072 rows=1 -> config");
+    check(sel_psq4(1, 5120, 5120, 5120).has_value(),
+          "tp2 psq4 5120x5120 rows=1 -> config");
+    check(sel_psq8(1, 5120, 5120, 5120).has_value(),
+          "tp2 psq8 5120x5120 rows=1 -> config");
+    check(sel_bf16(1, 24, 5120, 5120, true, true, false).has_value(),
+          "tp2 bf16 24x5120 rows=1 -> config");
+
+    check(sel_psq4(64, 8704, 5120, 5120).has_value(),
+          "tp2 psq4 8704x5120 rows=64 -> config");
+    check(sel_psq8(64, 5120, 3072, 3072).has_value(),
+          "tp2 psq8 5120x3072 rows=64 -> config");
+
+    check(!sel_bf16(1, 8704, 5120, 5120, true, true, false).has_value(),
+          "tp2 bf16 8704x5120 not enabled");
+    check(!sel_psq8(1, 8704, 5120, 5120).has_value(),
+          "tp2 psq8 8704x5120 not enabled");
+    check(!sel_psq4(1, 24, 5120, 5120).has_value(),
+          "tp2 psq4 24x5120 not enabled");
+    check(!sel_psq8(1, 24, 5120, 5120).has_value(),
+          "tp2 psq8 24x5120 not enabled");
+}
+
 }  // namespace
 
 int main() {
@@ -294,6 +333,7 @@ int main() {
     test_psq8();
     test_fp8_block128();
     test_mxfp4();
+    test_tp2_shapes();
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
