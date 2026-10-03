@@ -1,6 +1,7 @@
 #pragma once
 #include <phaseshift/core/status.h>
 #include <phaseshift/models/qwen35/model/qwen35_config.h>
+#include <phaseshift/models/qwen35/model/tensor_parallel_context.h>
 #include <phaseshift/models/qwen35/weights/model_weights.h>
 #include <phaseshift/runtime/program/program.h>
 
@@ -19,6 +20,7 @@ struct Qwen35LoweredPrimitives {
 
 struct Qwen35LowerOptions {
     std::span<const uint32_t> hidden_taps;
+    const Qwen35TensorParallelContext* tp = nullptr;
 };
 
 Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(

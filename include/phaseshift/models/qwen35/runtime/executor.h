@@ -1,5 +1,6 @@
 #pragma once
 #include <phaseshift/models/qwen35/model/qwen35_model.h>
+#include <phaseshift/models/qwen35/model/tensor_parallel_context.h>
 #include <phaseshift/models/qwen35/runtime/scheduled_batch.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/models/qwen35/state/sequence_slot_pool.h>
@@ -9,6 +10,7 @@
 #include <phaseshift/models/qwen35/runtime/constraint_lm_head_exact.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/program/program.h>
+#include <phaseshift/runtime/tp/tp_execution.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
 #include <phaseshift/runtime/execution/row_bucket.h>
 #include <phaseshift/core/memory/tensor.h>
@@ -46,6 +48,7 @@ struct ExecutorConfig {
     uint32_t target_hidden_tap_count = 0;
     uint32_t constraint_mask_words = 0;
     runtime::DecodeBackend backend = runtime::DecodeBackend::Host;
+    const Qwen35TensorParallelContext* tp = nullptr;
 };
 
 struct DispatchStagingPool {
@@ -119,6 +122,9 @@ struct Executor {
     uint64_t active_submission_id = 0;
     ::ps::runtime::ProgramSet program_set;
     bool program_set_ready = false;
+    std::vector<::ps::runtime::TpExecutionSchedule> tp_schedules;
+    ::ps::runtime::TpBarrierHook* tp_barrier = nullptr;
+    int tp_rank = 0;
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
     ::ps::runtime::WeightSlot* host_weight_table = nullptr;

@@ -1,5 +1,7 @@
 #include <phaseshift/models/qwen35/weights/model_weights.h>
 #include <phaseshift/models/qwen35/model/qwen35_config.h>
+#include <phaseshift/models/qwen35/model/tensor_parallel_context.h>
+#include <phaseshift/models/qwen35/weights/tensor_parallel_plan.h>
 #include <phaseshift/quantization/fpx/quantized_model_reader.h>
 #include <phaseshift/weights/weight_loader.h>
 #include <algorithm>
@@ -157,9 +159,10 @@ Status load_q_vector(
     const std::string& name,
     gpu::GpuArena& arena,
     hipStream_t stream,
-    Tensor& dst)
+    Tensor& dst,
+    const ps::weights::WeightLoadOptions& weight_options = {})
 {
-    auto t = ps::weights::load_quantized_small(reader, name, arena, stream);
+    auto t = ps::weights::load_quantized_small(reader, name, arena, stream, weight_options);
     if (!t.ok()) return t.status();
     dst = t.release();
     return Status::make_ok();
@@ -391,15 +394,15 @@ Status load_layer_quantized(
         if (!st.ok()) return st;
         st = load_q_matrix(reader, prefix + "linear_attn.in_proj_z.weight", arena, stream, weight_options, w.attn_in_proj_z);
         if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "linear_attn.conv1d.weight", arena, stream, w.attn_conv1d_weight);
+        st = load_q_vector(reader, prefix + "linear_attn.conv1d.weight", arena, stream, w.attn_conv1d_weight, weight_options);
         if (!st.ok()) return st;
         st = load_q_matrix(reader, prefix + "linear_attn.out_proj.weight", arena, stream, weight_options, w.attn_out_proj);
         if (!st.ok()) return st;
         st = load_q_vector(reader, prefix + "linear_attn.norm.weight", arena, stream, w.attn_norm_weight);
         if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "linear_attn.dt_bias", arena, stream, w.attn_dt_bias);
+        st = load_q_vector(reader, prefix + "linear_attn.dt_bias", arena, stream, w.attn_dt_bias, weight_options);
         if (!st.ok()) return st;
-        st = load_q_vector(reader, prefix + "linear_attn.A_log", arena, stream, w.attn_A_log);
+        st = load_q_vector(reader, prefix + "linear_attn.A_log", arena, stream, w.attn_A_log, weight_options);
         if (!st.ok()) return st;
     } else {
         st = load_q_matrix(reader, prefix + "self_attn.q_proj.weight", arena, stream, weight_options, w.attn_q_proj);
@@ -487,13 +490,20 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_safetensors(
     hipStream_t stream,
     const Qwen35LoadOptions& options) {
 
+    if (options.weights.partition_plan != nullptr) {
+        return Status::unsupported(
+            "qwen35 single-GPU weight load path does not accept a tensor partition plan",
+            __FILE__, __LINE__);
+    }
     if (ps::weights::is_quantized_model_dir(model_dir)) {
         return load_qwen35_weights_from_quantized_safetensors(model_dir, arena, stream, options);
     }
     return load_qwen35_weights_bf16(model_dir, arena, stream, options);
 }
 
-Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
+namespace {
+
+Result<Qwen35ModelWeights> load_qwen35_weights_quantized_impl(
     const std::string& model_dir,
     gpu::GpuArena& arena,
     hipStream_t stream,
@@ -579,5 +589,56 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
 
     return weights;
 }
+
+}  // namespace
+
+Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
+    const std::string& model_dir,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const Qwen35LoadOptions& options)
+{
+    if (options.weights.partition_plan != nullptr) {
+        return Status::unsupported(
+            "qwen35 single-GPU weight load path does not accept a tensor partition plan",
+            __FILE__, __LINE__);
+    }
+    return load_qwen35_weights_quantized_impl(model_dir, arena, stream, options);
+}
+
+Result<Qwen35ModelWeights> load_qwen35_weights_tensor_parallel_rank(
+    const std::string& model_dir,
+    std::uint32_t tp_size,
+    std::uint32_t tp_rank,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const Qwen35LoadOptions& options)
+{
+    if (options.weights.partition_plan != nullptr) {
+        return Status::invalid_argument(
+            "tensor parallel rank load builds its own partition plan",
+            __FILE__, __LINE__);
+    }
+    if (!ps::weights::is_quantized_model_dir(model_dir)) {
+        return Status::unsupported(
+            "tensor parallel rank load requires a PhaseShift quantized model directory",
+            __FILE__, __LINE__);
+    }
+    auto config_result = read_qwen35_text_config(model_dir);
+    if (!config_result.ok()) return config_result.status();
+    const Qwen35TextConfig& config = config_result.value();
+
+    auto context_result =
+        make_qwen35_tensor_parallel_context(config, tp_size, tp_rank);
+    if (!context_result.ok()) return context_result.status();
+
+    auto plan_result = build_qwen35_tensor_partition_plan(config, tp_size, tp_rank);
+    if (!plan_result.ok()) return plan_result.status();
+
+    Qwen35LoadOptions tp_options = options;
+    tp_options.weights.partition_plan = &plan_result.value();
+    return load_qwen35_weights_quantized_impl(model_dir, arena, stream, tp_options);
+}
+
 }
 }

@@ -3,6 +3,7 @@
 #include <string>
 
 int run_pp(int argc, char** argv);
+int run_tp_reduce(int argc, char** argv);
 int run_tg(int argc, char** argv);
 int run_batch(int argc, char** argv);
 int run_activation_quantize(int argc, char** argv);
@@ -53,6 +54,7 @@ void usage() {
     std::printf("  sampling           greedy argmax sampling benchmark\n");
     std::printf("\n");
     std::printf("Memory:\n");
+    std::printf("  tp-reduce            tp sum_hidden transport microbenchmark\n");
     std::printf("  gpu-memory         global / LDS crossover sweep\n");
     std::printf("\n");
     std::printf("run 'phaseshift-bench <subcommand> --help' for options\n");
@@ -86,6 +88,7 @@ int main(int argc, char** argv) {
     if (sub == "embedding") return run_embedding(argc - 1, argv + 1);
     if (sub == "sampling") return run_sampling(argc - 1, argv + 1);
     if (sub == "gpu-memory") return run_gpu_memory(argc - 1, argv + 1);
+    if (sub == "tp-reduce") return run_tp_reduce(argc - 1, argv + 1);
     std::fprintf(stderr, "unknown subcommand: %s\n", sub.c_str());
     usage();
     return 2;

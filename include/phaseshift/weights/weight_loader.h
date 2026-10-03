@@ -6,6 +6,7 @@
 #include <phaseshift/io/safetensors_reader.h>
 #include <phaseshift/quantization/fpx/quantized_model_reader.h>
 #include <phaseshift/weights/matrix_weight.h>
+#include <phaseshift/weights/tensor_partition.h>
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
@@ -51,8 +52,11 @@ Status validate_quantized_model(const quantization::fpx::QuantizedModelReader& r
 // Options for loading matrix weights from disk. Preshuffle converts the
 // canonical payload to the GPU-native WMMA layout at load time; it is a
 // property of the weight loading layer, not of any model family.
+// `partition_plan` selects an optional logical TP partition that is
+// materialized before any preshuffle; nullptr keeps the global load path.
 struct WeightLoadOptions {
     bool preshuffle = true;
+    const TensorPartitionPlan* partition_plan = nullptr;
 };
 
 Result<gpu::Tensor> load_bf16_tensor(
@@ -85,6 +89,7 @@ Result<gpu::Tensor> load_quantized_small(
     const quantization::fpx::QuantizedModelReader& reader,
     const std::string& name,
     gpu::GpuArena& arena,
-    hipStream_t stream);
+    hipStream_t stream,
+    const WeightLoadOptions& options = {});
 
 }  // namespace ps::weights

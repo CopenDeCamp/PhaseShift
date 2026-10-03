@@ -39,6 +39,8 @@ struct Fp8Block128NativeHost {
 
 // Batched canonical matrices are not supported: 128x128 scale tiles must not
 // straddle a matrix boundary, and the consumer addresses one matrix at a time.
+// Input contract: the canonical view is the whole logical tensor owned by the
+// caller; this function never partitions and never sees tp_rank / tp_size.
 bool preshuffle_fp8_block128_native(const Fp8BlockCanonicalView& v,
                                     Fp8Block128NativeHost& out);
 

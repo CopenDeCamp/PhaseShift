@@ -14,8 +14,14 @@ Qwen35 model        Qwen35 kernels
      ↓                    ↓
 Generic weights loader
     safetensors / quantized safetensors
-    BF16・PSQ4 / PSQ8 の
-    format解釈 / canonical validation / preshuffle / GPU upload
+    ↓
+canonical validation
+    ↓
+optional logical partition
+    ↓
+native preshuffle
+    ↓
+GPU upload
      ↓                    ↓
 Qwen35 state  ────────────┤
      ↓                    ↓
@@ -28,12 +34,29 @@ Runtime core
 `phaseshift_qwen35_kernels` は `phaseshift_runtime` にlinkする一方、
 `phaseshift_runtime` は `phaseshift_core` / `phaseshift_gpu` だけを使う。
 
+Tensor Parallel を使う場合の scheduler / rank runtime の関係（TP-Exec-1）:
+
+```text
+ContinuousBatcher (global 1個)
+      |
+  TpCoordinator
+   /      \
+Rank0    Rank1          (1 rank = 1 device-local runtime: arena / stream /
+  |        |              rank-local weight / KV pool / GDN state / Executor)
+Executor Executor
+```
+
+詳細は [tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
+
 weights loader（`phaseshift_weights`）の依存は下方向のみ:
 
 ```text
 phaseshift_weights -> phaseshift_fpx_format / phaseshift_quant_reference / phaseshift_io / phaseshift_core / phaseshift_gpu
 phaseshift_qwen35  -> phaseshift_weights
 ```
+
+weight の canonical → partition → preshuffle → upload の順序 contract は
+[tensor_partition.md](tensor_partition.md) を参照。
 
 CMake targetの一覧は `cmake/targets.cmake` を参照。
 

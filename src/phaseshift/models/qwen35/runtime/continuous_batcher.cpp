@@ -206,9 +206,16 @@ Status ContinuousBatcher::finish_request(
                 request.sequence, gdn_pool_, kv_pool_, std::move(tokens), stream);
         }
     }
+    Status mirror_release = Status::make_ok();
+    if (tp_batch_hook_ != nullptr) {
+        mirror_release = tp_batch_hook_->on_sequence_released(request.sequence);
+    }
     auto release_st = release_paged_sequence_state(request.sequence, stream);
     if (!release_st.ok()) {
         return release_st;
+    }
+    if (!mirror_release.ok()) {
+        return mirror_release;
     }
     auto claim_st = capacity_.release_claim(request.id);
     if (!claim_st.ok()) {
@@ -296,6 +303,14 @@ Result<StepResult> ContinuousBatcher::step() {
         if (!admit_st.ok()) {
             break;
         }
+        if (tp_batch_hook_ != nullptr) {
+            auto mirror_st = tp_batch_hook_->on_sequence_created(request.sequence);
+            if (!mirror_st.ok()) {
+                (void)release_paged_sequence_state(request.sequence, stream_);
+                request.state = RequestState::Queued;
+                return mirror_st;
+            }
+        }
         if (prefix_cache_ != nullptr && prefix_cache_->enabled()) {
             const PrefixCheckpoint* checkpoint =
                 prefix_cache_->find_longest(request.input_tokens, true);
@@ -304,6 +319,9 @@ Result<StepResult> ContinuousBatcher::step() {
                 auto restore_st = prefix_cache_->restore(
                     request.sequence, gdn_pool_, kv_pool_, *checkpoint, stream_);
                 if (!restore_st.ok()) {
+                    if (tp_batch_hook_ != nullptr) {
+                        (void)tp_batch_hook_->on_sequence_released(request.sequence);
+                    }
                     (void)release_paged_sequence_state(request.sequence, stream_);
                     request.state = RequestState::Queued;
                     return restore_st;
@@ -317,6 +335,9 @@ Result<StepResult> ContinuousBatcher::step() {
         }
         auto claim_st = capacity_.register_claim(request.id, request.max_kv_pages);
         if (!claim_st.ok()) {
+            if (tp_batch_hook_ != nullptr) {
+                (void)tp_batch_hook_->on_sequence_released(request.sequence);
+            }
             (void)release_paged_sequence_state(request.sequence, stream_);
             request.state = RequestState::Queued;
             return claim_st;
@@ -409,7 +430,9 @@ Result<StepResult> ContinuousBatcher::step() {
         }
     }
 
-    auto exec_result = execute_batch(executor_, plan.batch, stream_);
+    auto exec_result = tp_batch_hook_ != nullptr
+                          ? tp_batch_hook_->on_execute(plan.batch)
+                          : execute_batch(executor_, plan.batch, stream_);
     if (!exec_result.ok()) {
         Status first_error = Status::make_ok();
         for (auto& scheduled : plan.scheduled_requests) {

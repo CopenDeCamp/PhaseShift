@@ -416,6 +416,19 @@ candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。候補�
 
 `validate_host_weight_slot` がこの制約を検証する。
 
+Tensor Parallel の rank-local weight と execution は
+[tensor_parallel_execution.md](tensor_parallel_execution.md) を参照
+（plan builder は `include/phaseshift/models/qwen35/weights/tensor_parallel_plan.h`）。
+
+weight の load 時 logical TP partition（`WeightLoadOptions.partition_plan`）は
+model 層の plan builder（`include/phaseshift/models/qwen35/weights/tensor_parallel_plan.h`）
+が生成し、generic weights layer が
+`global canonical → partition → preshuffle` の順で適用する。
+現行 single-GPU lowering は global geometry を前提とするため、
+Qwen35 の top-level load path は partition plan を
+`Status::unsupported` で拒否する。contract は
+[tensor_partition.md](tensor_partition.md) を参照。
+
 ---
 
 ## 10. 関連ファイル索引

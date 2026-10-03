@@ -82,5 +82,13 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
     hipStream_t stream,
     const Qwen35LoadOptions& options = {});
 
+Result<Qwen35ModelWeights> load_qwen35_weights_tensor_parallel_rank(
+    const std::string& model_dir,
+    std::uint32_t tp_size,
+    std::uint32_t tp_rank,
+    gpu::GpuArena& arena,
+    hipStream_t stream,
+    const Qwen35LoadOptions& options = {});
+
 }
 }
