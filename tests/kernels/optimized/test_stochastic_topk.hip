@@ -1,4 +1,4 @@
-#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/radix_topn.h>
 #include <phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.h>
 #include <phaseshift/core/gpu/cleanup.h>
 #include <hip/hip_runtime.h>

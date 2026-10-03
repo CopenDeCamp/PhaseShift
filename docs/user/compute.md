@@ -59,51 +59,6 @@ constrained な LM head の候補展開最適化（`PHASESHIFT_CONSTRAINT_LM_HEA
 generation は grammar 準拠である。prefix cache の checkpoint は prompt boundary
 （prompt 全体）で保存する。
 
-### 固定draft語彙の配置と明示有効化
-
-固定語彙はopt-inであり、profileを配置しただけではDFlash2の既定動作を変えない。
-`PHASESHIFT_DFLASH2_DRAFT_VOCAB=1`を指定すると、対応する標準profileを検証してINT2＋固定語彙を使う。
-通常利用者はprofile配布物だけを用意し、SWE-chat等の生成元コーパスを取得する必要はない。
-配置にはPython 3の標準ライブラリだけを使い、推論時のPython依存は追加しない。
-
-Qwen3.8-27B用の[語彙profileを取得](https://github.com/jyohukuchan/PhaseShift/releases/download/draft-vocab-qwen38-v1/qwen38-draft-vocab-98304-v1.tar.gz)して展開する。
-SHA-256は`b7bd94c9131c3ef3573c27c92a512b5463bc9676c57a1a70ac0223fc2f8df246`。
-この配布物はcontributorのforkで提供する。
-
-```sh
-python3 tools/quantization/prepare_draft_vocab.py install \
-  --bundle-dir /path/to/extracted-vocabulary-profile \
-  --model-dir /path/to/target-PSQ-model
-```
-
-配置先は`--model-dir`のtarget側であり、`--dflash2-model-dir`ではない。
-toolはmodel形状とtokenizerのtoken→ID対応を照合し、次の3ファイルを配置する。
-
-- `dflash2-draft-vocab.u32`
-- `dflash2-draft-vocab.json`
-- `DRAFT_VOCAB_NOTICE.txt`
-
-異なる既存内容を置き換える場合だけ`--overwrite`を指定する。同梱NOTICEは保持する。
-未指定時はprofileの有無・内容によらずfull PSQ8 headを使い、標準profileを読まない。
-明示有効化時にprofileがない、または正常だが別tokenizer/形状向けなら、理由をstderrへ示して
-従来経路を使う。明示有効化時の部分配置、破損・不正なprofileはエラーになる。
-
-有効化と比較の指定:
-
-```sh
-PHASESHIFT_DFLASH2_DRAFT_VOCAB=1 ./build-gfx1201/phaseshift-compute ...
-PHASESHIFT_DFLASH2_INT2_HEAD=1 ./build-gfx1201/phaseshift-compute ...
-PHASESHIFT_DFLASH2_INT2_HEAD=0 ./build-gfx1201/phaseshift-compute ...
-```
-
-順に固定語彙INT2、全語彙INT2、full PSQ8を選ぶ。
-`INT2_HEAD=1`だけではprofile配置済みでも全語彙INT2を使う。
-`INT2_HEAD=0/2`は標準profileの有効化より優先する。
-明示的な独自語彙は`PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE`で指定でき、INT2経路を選ぶ。
-この明示ファイルと`INT2_HEAD=0/2`または`DRAFT_VOCAB=0`の同時指定はエラーになる。
-
-profile作成者向けの`pack`手順と契約は[開発者文書](../developer/dflash2.md#固定語彙profile)を参照する。
-
 ## serve-stdio
 
 `--serve-stdio` はserver backendから利用されるengine modeである。modelとruntimeを

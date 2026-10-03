@@ -198,7 +198,6 @@ weight を掛ける。
   直結するため）。
 - `create_dflash2_spec_decoder()` が target との shape 一致
   （`hidden_size` / `vocab_size` / `lm_head` shape）と target 層数 > 最大 tap を検証する。
-- INT2 coarse head を使う場合も、この PSQ8 lm_head が唯一の source である。
 
 ### ownership
 
@@ -321,7 +320,7 @@ RoPE は **f32 の `inv_freq`** から `powf` で計算する。`Qwen3RotaryEmbe
 DFlash2 executor は layer 内の各 logical primitive をすべて独立した kernel launch として
 実行する。対象は layer input/post-attention RMSNorm、Q/K の RMSNorm と RoPE、
 q/k/v projection GEMM、attention、Gate GEMM、Up GEMM、SwiGLU、Down GEMM、
-grouped dynamic conv と residual、INT2 head path の rerank / Top-16 / pool-id remap である。
+grouped dynamic conv と residual である。
 複数の logical primitive を 1 physical kernel へ結合する fusion は production には存在しない。
 
 ### hot-path contract
@@ -480,7 +479,7 @@ row ごとの mask を一括で計算する。線形 chain として
 
 - `dflash2_select_draft_tokens()` は `constraint_mask` を受け、
   `launch_dflash2_apply_constraint_mask()` で許可外の logit を `-INFINITY` に潰してから
-  top-k / INT2 coarse topn を実行する。許可外の候補は既存の `-INFINITY` skip で除外される。
+  top-k を実行する。許可外の候補は既存の `-INFINITY` skip で除外される。
 - proposal の row は現在の matcher 状態（draft 未確定）の mask を全 row に使い、
   row 0 のみ厳密である。正しさは verify 側の mask が担保する。
 
@@ -515,8 +514,6 @@ final_hidden の anchor row を除く draft row
 
 - full PSQ8（既定）: `lm_head_logits()` が activation を e4m3 へ量子化し、PSQ8 W8A8 で
   `proposal_logits [draft_rows, vocab_size]` F32 を作る。
-- INT2 coarse + PSQ8 rerank（後述）: `int2_select_path()` が full logits を materialize
-  せず、coarse Top-N と exact rerank で top-16 を作る。
 
 ### top-16
 
@@ -575,157 +572,6 @@ token を host へ戻して次の position を決めたりしない。`draft_row
 | 2 | 1 |
 | 4 | 3 |
 | 8 | 7 |
-
-### INT2 coarse head + PSQ8 exact rerank
-
-proposer の full PSQ8 lm_head を、INT2 coarse 全語彙探索 → coarse Top-N → original PSQ8
-lm_head による candidate rerank → exact Top-16 に置き換える。target の lm_head と Verify は
-一切変更しない（DFlash proposal 専用の lossy head）。`PHASESHIFT_DFLASH2_INT2_HEAD`で
-明示選択できる。固定語彙は`PHASESHIFT_DFLASH2_DRAFT_VOCAB=1`または明示FILEでのみ有効にする。
-
-data:
-
-- `DFlash2DraftHeadInt2` は generic な `MatrixEncoding` ではない。executor が
-  `target_lm_head`（PSQ8, preshuffled）から **load 時に一度だけ**作る runtime object。
-- 追加 resident は **INT2 codes のみ**（`((vocab+15)/16) * k_padded * 4` bytes。
-  248320 × 5120 で 317,849,600 bytes ≈ 303.1 MiB）。weight scale は target PSQ8 の
-  `storage_scale_stride_bytes` の BF16 をそのまま borrow し、追加を持たない。
-- codebook（4 値）と 256-entry の map / expand LUT（計 1280 bytes）を executor が保持する。
-- hot path allocation は 0。生成は startup のみ。
-- INT2 object を作れない場合は silent fallback せず error を返す。
-
-codebook:
-
-- source は target PSQ8 lm_head。GPU 上で 256 bin の重み付き histogram
-  （weight = 出現数 × block scale²、固定小数点 uint64）を作る。
-- host 側で finite な E4M3 候補に対する weighted Lloyd-Max（4 centroid）を行い、
-  最後に各 centroid を最寄りの valid E4M3 byte へ snap する。
-  `PHASESHIFT_DFLASH2_INT2_CODEBOOK=symmetric` では {-b,-a,+a,+b} を weighted squared
-  error で総当たりする。既定は Lloyd-Max。
-- 決定論的（同じ head なら同じ 4 byte）。
-
-packing:
-
-- `psq8 e4m3 code -> nearest codebook index`（256 B の map LUT）を全要素へ適用し、
-  4 code / byte（bits 1:0 = w0, 3:2 = w1, 5:4 = w2, 7:6 = w3）で pack する。
-- layout は PSQ8 preshuffle をそのまま 1/4 に圧縮したもので、16-row tile / 32-k block
-  あたり 512 B → 128 B。各 thread が読む 8 byte PSQ8 chunk は 2 byte INT2 chunk になる。
-- GPU repack（target PSQ8 codes を CPU に戻さない）。map/expand LUT は startup に
-  CPU で作り upload する。
-
-coarse kernel:
-
-- `launch_dflash2_int2_coarse_head` は PSQ8 W8A8 kernel と同一構造で、W 側だけを
-  「packed byte → expand LUT（256 × uint32）で 4 E4M3 byte に展開」する。
-  activation は E4M3 preshuffle を共有し、A/B の WMMA と per-row activation scale も
-  PSQ8 kernel と同一。expand LUT は block 先頭で LDS に 1 KiB stage する。
-- したがって coarse の誤差は **codebook 近似のみ**であり、kernel 自体は
-  「INT2 を dequant した E4M3 行列」に対する PSQ8 W8A8 と bit-exact になる。
-
-coarse Top-N:
-
-- `launch_dflash2_coarse_topn` は 2 stage。stage 1 は `rows × partitions` の各 WG が担当
-  区間を走査し、per-thread top-16（register）から exact top-pool を選んで scratch へ書く。
-  stage 2 は 1 WG/row が `partitions × pool` を merge して exact top-pool を出す。
-- `partitions = ceil(vocab / (kDflash2Int2TopnThreads * kDflash2Int2TopnPerThread))`
-  （512 × 16 = 8192 要素/partition、最大 `kDflash2Int2MaxPartitions` = 128）。
-  これにより 1 thread の担当要素数が 16 以下となり、per-thread top-16 が exact になる。
-  launcher はこれを検証し、超える設定を `hipErrorInvalidValue` で拒否する
-  （暗黙に近似しない）。
-- tie は (logit desc, token id asc)。pool は `kDflash2TopKMaxK`(16) 以上
-  `kDflash2Int2MaxPool`(128) 以下で、既定 32。
-
-Radix Select Top-N:
-
-- `launch_dflash2_radix_topn` は full sort ではなく
-  threshold selection → exact N candidate extraction → small N sort である。
-- float32 ordered bits の 4 pass radix（31:24 → 7:0）。各 pass は
-  `rows × partitions` の histogram kernel と `rows` の select kernel。
-  prefix を満たす element だけを histogram し、上位 bucket から累積して
-  N 番目を含む bucket を確定する。4 pass 後に N 番目の exact float32 threshold が得られる。
-- `count_gt`（threshold より大）と `count_eq`（threshold と同値）を出し
-  `need = N - count_gt`。`count_eq > need` の場合にのみ、threshold と同一 float の
-  element を対象に token ID の radix selection（vocab 幅の 1 走査 bitmap）を行い、
-  同値が起きない通常ケースでは ID 側の追加走査を発生させない。
-- candidate は出力 buffer へ compact されて件数が正確に N になり、
-  `next_pow2(N)` の bitonic で key 降順に sort して出力する。
-- ordering contract は `detail::topn_key()` と完全互換（score 降順、同値は token id 昇順、
-  `+0/-0` 同値、NaN と `-INFINITY` の扱い、tail の `(id=0, -INFINITY)` 満たしを含む）。
-- scratch は init 時に
-  `dflash2_radix_topn_scratch_bytes(rows, partitions, vocab)` で決め、実行時に
-  `hipMalloc` しない。
-- 選択は `dflash2_radix_topn_preferred(pool)` が決める:
-  `PHASESHIFT_DFLASH2_RADIX_TOPN=0` で常に従来実装、`=1` で常に radix、
-  未指定では `pool >= kDflash2RadixTopnCrossoverPool`（= 64）で radix。
-  従来実装 `launch_dflash2_coarse_topn` は oracle / fallback として残す。
-
-PSQ8 exact rerank:
-
-- `launch_dflash2_psq8_candidate_rerank` は PSQ8 W8A8 kernel の weight row を
-  `candidate_ids[row][cand]` から直接引く（gather buffer を作らない）。activation 行は
-  block の draft row を全 lane で共有し、k 順序・scale・WMMA は本家と同一。出力は候補位置
-  `[rows, pool]` に書く。
-- 同じ PSQ8 行列の同じ候補に対する full head の logit と **bit-exact** である。
-- 1 WG = 1 warp、16 候補 × 1 draft row。pool=32 で 2 tile/row。
-
-small Top-16 と remap:
-
-- rerank logits 上の exact top-16 は `launch_dflash2_topk_f32_optimized` を vocab=pool で
-  使う。tie 規則は本家と同一。
-- **重要**: この kernel が返す id は rerank logits の index（= pool 内位置）である。
-  `launch_dflash2_int2_remap_pool_ids` で `pool_ids[row][position]` を引いて token id に
-  戻す。これを忘れると proposal が pool 位置を token id として返し、acceptance が 0 になる。
-  rerank / Top-16 / remap はそれぞれ独立した kernel launch である。
-
-env:
-
-- `PHASESHIFT_DFLASH2_INT2_HEAD`（0 = full PSQ8、1 = INT2、2 = diag。未指定時は0。明示した固定語彙が適合すれば1）
-- `PHASESHIFT_DFLASH2_DRAFT_RERANK`（pool。既定 32、[16, 128] に clamp）
-- `PHASESHIFT_DFLASH2_INT2_CODEBOOK`（`symmetric` で対称 codebook）
-- `PHASESHIFT_DFLASH2_INT2_DIAG` / `PHASESHIFT_DFLASH2_INT2_TIMING`（診断。既定 off）
-- INT2 有効時も target-only / Verify は INT2 コードパスを通らない。
-
-### 固定語彙profile
-
-one-shotとserve-stdioの両方で、target model directoryの`dflash2-draft-vocab.json`と
-`dflash2-draft-vocab.u32`を解決する。resolverはGPU allocationを行わず、選択したpathと
-INT2 modeを`DFlash2ExecutorConfig`へ渡す。診断はstderrへ出し、serveのJSON stdoutを汚さない。
-
-metadataは`schema_version=phaseshift-dflash2-vocab-v1`、`profile_id`、
-`vocab_file=dflash2-draft-vocab.u32`、`vocab_count`、`target_vocab_size`、`target_hidden_size`、
-`vocab_sha256`、`tokenizer_sha256`を持つ。payloadはlittle-endian uint32の昇順・重複なしID列で、
-件数は16の倍数、IDはtarget vocab内、件数はrerank pool以上である。
-未知schema、破損、部分配置、不正IDを黙って利用しない。
-
-固定語彙は既定off。`PHASESHIFT_DFLASH2_DRAFT_VOCAB`の未指定・空文字・0では標準profileを読まない。
-`INT2_HEAD=1`だけなら標準profileが配置済みでも全語彙INT2を使う。
-`DRAFT_VOCAB=1`を明示し、形状・payload hash・target tokenizer.jsonの実SHAが一致すれば、INT2＋固定語彙を使う。
-有効化時にprofileなし、または正常だが非適合なら、head未指定時はfull PSQ8、明示mode 1なら全語彙INT2を維持する。
-明示mode 0/2は標準profileより優先する。明示`DRAFT_VOCAB_FILE`はそれ自体がopt-inであり、
-raw ID列を受け付けmode 1へ接続する。FILEとmode 0/2または明示`DRAFT_VOCAB=0`の競合は拒否する。
-
-compact INT2 codesとscaleを元PSQ8の選択行から直接作る。codebookは全語彙PSQ8から導出し、
-coarseとTop-Nはlocal ID、rerankとCandidateSelectorはglobal IDを使う。Top-Nの直後にID mapで復元する。
-縮小PSQ8行列は持たない。`PHASESHIFT_DFLASH2_DRAFT_VOCAB_CHECK=1`は明示診断としてfull INT2/PSQ8
-対照へ照合し、追加buffer・同期・D2Hを伴うため性能測定では無効にする。
-
-profile作成者は、検証済みID列とtokenizerから配布用directoryを作れる。
-
-```sh
-python3 tools/quantization/prepare_draft_vocab.py pack \
-  --vocab-file /path/to/selected-ids.u32 --tokenizer /path/to/tokenizer.json \
-  --profile-id qwen3.8-27b-98304-v1 --model-vocab-size 248320 --hidden-size 5120 \
-  --source-manifest-sha256 <manifest-sha256> \
-  --notice docs/references/qwen38-draft-vocab-notice.txt --output-dir /path/to/new-bundle
-```
-
-packはコーパスからIDを選ぶtoolではない。集計レシピで作ったID列を包み、生成元NOTICEを付ける。
-installは`tokenizer_vocab_sha256`により表現形式に依存しないtoken→ID対応を確認し、配置先の
-`tokenizer_sha256`へmetadataを結び直す。token map digestはmodel.vocabとadded_tokensを統合し、
-`(id, UTF-8 token bytes)`順に`u32le(id) || u32le(byte length) || token bytes`をSHA-256へ入力する。
-推論時はtokenizerをPythonで処理せず、配置済みmetadataと実ファイルのSHAを照合する。
-
----
 
 ## Speculative transaction
 
@@ -1018,13 +864,6 @@ DFlash2 speculative decoding を有効化する唯一的な経路である。
 | `PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE` | 0 | 1 で base snapshot + full target rerun の参照 path |
 | `PHASESHIFT_DFLASH2_TOPK_REFERENCE` | 0 | 1 で reference top-k |
 | `PHASESHIFT_DFLASH2_ATTENTION_REFERENCE` | 0 | 1 で ring attention 参照実装 |
-| `PHASESHIFT_DFLASH2_INT2_HEAD` | 0 | 0でfull PSQ8、1でINT2、2でdiag。固定語彙の明示有効化時は未指定なら1 |
-| `PHASESHIFT_DFLASH2_DRAFT_VOCAB` | 0 | 1で標準固定語彙profileを検証して有効化 |
-| `PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE` | 未指定 | 独自のraw ID列を明示指定 |
-| `PHASESHIFT_DFLASH2_DRAFT_RERANK` | 32 | rerank pool（[16, 128] に clamp） |
-| `PHASESHIFT_DFLASH2_INT2_CODEBOOK` | lloyd | `symmetric` で対称 codebook |
-| `PHASESHIFT_DFLASH2_INT2_DIAG` | off | INT2 診断出力 |
-| `PHASESHIFT_DFLASH2_INT2_TIMING` | off | INT2 区間 timing 出力 |
 | `PHASESHIFT_DFLASH2_RADIX_TOPN` | auto | 0 で従来 topn、1 で radix topn、未指定は pool crossover |
 | `PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT` | 0（無効） | constrained LM head 候補展開の opt-in |
 
@@ -1092,8 +931,6 @@ DFlash mode の出力を扱える。
 - constraint の提案側適用は現在の grammar 状態（draft 未確定）を全 row に使う
   近似である。row 1 以降の許可集合は draft prefix 依存の厳密な値と一致しない場合が
   あり、正しさは target verify の mask が担保する。
-- draft vocab profile（`PHASESHIFT_DFLASH2_DRAFT_VOCAB`）は constraint と併用できない。
-  該当経路では `Status::unsupported` を返す。
 - prefix cache の ring pool は serve 開始時に arena から `max_entries` × ring bytes
   を消費する。
 - target 層数 > 最大 tap、`num_target_layer_ids == 5`、`conv_kernel_size == 2` を要求する。
@@ -1102,7 +939,6 @@ DFlash mode の出力を扱える。
   ring 参照実装へフォールバックする（不成立自体はエラーではない）。
 - GDN history は `history bytes > 2.25 GiB` のとき create を FAIL する。
   27B geometry では `num_drafts <= 15` が上限になる。
-- INT2 coarse head は preshuffled な PSQ8 lm_head を要求する。作れない場合は error。
 - PSQ4 drafter の activation 量子化は allowlist geometry を要求し、非対応時は error。
 - `--dflash2-drafts` は `block_size - 1` 以下。`block_size <= max_scheduled_tokens` を
   満たす必要がある。
@@ -1123,8 +959,8 @@ DFlash mode の出力を扱える。
   - `feature_concat` / `grouped_dynamic_conv` / `rmsnorm` / `rope` /
     `swiglu` / `attention` / `kv_ring` / `noise_input`
   - `candidate_selector` / `topk` / `topk_optimized`
-  - `draft_head_int2` / `coarse_topn` / `radix_topn`
-  - `detail/`（`coarse_head_device.h` / `coarse_topn_device.h` /
+  - `radix_topn`
+  - `detail/`（`coarse_topn_device.h` /
     `psq8_rerank_device.h` / `rmsnorm_device.h` / `rope_device.h` / `swiglu_device.h`）
 
 ### runtime
@@ -1155,8 +991,7 @@ DFlash mode の出力を扱える。
   `test_dflash2_rope` / `test_dflash2_attention` / `test_dflash2_topk` /
   `test_dflash2_candidate_selector` / `test_dflash2_kv_ring` /
   `test_dflash2_attention_ring` / `test_dflash2_psq4_shapes` /
-  `test_dflash2_int2_pack` / `test_dflash2_int2_coarse_head` /
-  `test_dflash2_coarse_topn` / `test_dflash2_radix_topn` /
+  `test_dflash2_radix_topn` /
   `test_dflash2_psq8_rerank` /
   `test_gdn_spec_history` / `test_gdn_recurrence_decode1`
 - perf（label `gpu1;perf`、正しさテストと分離）: `test_dflash2_radix_topn_perf`

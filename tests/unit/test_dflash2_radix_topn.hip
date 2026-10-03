@@ -125,28 +125,16 @@ struct DeviceBuffers {
     float* logits = nullptr;
     int32_t* ids = nullptr;
     float* values = nullptr;
-    int32_t* legacy_ids = nullptr;
-    float* legacy_values = nullptr;
-    int32_t* legacy_scratch_ids = nullptr;
-    float* legacy_scratch_values = nullptr;
     void* radix_scratch = nullptr;
 
     void release() {
         (void)hipFree(logits);
         (void)hipFree(ids);
         (void)hipFree(values);
-        (void)hipFree(legacy_ids);
-        (void)hipFree(legacy_values);
-        (void)hipFree(legacy_scratch_ids);
-        (void)hipFree(legacy_scratch_values);
         (void)hipFree(radix_scratch);
         logits = nullptr;
         ids = nullptr;
         values = nullptr;
-        legacy_ids = nullptr;
-        legacy_values = nullptr;
-        legacy_scratch_ids = nullptr;
-        legacy_scratch_values = nullptr;
         radix_scratch = nullptr;
     }
 };
@@ -156,12 +144,8 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
     const uint32_t radix_partitions = partitions_override != 0u
                                           ? partitions_override
                                           : ps::kernel::dflash2_radix_default_partitions(vocab);
-    const uint32_t legacy_partitions = partitions_override != 0u
-                                           ? partitions_override
-                                           : ps::kernel::dflash2_int2_default_partitions(vocab);
-    const uint32_t legacy_scratch_stride = legacy_partitions * ps::kernel::kDflash2Int2MaxPool;
     const std::size_t out_elems = static_cast<std::size_t>(rows) * pool;
-    const std::size_t legacy_scratch_elems = static_cast<std::size_t>(rows) * legacy_scratch_stride;
+
     const std::size_t radix_scratch_bytes =
         ps::kernel::dflash2_radix_topn_scratch_bytes(rows, radix_partitions, vocab);
 
@@ -176,12 +160,6 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
         hipMalloc(&dev.logits, logits.size() * sizeof(float)) == hipSuccess &&
         hipMalloc(&dev.ids, out_elems * sizeof(int32_t)) == hipSuccess &&
         hipMalloc(&dev.values, out_elems * sizeof(float)) == hipSuccess &&
-        hipMalloc(&dev.legacy_ids, out_elems * sizeof(int32_t)) == hipSuccess &&
-        hipMalloc(&dev.legacy_values, out_elems * sizeof(float)) == hipSuccess &&
-        hipMalloc(&dev.legacy_scratch_ids, legacy_scratch_elems * sizeof(int32_t)) ==
-            hipSuccess &&
-        hipMalloc(&dev.legacy_scratch_values, legacy_scratch_elems * sizeof(float)) ==
-            hipSuccess &&
         hipMalloc(&dev.radix_scratch, radix_scratch_bytes) == hipSuccess;
     if (!alloc_ok) {
         dev.release();
@@ -192,42 +170,26 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
                     hipMemcpyHostToDevice);
     (void)hipMemset(dev.ids, 0, out_elems * sizeof(int32_t));
     (void)hipMemset(dev.values, 0, out_elems * sizeof(float));
-    (void)hipMemset(dev.legacy_ids, 0, out_elems * sizeof(int32_t));
-    (void)hipMemset(dev.legacy_values, 0, out_elems * sizeof(float));
     (void)hipMemset(dev.radix_scratch, 0, radix_scratch_bytes);
 
-    hipError_t legacy_err = ps::kernel::launch_dflash2_coarse_topn(
-        dev.logits, rows, vocab, vocab, pool, dev.legacy_ids, dev.legacy_values,
-        dev.legacy_scratch_ids, dev.legacy_scratch_values, legacy_scratch_stride,
-        legacy_partitions, nullptr);
     hipError_t radix_err = ps::kernel::launch_dflash2_radix_topn(
         dev.logits, rows, vocab, vocab, pool, dev.ids, dev.values, radix_partitions,
         dev.radix_scratch, radix_scratch_bytes, nullptr);
     hipError_t sync_err = hipDeviceSynchronize();
-    if (legacy_err != hipSuccess || radix_err != hipSuccess || sync_err != hipSuccess) {
-        std::printf("FAIL: %s launch legacy=%s radix=%s sync=%s\n", tag,
-                    hipGetErrorString(legacy_err), hipGetErrorString(radix_err),
-                    hipGetErrorString(sync_err));
+    if (radix_err != hipSuccess || sync_err != hipSuccess) {
+        std::printf("FAIL: %s launch radix=%s sync=%s\n", tag,
+                    hipGetErrorString(radix_err), hipGetErrorString(sync_err));
         dev.release();
         return false;
     }
 
     std::vector<int32_t> ids(out_elems, 0);
     std::vector<float> values(out_elems, 0.0f);
-    std::vector<int32_t> legacy_ids(out_elems, 0);
-    std::vector<float> legacy_values(out_elems, 0.0f);
     (void)hipMemcpy(ids.data(), dev.ids, out_elems * sizeof(int32_t), hipMemcpyDeviceToHost);
-    (void)hipMemcpy(values.data(), dev.values, out_elems * sizeof(float),
-                    hipMemcpyDeviceToHost);
-    (void)hipMemcpy(legacy_ids.data(), dev.legacy_ids, out_elems * sizeof(int32_t),
-                    hipMemcpyDeviceToHost);
-    (void)hipMemcpy(legacy_values.data(), dev.legacy_values, out_elems * sizeof(float),
-                    hipMemcpyDeviceToHost);
+    (void)hipMemcpy(values.data(), dev.values, out_elems * sizeof(float), hipMemcpyDeviceToHost);
 
     bool radix_ids_exact = true;
     bool radix_bits_exact = true;
-    bool legacy_ids_exact = true;
-    bool legacy_bits_exact = true;
     bool unique = true;
     bool full_rows = true;
     for (uint32_t r = 0u; r < rows; ++r) {
@@ -247,10 +209,6 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
                 radix_ids_exact = false;
             if (std::memcmp(&values[idx], &oracle.values[i], sizeof(float)) != 0)
                 radix_bits_exact = false;
-            if (legacy_ids[idx] != oracle.ids[i])
-                legacy_ids_exact = false;
-            if (std::memcmp(&legacy_values[idx], &oracle.values[i], sizeof(float)) != 0)
-                legacy_bits_exact = false;
             for (uint32_t j = i + 1u; j < pool; ++j) {
                 if (ids[idx] != 0 && ids[idx] == ids[static_cast<std::size_t>(r) * pool + j])
                     unique = false;
@@ -265,10 +223,6 @@ bool run_case(uint32_t rows, uint32_t vocab, uint32_t pool, Mode mode, uint32_t 
     check(radix_ids_exact, label);
     std::snprintf(label, sizeof(label), "%s radix logits bit exact", tag);
     check(radix_bits_exact, label);
-    std::snprintf(label, sizeof(label), "%s legacy ids exact", tag);
-    check(legacy_ids_exact, label);
-    std::snprintf(label, sizeof(label), "%s legacy logits bit exact", tag);
-    check(legacy_bits_exact, label);
     std::snprintf(label, sizeof(label), "%s radix ids unique", tag);
     check(unique, label);
 

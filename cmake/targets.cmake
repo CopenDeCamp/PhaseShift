@@ -105,6 +105,7 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/optimized/sampling.hip
     src/phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.hip
     src/phaseshift/models/qwen35/kernels/optimized/constraint_candidates.hip
+    src/phaseshift/models/qwen35/kernels/optimized/psq8_candidate_rerank.hip
     src/phaseshift/models/qwen35/kernels/dflash2/candidate_selector.hip
     src/phaseshift/models/qwen35/kernels/dflash2/feature_concat.hip
     src/phaseshift/models/qwen35/kernels/dflash2/grouped_dynamic_conv.hip
@@ -112,8 +113,6 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/dflash2/rmsnorm.hip
     src/phaseshift/models/qwen35/kernels/dflash2/topk.hip
     src/phaseshift/models/qwen35/kernels/dflash2/topk_optimized.hip
-    src/phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.hip
-    src/phaseshift/models/qwen35/kernels/dflash2/coarse_topn.hip
     src/phaseshift/models/qwen35/kernels/dflash2/radix_topn.hip
     src/phaseshift/models/qwen35/kernels/dflash2/swiglu.hip
     src/phaseshift/models/qwen35/kernels/dflash2/attention.hip
@@ -161,7 +160,6 @@ set(
     src/phaseshift/models/qwen35/model/qwen35_model.cpp
     src/phaseshift/models/qwen35/model/lower_to_primitives.cpp
     src/phaseshift/models/qwen35/dflash2/config.cpp
-    src/phaseshift/models/qwen35/dflash2/draft_vocab_profile.cpp
     src/phaseshift/models/qwen35/dflash2/weights.cpp
     src/phaseshift/models/qwen35/dflash2/context_state.hip
 )

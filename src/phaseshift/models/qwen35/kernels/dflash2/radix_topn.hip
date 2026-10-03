@@ -1,4 +1,4 @@
-#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/radix_topn.h>
 
 #include "detail/coarse_topn_device.h"
 
@@ -397,7 +397,7 @@ hipError_t launch_dflash2_radix_topn(
         return hipErrorInvalidValue;
     if (rows == 0u)
         return hipSuccess;
-    if (pool == 0u || pool > kDflash2Int2MaxPool)
+    if (pool == 0u || pool > kDflash2RadixTopnMaxPool)
         return hipErrorInvalidValue;
     if (vocab == 0u || row_stride < vocab)
         return hipErrorInvalidValue;

@@ -3,7 +3,7 @@
 #include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
 #include <phaseshift/models/qwen35/kernels/optimized/activation_quantize.h>
 #include <phaseshift/models/qwen35/kernels/optimized/constraint_candidates.h>
-#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/optimized/psq8_candidate_rerank.h>
 #include <phaseshift/runtime/program/int8_activation_workspace.h>
 #include <hip/hip_runtime.h>
 

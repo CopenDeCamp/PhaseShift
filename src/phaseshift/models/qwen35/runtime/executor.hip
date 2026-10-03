@@ -27,7 +27,7 @@
 #include <atomic>
 #include <new>
 #include <phaseshift/models/qwen35/runtime/embedding_selector.h>
-#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/radix_topn.h>
 #include <phaseshift/models/qwen35/kernels/optimized/sampling_common.h>
 
 namespace ps {

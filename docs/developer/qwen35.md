@@ -311,8 +311,7 @@ Auto モードでは `execute_program` が `constraint_lm_head_exact`、単体 l
 制約を無視する fallback は無い。
 
 経路: activation quantize → constraint mask から allowed token を token id 昇順に
-candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。INT2 coarse を
-計算しない。候補集合が全 allowed token を含む限り、full PSQ8 の constrained argmax と
+candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。候補集合が全 allowed token を含む限り、full PSQ8 の constrained argmax と
 同じ token を返す（exact）。candidate capacity は batch 内の `max(allowed)`、
 バッファは `kConstraintLmHeadExactMaxAllowed` で確保する。
 
