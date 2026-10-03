@@ -93,6 +93,21 @@ int main() {
     check(sel(DT::F32, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
               1, 6144, 256, 1) == RmsNormImplementation::Correctness,
           "27B GDN norm wrong group -> Correctness");
+    check(sel(DT::F32, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              1, 3072, 128, 1) == RmsNormImplementation::Optimized,
+          "27b tp2 GDN norm F=3072 G=128 rows=1 -> Optimized");
+    check(sel(DT::F32, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              1, 3072, 128, 2048) == RmsNormImplementation::Optimized,
+          "27b tp2 GDN norm rows=2048 -> Optimized");
+    check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              0, 512, 256, 1) == RmsNormImplementation::Optimized,
+          "27b tp2 K norm F=512 G=256 rows=1 -> Optimized");
+    check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              0, 3072, 256, 1) == RmsNormImplementation::Optimized,
+          "27b tp2 q_norm F=3072 G=256 rows=1 -> Optimized");
+    check(sel(DT::BF16, DT::F32, DT::BF16, RmsNormSelectorWeightLayout::PerGroup,
+              0, 3072, 256, 2049) == RmsNormImplementation::Correctness,
+          "27b tp2 q_norm rows=2049 -> Correctness");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

@@ -58,6 +58,12 @@ int main() {
           "F32 input -> Correctness");
     check(sel(DT::BF16, DT::BF16, 10240u, 3u, 1u, 1u, 1u) == GdnConvImplementation::Correctness,
           "BF16 output -> Correctness");
+    check(sel(DT::BF16, DT::F32, 5120u, 3u, 1u, 1u, 1u) == GdnConvImplementation::Optimized,
+          "27b tp2 decode -> Optimized");
+    check(sel(DT::BF16, DT::F32, 5120u, 3u, 64u, 1u, 64u) == GdnConvImplementation::Optimized,
+          "27b tp2 prefill -> Optimized");
+    check(sel(DT::BF16, DT::F32, 5120u, 3u, 2049u, 1u, 1u) == GdnConvImplementation::Correctness,
+          "27b tp2 rows=2049 -> Correctness");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

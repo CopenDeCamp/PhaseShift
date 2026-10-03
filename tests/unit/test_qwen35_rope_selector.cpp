@@ -57,6 +57,14 @@ int main() {
           "F32 output -> Correctness");
     check(sel(DT::BF16, DT::BF16, 6144u, 256u, 64u, 1u) == RopeImplementation::Correctness,
           "BF16 input -> Correctness");
+    check(sel(DT::F32, DT::BF16, 3072u, 256u, 64u, 1u) == RopeImplementation::Optimized,
+          "27b tp2 q rope -> Optimized");
+    check(sel(DT::F32, DT::BF16, 512u, 256u, 64u, 1u) == RopeImplementation::Optimized,
+          "27b tp2 k rope -> Optimized");
+    check(sel(DT::F32, DT::BF16, 3072u, 256u, 64u, 2048u) == RopeImplementation::Optimized,
+          "27b tp2 q rope rows=2048 -> Optimized");
+    check(sel(DT::F32, DT::BF16, 3072u, 256u, 64u, 2049u) == RopeImplementation::Correctness,
+          "27b tp2 rows=2049 -> Correctness");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

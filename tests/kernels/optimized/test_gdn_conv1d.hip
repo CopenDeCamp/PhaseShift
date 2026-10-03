@@ -292,6 +292,10 @@ int main() {
     run({"conv-tail", 300, 0, 1, 2, {{0, 0, 4}}, 4, 0, 0, 110});
     run({"conv-tail-255", 255, 0, 1, 1, {{0, 0, 3}}, 3, 0, 0, 111});
     run({"slot-ne-reqidx", 8192, 0, 1, 4, {{2, 0, 1}}, 1, 0, 0, 112});
+    run({"27b-tp2-decode", 5120, 0, 1, 4, {{0, 0, 1}}, 1, 0, 0, 201});
+    run({"27b-tp2-prefill", 5120, 0, 1, 1, {{0, 0, 128}}, 128, 0, 0, 202});
+    run({"27b-tp2-decode-multi", 5120, 0, 2, 4,
+         {{0, 0, 1}, {1, 1, 1}, {2, 2, 1}, {3, 3, 1}}, 4, 0, 0, 203});
 
     std::printf("%s: %d failures\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;

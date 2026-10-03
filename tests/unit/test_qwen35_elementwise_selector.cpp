@@ -112,6 +112,30 @@ int main() {
     expect(select_elementwise_implementation(
                mk(ElementwiseProfile::ScaleF32, 1, 4096u, 0)),
            C, "scale wrong features");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SiluBf16ToF32, 1, 3072u, 0)),
+           O, "tp2 silu-b2f 3072 rows=1");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SiluF32ToBf16, 1, 5120u, 0)),
+           O, "tp2 silu-f2b 5120 rows=1");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SigmoidBf16ToF32, 1, 3072u, 0)),
+           O, "tp2 sigmoid 3072 rows=1");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::MulF32F32ToBf16, 1, 3072u, 0)),
+           O, "tp2 mul 3072 rows=1");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 1, 8704u, 0)),
+           O, "tp2 swiglu 8704 rows=1");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::ScaleF32, 1, 1024u, 0)),
+           O, "tp2 scale 1024 rows=1");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SplitBf16InterleavedHeads, 1, 3072u, 256u)),
+           O, "tp2 split-int 3072 aux=256 rows=1");
+    expect(select_elementwise_implementation(
+               mk(ElementwiseProfile::SwigluBf16, 2049, 8704u, 0)),
+           C, "tp2 swiglu 8704 rows=2049 out of range");
     std::printf("%s: %d failures\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

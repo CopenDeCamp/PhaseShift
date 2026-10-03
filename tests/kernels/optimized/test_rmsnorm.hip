@@ -404,6 +404,30 @@ int main() {
         }
     }
 
+    {
+        char label[200];
+        Config tp2_gdn = f32_f32_pg_d;
+        tp2_gdn.weight_elements = 128;
+        Config tp2_pg256 = bf16_f32_pg_op;
+        tp2_pg256.weight_elements = 256;
+
+        std::snprintf(label, sizeof(label), "tp2 GDN norm F=3072 G=128 rows=1");
+        run_case(tp2_gdn, 1, 3072, 128, 3072, 3072, 1e-6, 900u, arena, stream, label,
+                 false);
+        std::snprintf(label, sizeof(label), "tp2 GDN norm F=3072 G=128 rows=64");
+        run_case(tp2_gdn, 64, 3072, 128, 3072, 3072, 1e-6, 901u, arena, stream, label,
+                 false);
+        std::snprintf(label, sizeof(label), "tp2 K norm F=512 G=256 rows=1");
+        run_case(tp2_pg256, 1, 512, 256, 512, 512, 1e-6, 902u, arena, stream, label,
+                 false);
+        std::snprintf(label, sizeof(label), "tp2 q_norm F=3072 G=256 rows=1");
+        run_case(tp2_pg256, 1, 3072, 256, 3072, 3072, 1e-6, 903u, arena, stream, label,
+                 false);
+        std::snprintf(label, sizeof(label), "tp2 q_norm F=3072 G=256 rows=64");
+        run_case(tp2_pg256, 64, 3072, 256, 3072, 3072, 1e-6, 904u, arena, stream, label,
+                 false);
+    }
+
     std::printf("\n=== %d passed, %d failed ===\n", passed, failed);
     return failed == 0 ? 0 : 1;
 }

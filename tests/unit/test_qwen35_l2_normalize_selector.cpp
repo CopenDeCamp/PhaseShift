@@ -51,6 +51,15 @@ int main() {
     check(sel(DT::BF16, DT::BF16, 2048u, 128u, 1u) == L2NormalizeImplementation::Correctness,
           "BF16 output -> Correctness");
 
+    check(sel(DT::BF16, DT::F32, 1024u, 128u, 1u) == L2NormalizeImplementation::Optimized,
+          "27b tp2 GDN qk norm F=1024 G=128 rows=1 -> Optimized");
+    check(sel(DT::BF16, DT::F32, 1024u, 128u, 2048u) == L2NormalizeImplementation::Optimized,
+          "27b tp2 GDN qk norm rows=2048 -> Optimized");
+    check(sel(DT::BF16, DT::F32, 1024u, 128u, 2049u) == L2NormalizeImplementation::Correctness,
+          "27b tp2 rows=2049 -> Correctness");
+    check(sel(DT::BF16, DT::F32, 1024u, 64u, 1u) == L2NormalizeImplementation::Correctness,
+          "27b tp2 wrong group -> Correctness");
+
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

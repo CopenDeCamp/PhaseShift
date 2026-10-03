@@ -1,6 +1,6 @@
 > Status: historical R&D record（現在の仕様・性能値ではない。現在の仕様は `docs/developer/`、現在の性能は `docs/perf/` を参照）
 
-# TP-Exec-2: TP=2 Optimized Shape Coverage（Phase A）
+# TP-Exec-2: TP=2 Optimized Shape Coverage
 
 ## 目的
 
@@ -83,27 +83,66 @@ page=16)` を追加。
 
 ## 結果（Qwen3.8-27B-PSQ, greedy, 投機 OFF, features=5120/bf16）
 
-変更前後（同一 harness、context=64 / 2048）:
+同一 harness（context=64 / 2048、new_tokens=32）での変化:
 
 ```text
-context   metric     before      after
-64        prefill    6.93 s      0.202 s
-64        decode     1.59 tok/s  7.50 tok/s
-2048      prefill    218.7 s     1.494 s
-2048      decode     0.38 tok/s  7.49 tok/s
+context   metric     before     round1      round2
+64        prefill    6.93 s     0.202 s     0.0589 s
+64        decode     1.59       7.50        36.54 tok/s
+2048      prefill    218.7 s    1.494 s     0.573 s
+2048      decode     0.38       7.49        35.62 tok/s
 ```
 
-参考: TP=1（単一 GPU）の non-spec decode は context=2048 で 27.55 tok/s。
-TP=2 decode は context 非依存（7.5 tok/s）で、attention ではなく固定 per-token
-コストが支配的になった。
+round2 後は TP=1 を上回る:
 
-## 残り（Phase A スコープ外）
+```text
+context   metric     TP=1        TP=2 (round2)
+64        prefill    0.0587 s    0.0589 s
+64        decode     28.05       36.54 tok/s
+2048      prefill    0.870 s     0.573 s
+2048      decode     27.48       35.62 tok/s
+```
 
-`KERNEL_TRACE_FALLBACK` には引き続き KV_APPEND / ROPE / GDN conv1d /
-L2_NORMALIZE / RMS_NORM / elementwise（SILU / SWIGLU / MUL / SCALE / SPLIT /
-SIGMOID）が残る。これらは Phase A の対象外。GDN recurrence 自体は optimized で
-あるため、Phase B（GDN decode1 の TP=2 開放）は今回の decode ボトルネックでは
-ないと判断し、見送った。
+## 第2回: 残りの correctness fallback（rope / kv_append / l2 / gdn_conv / rmsnorm / elementwise）
+
+round1 後も `KERNEL_TRACE_FALLBACK` が残っていたため、各 dispatch に
+`PHASESHIFT_SELECTOR_DEBUG` による一時的な入力出力を入れて実測し、
+測定後にその debug 出力を除去してから rule を追加した。
+
+実測した TP=2 の selector 入力（enum 値は `ValueDType{BF16=0, F32=1}`、
+`RmsNormSelectorWeightLayout{None, PerFeature, PerGroup}`、
+`ElementwiseProfile` の enum 順に注意）:
+
+| selector | 追加した rule |
+|---|---|
+| rope | `F32->BF16, features=3072 / 512, head_dim=256, rotary=64, rows 1..2048` |
+| kv_append | `BF16, kv_heads=2, head_dim=256, page=16, rows 1..2048` |
+| l2_normalize | `BF16->F32, features=1024, group=128, rows 1..2048` |
+| gdn_conv | `BF16->F32, conv_dim=5120, history=3, rows/requests 1..2048` |
+| rmsnorm | `F32->F32 PG mode=1 F=3072 G=128`、`BF16->F32 PG mode=0 F=512 G=256`、`F=3072 G=256` |
+| elementwise | `Swiglu 8704` / `SiluB2F 3072` / `SiluF2B 5120` / `Sigmoid 3072` / `Mul 3072` / `Scale 1024` / `SplitBf16InterleavedHeads 3072 aux=256` |
+
+いずれも TP=1 の既存 rule がちょうど倍半分になった値に対応し、
+実行時に観測した組合せだけを追加している。
+
+検証:
+
+- selector unit test 6 件（`rope` / `kv_append` / `l2_normalize` / `gdn_conv` /
+  `rmsnorm` / `elementwise`）に TP=2 の positive と境界（rows 2049 → Correctness）を追加。
+- kernel test 6 件（`test_rope` / `test_kv_append` / `test_l2_normalize` /
+  `test_gdn_conv1d` / `test_rmsnorm` / `test_elementwise`）に TP=2 の実 shape を追加。
+  `test_rmsnorm` は PER_GROUP の場合 `Config.weight_elements` に
+  `G` を与えないと weight ベクタが空になりクラッシュするため、この点を明示した。
+- runtime（`PHASESHIFT_LINEAR_DEBUG=1` / `PHASESHIFT_QWEN35_KERNEL_TRACE=1`）:
+  `KERNEL_TRACE_FALLBACK` が **0 件**、`LINEAR_SELECT_MISS` 0、
+  paged-attention の envelope 警告 0。
+- correctness gate 4/4 PASS、required acceptance 124/124 PASS。
+
+### 現在残るもの
+
+`KV_APPEND / ROPE / GDN conv1d / L2_NORMALIZE / RMS_NORM / elementwise` の
+correctness fallback は 0 になった。`RcclTpTransport` は従来どおり未導入、
+GDN decode1 の TP=2 開放（Phase B）は未実施。
 
 ## 変更ファイル
 
@@ -119,4 +158,22 @@ tests/kernels/optimized/test_gemm_bf16_wmma.hip
 tests/kernels/optimized/test_gemm_psq4_w4a8_wmma.hip
 tests/kernels/optimized/test_gemm_psq8_w8a8_wmma.hip
 tests/kernels/optimized/test_gdn_recurrence.hip
+src/phaseshift/models/qwen35/runtime/rope_selector.cpp
+tests/unit/test_qwen35_rope_selector.cpp
+src/phaseshift/models/qwen35/runtime/kv_append_selector.cpp
+tests/unit/test_qwen35_kv_append_selector.cpp
+src/phaseshift/models/qwen35/runtime/l2_normalize_selector.cpp
+tests/unit/test_qwen35_l2_normalize_selector.cpp
+src/phaseshift/models/qwen35/runtime/gdn_conv_selector.cpp
+tests/unit/test_qwen35_gdn_conv_selector.cpp
+src/phaseshift/models/qwen35/runtime/rmsnorm_selector.cpp
+tests/unit/test_qwen35_rmsnorm_selector.cpp
+src/phaseshift/models/qwen35/runtime/elementwise_selector.cpp
+tests/unit/test_qwen35_elementwise_selector.cpp
+tests/kernels/optimized/test_rope.hip
+tests/kernels/optimized/test_kv_append.hip
+tests/kernels/optimized/test_l2_normalize.hip
+tests/kernels/optimized/test_gdn_conv1d.hip
+tests/kernels/optimized/test_rmsnorm.hip
+tests/kernels/optimized/test_elementwise.hip
 ```

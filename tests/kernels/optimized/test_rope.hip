@@ -343,6 +343,11 @@ int main() {
         {"q-4b-r1", 1, 4096, 256, 64, 0, 0, 1.0e7f, 9, PosMode::Row},
         {"q-theta-small", 4, 6144, 256, 64, 0, 0, 5.0e5f, 10, PosMode::Row},
         {"full-rotary", 2, 512, 256, 256, 0, 0, 1.0e7f, 11, PosMode::Row},
+        {"q-tp2-r1", 1, 3072, 256, 64, 0, 0, 1.0e7f, 20, PosMode::Row},
+        {"k-tp2-r1", 1, 512, 256, 64, 0, 0, 1.0e7f, 21, PosMode::Row},
+        {"q-tp2-r64", 64, 3072, 256, 64, 0, 0, 1.0e7f, 22, PosMode::Row},
+        {"q-tp2-r2048", 2048, 3072, 256, 64, 0, 0, 1.0e7f, 23, PosMode::Row},
+        {"k-tp2-r64", 64, 512, 256, 64, 0, 0, 1.0e7f, 24, PosMode::Row},
     };
     for (const auto& c : cases) {
         if (run_case(c)) ++passed;

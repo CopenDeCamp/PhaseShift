@@ -15,6 +15,8 @@ struct L2NormalizeRule {
 constexpr L2NormalizeRule kRules[] = {
     { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
       2048u, 128u, 1u, 2048u },
+    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+      1024u, 128u, 1u, 2048u },
 };
 
 }  // namespace

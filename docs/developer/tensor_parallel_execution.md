@@ -285,10 +285,10 @@ prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
   `unsupported` で拒否する）。descriptor / plan builder は任意の tp_size を
   表現できるが、execution runtime まで tp_size=4 対応済みとは表現しない。
 - TP=2 の local geometry は optimized selector の validated allowlist に含める。
-  現在の対象は Linear（`linear_selector`）/ Paged Attention
-  （`paged_attention_selector`）/ GDN Recurrence（`gdn_recurrence_selector`）。
+  現在の対象は Linear / Paged Attention / GDN Recurrence / Rope / KV Append /
+  L2 Normalize / GDN conv1d / RMSNorm / Elementwise の全 selector で、
   TP=2 で新たに必要になった shape は optimized kernel test で検証してから
-  個別に追加し、未知 shape を自動許可しない。shape と family の対応は
+  個別に追加し、未知 shape を自動許可しない。shape と rule の対応は
   [../rnd/tp_exec2_shape_coverage.md](../rnd/tp_exec2_shape_coverage.md) を参照。
 - device 不足は明示エラー（bench）または skip（test runner 77）。
 - 異種 GPU は未サポート（同一 RDNA4 を前提。異なる場合は unsupported 方針）。

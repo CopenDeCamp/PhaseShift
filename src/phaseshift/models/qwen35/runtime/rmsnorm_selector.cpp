@@ -40,6 +40,15 @@ constexpr RmsNormRule kRmsNormRules[] = {
     { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
       ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
       0, 6144, 256, 1, kMeasuredMaxRows },
+    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::F32,
+      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+      1, 3072, 128, 1, kMeasuredMaxRows },
+    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+      0, 512, 256, 1, kMeasuredMaxRows },
+    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+      ::ps::runtime::ValueDType::BF16, RmsNormSelectorWeightLayout::PerGroup,
+      0, 3072, 256, 1, kMeasuredMaxRows },
 };
 
 }
