@@ -228,9 +228,6 @@ target_include_directories(phaseshift_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SO
 target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_xgrammar)
 target_compile_options(phaseshift_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 phaseshift_set_hip_archs(phaseshift_qwen35_runtime)
-if(PHASESHIFT_PA_PROBE)
-    target_compile_definitions(phaseshift_qwen35_runtime PRIVATE PHASESHIFT_PA_PROBE=1)
-endif()
 if(PHASESHIFT_HIP_GRAPH)
     set_source_files_properties(
         src/phaseshift/models/qwen35/runtime/program_executor.hip
