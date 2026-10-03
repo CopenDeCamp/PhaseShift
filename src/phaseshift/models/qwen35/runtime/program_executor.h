@@ -3,6 +3,7 @@
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/program/program.h>
 #include <phaseshift/runtime/staging_layout.h>
+#include <phaseshift/runtime/tp/tp_execution.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
@@ -109,6 +110,14 @@ Status execute_program_range(
     hipStream_t stream,
     size_t begin,
     size_t end);
+
+Status execute_program_tp_ranges(
+    const ::ps::runtime::Program& program,
+    HostExecutionContext& ctx,
+    hipStream_t stream,
+    const ::ps::runtime::TpExecutionSchedule& schedule,
+    ::ps::runtime::TpBarrierHook* barrier,
+    int rank);
 
 Result<HostResolvedValue> resolve_host_value(
     const ::ps::runtime::Program& program,

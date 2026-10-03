@@ -103,6 +103,7 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
         src/apps/bench/sampling.hip
         src/apps/bench/mtp.hip
         src/apps/bench/gpu_memory.hip
+        src/apps/bench/tp_reduce.cpp
     )
     phaseshift_set_rocm_rpath(phaseshift-bench)
     target_compile_features(phaseshift-bench PRIVATE cxx_std_20)

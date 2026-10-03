@@ -807,6 +807,204 @@ static void test_standalone_quantized_reader(gpu::GpuArena& arena, hipStream_t s
     }
 }
 
+static std::vector<float> make_psq_source(uint64_t rows, uint64_t k) {
+    std::mt19937 rng(static_cast<uint32_t>(rows * 131 + k));
+    std::uniform_real_distribution<float> dist(-8.0f, 8.0f);
+    std::vector<float> source(rows * k);
+    for (float& f : source) f = dist(rng);
+    return source;
+}
+
+static quantization::psq::CanonicalQuantStore quantize_source_rows(
+    quantization::QuantFormatId id, const std::vector<float>& source,
+    uint64_t rows, uint64_t k, uint64_t src_k, uint64_t row_begin, uint64_t col_begin) {
+    quantization::psq::CanonicalQuantStore store;
+    store.init(id, rows, k, k);
+    std::vector<float> row(k);
+    for (uint64_t r = 0; r < rows; ++r) {
+        std::memcpy(row.data(), source.data() + (row_begin + r) * src_k + col_begin,
+                    k * sizeof(float));
+        if (!store.quantize_row(static_cast<uint32_t>(r),
+                                std::span<const float>(row.data(), k))) {
+            fail("reference quantize_row");
+        }
+    }
+    if (!store.view().validate()) fail("reference canonical validate");
+    return store;
+}
+
+static void test_partition_plan_load(gpu::GpuArena& arena, hipStream_t stream) {
+    using namespace quantization;
+    using fpx::QuantizedEncoding;
+    const fs::path dir = make_case_dir("partition_plan");
+
+    QMatrixPlan m_psq4 = make_matrix(QuantizedEncoding::Psq4, 32, 64, "q4");
+    QMatrixPlan m_psq8 = make_matrix(QuantizedEncoding::Psq8, 32, 64, "q8");
+    QMatrixPlan m_bf = make_matrix(QuantizedEncoding::Bf16, 8, 16, "bf");
+
+    fpx::QuantizedManifest manifest;
+    manifest.architecture = "qwen35_dense";
+    manifest.preset = "psq";
+    manifest.source_dtype = "BF16";
+
+    std::vector<Planned> shard;
+    const auto add_matrix = [&](const std::string& logical, QMatrixPlan& plan) {
+        for (auto& p : plan.physical) {
+            Planned pl;
+            pl.name = p.physical;
+            pl.dtype = p.dtype;
+            pl.shape = p.shape;
+            pl.bytes = p.bytes;
+            shard.push_back(std::move(pl));
+        }
+        manifest.tensors[logical] = plan.meta;
+    };
+    add_matrix("q4", m_psq4);
+    add_matrix("q8", m_psq8);
+    add_matrix("bf", m_bf);
+
+    auto ms = fpx::serialize_quantized_manifest(manifest);
+    if (!ms.ok()) { fail("partition plan serialize: " + ms.status().message()); return; }
+    if (!write_shard((dir / "model.safetensors").string(), shard,
+                     {{"phaseshift.format", fpx::kQuantizedSafetensorsFormat},
+                      {"phaseshift.format_version",
+                       std::to_string(fpx::kQuantizedSafetensorsFormatVersion)},
+                      {"phaseshift.quantization_metadata", fpx::kQuantizedMetadataFile}})) {
+        return;
+    }
+    write_text((dir / fpx::kQuantizedMetadataFile).string(), ms.value());
+
+    auto rr = fpx::QuantizedModelReader::open(dir.string(), true);
+    if (!rr.ok()) { fail("partition plan reader open: " + rr.status().message()); return; }
+    fpx::QuantizedModelReader reader = rr.release();
+    check(weights::validate_quantized_model(reader).ok(), "partition plan model validates");
+
+    const auto make_desc = [](int32_t axis, std::vector<int64_t> shape,
+                              std::vector<weights::TensorPartitionRange> ranges) {
+        weights::TensorPartitionDesc d;
+        d.axis = axis;
+        d.index = 0;
+        d.count = 2;
+        d.global_shape = std::move(shape);
+        d.ranges = std::move(ranges);
+        return d;
+    };
+    weights::TensorPartitionPlan plan;
+    plan.tp_size = 2;
+    plan.tp_rank = 0;
+    plan.tensors["q4"] = make_desc(0, {32, 64}, {{0, 16}});
+    plan.tensors["q8"] = make_desc(1, {32, 64}, {{0, 32}});
+    plan.tensors["bf"] = make_desc(0, {8, 16}, {{0, 4}});
+    check(weights::validate_tensor_partition_plan(plan).ok(), "load plan validates");
+
+    const std::vector<float> source = make_psq_source(32, 64);
+    quantization::psq::CanonicalQuantStore ref_q4 =
+        quantize_source_rows(QuantFormatId::Psq4, source, 16, 64, 64, 0, 0);
+    quantization::psq::CanonicalQuantStore ref_q8 =
+        quantize_source_rows(QuantFormatId::Psq8, source, 32, 32, 64, 0, 0);
+    const std::vector<uint8_t> bf_source = bf16_bytes(8 * 16, 8 * 7 + 16);
+    const std::vector<uint8_t> ref_bf(bf_source.begin(), bf_source.begin() + 4 * 16 * 2);
+
+    {
+        weights::WeightLoadOptions opts;
+        opts.partition_plan = &plan;
+        auto wr = weights::load_quantized_matrix(reader, "q4", arena, stream, opts);
+        if (!wr.ok()) { fail("partition q4 load: " + wr.status().message()); }
+        else {
+            weights::MatrixWeight m = wr.release();
+            check_eq_u64(m.rows, 16, "partition q4 local rows");
+            check_eq_u64(m.cols, 64, "partition q4 local cols");
+            check_eq_u64(m.k_padded, 64, "partition q4 local k_padded");
+            check_eq_u64(m.weight_scale_group, 32, "partition q4 wsg");
+            check(m.preshuffled, "partition q4 preshuffled");
+            check(m.partition.has_value(), "partition q4 keeps partition");
+            if (m.partition) {
+                check(*m.partition == plan.tensors.at("q4"), "partition q4 equals plan");
+            }
+            const auto n = expect_native(QuantFormatId::Psq4, ref_q4.codes,
+                                         ref_q4.metadata1, 16, 64);
+            check_matrix_bytes(m, n.codes, n.metadata1, "partition q4 native");
+        }
+    }
+    {
+        weights::WeightLoadOptions opts;
+        opts.partition_plan = &plan;
+        opts.preshuffle = false;
+        auto wr = weights::load_quantized_matrix(reader, "q4", arena, stream, opts);
+        if (!wr.ok()) { fail("partition q4 canonical load: " + wr.status().message()); }
+        else {
+            weights::MatrixWeight m = wr.release();
+            check(!m.preshuffled, "partition q4 canonical not preshuffled");
+            check_eq_u64(m.rows, 16, "partition q4 canonical local rows");
+            check_eq_u64(m.codes_row_stride_bytes, 32, "partition q4 canonical stride");
+            check_matrix_bytes(m, ref_q4.codes, ref_q4.metadata1,
+                               "partition q4 canonical");
+        }
+    }
+    {
+        weights::WeightLoadOptions opts;
+        opts.partition_plan = &plan;
+        auto wr = weights::load_quantized_matrix(reader, "q8", arena, stream, opts);
+        if (!wr.ok()) { fail("partition q8 load: " + wr.status().message()); }
+        else {
+            weights::MatrixWeight m = wr.release();
+            check_eq_u64(m.rows, 32, "partition q8 local rows");
+            check_eq_u64(m.cols, 32, "partition q8 local cols");
+            check_eq_u64(m.k_padded, 32, "partition q8 local k_padded");
+            check(m.preshuffled, "partition q8 preshuffled");
+            check(m.partition.has_value(), "partition q8 keeps partition");
+            if (m.partition) {
+                check(*m.partition == plan.tensors.at("q8"), "partition q8 equals plan");
+            }
+            const auto n = expect_native(QuantFormatId::Psq8, ref_q8.codes,
+                                         ref_q8.metadata1, 32, 32);
+            check_matrix_bytes(m, n.codes, n.metadata1, "partition q8 native");
+        }
+    }
+    {
+        weights::WeightLoadOptions opts;
+        opts.partition_plan = &plan;
+        opts.preshuffle = false;
+        auto wr = weights::load_quantized_matrix(reader, "bf", arena, stream, opts);
+        if (!wr.ok()) { fail("partition bf load: " + wr.status().message()); }
+        else {
+            weights::MatrixWeight m = wr.release();
+            check_eq_u64(m.rows, 4, "partition bf local rows");
+            check_eq_u64(m.cols, 16, "partition bf local cols");
+            check_eq_u64(m.k_padded, 16, "partition bf local k_padded");
+            check(!m.preshuffled, "partition bf not preshuffled");
+            check(m.partition.has_value(), "partition bf keeps partition");
+            const auto got = d2h(m.bf16.data<void>(), ref_bf.size());
+            check(got == ref_bf, "partition bf bytes");
+        }
+    }
+    {
+        weights::WeightLoadOptions opts;
+        auto wr = weights::load_quantized_matrix(reader, "q4", arena, stream, opts);
+        if (!wr.ok()) { fail("global q4 load: " + wr.status().message()); }
+        else {
+            weights::MatrixWeight m = wr.release();
+            check_eq_u64(m.rows, 32, "plan nullptr keeps global rows");
+            check(!m.partition.has_value(), "plan nullptr keeps no partition");
+        }
+    }
+    {
+        weights::TensorPartitionPlan other;
+        other.tp_size = 2;
+        other.tp_rank = 0;
+        other.tensors["q4"] = make_desc(0, {32, 64}, {{0, 16}});
+        weights::WeightLoadOptions opts;
+        opts.partition_plan = &other;
+        auto wr = weights::load_quantized_matrix(reader, "q8", arena, stream, opts);
+        if (!wr.ok()) { fail("unplanned q8 load: " + wr.status().message()); }
+        else {
+            weights::MatrixWeight m = wr.release();
+            check_eq_u64(m.cols, 64, "tensor without plan entry stays global");
+            check(!m.partition.has_value(), "tensor without plan entry has no partition");
+        }
+    }
+}
+
 static void test_qwen35_quantized_model_load(gpu::GpuArena& arena, hipStream_t stream) {
     using namespace quantization;
     using fpx::QuantizedEncoding;
@@ -932,6 +1130,18 @@ static void test_qwen35_quantized_model_load(gpu::GpuArena& arena, hipStream_t s
     check_eq_u64(w.mtp.fc.cols, 64, "mtp fc cols == 2H");
 
     {
+        weights::TensorPartitionPlan guard_plan;
+        guard_plan.tp_size = 2;
+        guard_plan.tp_rank = 0;
+        qwen35::Qwen35LoadOptions guard_options;
+        guard_options.weights.partition_plan = &guard_plan;
+        auto blocked = qwen35::load_qwen35_weights_from_safetensors(
+            dir.string(), arena, stream, guard_options);
+        check(!blocked.ok() && blocked.status().code() == Status::Code::unsupported,
+              "qwen35 load path rejects a tensor partition plan");
+    }
+
+    {
         auto rdr = fpx::QuantizedModelReader::open(dir.string(), false);
         if (!rdr.ok()) { fail("reopen reader"); return; }
         auto view = rdr.value().resolve("model.language_model.layers.1.self_attn.q_proj.weight");
@@ -976,6 +1186,7 @@ int main() {
     test_bf16_matrix_load(arena, stream);
     test_bf16_model_load(arena, stream);
     test_standalone_quantized_reader(arena, stream);
+    test_partition_plan_load(arena, stream);
     test_qwen35_quantized_model_load(arena, stream);
 
     fs::remove_all(g_root, ec);

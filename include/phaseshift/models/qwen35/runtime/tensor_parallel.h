@@ -1,0 +1,160 @@
+#pragma once
+
+#include <phaseshift/core/memory/arena.h>
+#include <phaseshift/models/qwen35/model/qwen35_model.h>
+#include <phaseshift/models/qwen35/model/tensor_parallel_context.h>
+#include <phaseshift/models/qwen35/runtime/executor.h>
+#include <phaseshift/models/qwen35/runtime/tp_batch_hook.h>
+#include <phaseshift/models/qwen35/state/gdn_state_pool.h>
+#include <phaseshift/models/qwen35/state/paged_kv_pool.h>
+#include <phaseshift/models/qwen35/state/sequence_slot_pool.h>
+#include <phaseshift/runtime/tp/tp_barrier_group.h>
+#include <phaseshift/runtime/tp/tp_transports.h>
+
+#include <hip/hip_runtime.h>
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <condition_variable>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+namespace ps {
+namespace qwen35 {
+namespace runtime {
+
+struct TpRankRuntimeConfig {
+    std::string model_dir;
+    std::uint32_t tp_size = 1;
+    std::uint32_t tp_rank = 0;
+    int device_id = 0;
+    std::uint32_t max_scheduled_tokens = 0;
+    std::uint32_t max_scheduled_requests = 0;
+    std::uint32_t max_scheduled_output_rows = 0;
+    std::uint32_t max_seq_len = 16;
+    std::uint32_t page_tokens = 16;
+    std::uint32_t kv_cache_capacity_tokens = 0;
+    KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
+    std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
+    std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
+    std::uint32_t target_hidden_tap_count = 0;
+    Qwen35LoadOptions load_options;
+};
+
+class TpRankRuntime {
+public:
+    static Result<std::unique_ptr<TpRankRuntime>> create(
+        const TpRankRuntimeConfig& config);
+    ~TpRankRuntime() noexcept;
+
+    TpRankRuntime(const TpRankRuntime&) = delete;
+    TpRankRuntime& operator=(const TpRankRuntime&) = delete;
+
+    int device_id() const noexcept { return device_id_; }
+    hipStream_t stream() const noexcept { return stream_; }
+    gpu::GpuArena& arena() { return arena_.value(); }
+    const Qwen35Model& model() const { return model_.value(); }
+    SequenceSlotPool& sequence_pool() { return seq_pool_.value(); }
+    GdnStatePool& gdn_pool() { return gdn_pool_.value(); }
+    PagedKVPool& kv_pool() { return kv_pool_.value(); }
+    Executor& executor() { return executor_; }
+    const Qwen35TensorParallelContext& context() const { return context_.value(); }
+    const Qwen35TextConfig& text_config() const { return model_.value().text_config(); }
+
+    std::uint64_t weight_bytes() const;
+    std::uint64_t kv_bytes() const;
+    std::uint64_t gdn_state_bytes() const;
+
+private:
+    TpRankRuntime() = default;
+
+    int device_id_ = -1;
+    hipStream_t stream_ = nullptr;
+    std::optional<gpu::GpuArena> arena_;
+    std::optional<Qwen35Model> model_;
+    std::optional<Qwen35TensorParallelContext> context_;
+    std::optional<SequenceSlotPool> seq_pool_;
+    std::optional<GdnStatePool> gdn_pool_;
+    std::optional<PagedKVPool> kv_pool_;
+    Executor executor_;
+    bool executor_ready_ = false;
+};
+
+struct TpCoordinatorConfig {
+    std::string model_dir;
+    std::vector<int> devices;
+    std::uint32_t max_scheduled_tokens = 0;
+    std::uint32_t max_scheduled_requests = 0;
+    std::uint32_t max_scheduled_output_rows = 0;
+    std::uint32_t max_seq_len = 16;
+    std::uint32_t page_tokens = 16;
+    std::uint32_t kv_cache_capacity_tokens = 0;
+    KVCacheDType kv_cache_dtype = KVCacheDType::BF16;
+    std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
+    std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
+    std::uint32_t target_hidden_tap_count = 0;
+    Qwen35LoadOptions load_options;
+};
+
+class TpCoordinator final : public TpBatchHook {
+public:
+    static Result<std::unique_ptr<TpCoordinator>> create(
+        const TpCoordinatorConfig& config);
+    ~TpCoordinator() noexcept;
+
+    TpCoordinator(const TpCoordinator&) = delete;
+    TpCoordinator& operator=(const TpCoordinator&) = delete;
+
+    int tp_size() const noexcept { return static_cast<int>(ranks_.size()); }
+    TpRankRuntime& rank(std::size_t index) { return *ranks_[index]; }
+    const char* transport_name() const noexcept;
+
+    Status on_sequence_created(const PagedSequenceState& source) override;
+    Status on_sequence_released(const PagedSequenceState& source) override;
+    Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch) override;
+
+    void abort(const Status& reason) noexcept;
+    std::string debug_report() const;
+
+private:
+    struct Worker {
+        std::mutex mutex;
+        std::condition_variable cv;
+        const ScheduledBatch* job = nullptr;
+        bool job_pending = false;
+        bool stop = false;
+        bool done = true;
+        Status status{Status::make_ok()};
+        BatchExecutionOutput output;
+        std::thread thread;
+
+        Worker() : status(Status::make_ok()) {}
+    };
+
+    struct MirrorSequences {
+        std::vector<PagedSequenceState> states;
+    };
+
+    TpCoordinator() = default;
+
+    Status initialize(const TpCoordinatorConfig& config);
+    void worker_loop(std::size_t rank);
+    Status run_rank_step(std::size_t rank, const ScheduledBatch& batch,
+                         BatchExecutionOutput& output);
+
+    std::vector<int> devices_;
+    std::vector<std::unique_ptr<TpRankRuntime>> ranks_;
+    std::unique_ptr<::ps::runtime::TpTransport> transport_;
+    std::unique_ptr<::ps::runtime::TpBarrierGroup> barrier_group_;
+    std::vector<std::unique_ptr<Worker>> workers_;
+    std::unordered_map<std::uint64_t, MirrorSequences> mirrors_;
+};
+
+}
+}
+}

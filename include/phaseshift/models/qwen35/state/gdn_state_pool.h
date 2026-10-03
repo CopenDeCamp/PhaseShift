@@ -77,6 +77,28 @@ struct GdnStatePoolLayout {
             gdn_layers, 2 * kh * khd + vh * vhd, kern - 1, vh, khd, vhd);
     }
 
+    static Result<GdnStatePoolLayout> from_tensor_parallel_config(
+        const Qwen35TextConfig& tc, uint32_t tp_size) {
+        if (tp_size == 0) {
+            return Status::invalid_argument("tp_size must be at least 1", __FILE__,
+                                            __LINE__);
+        }
+        const GdnStatePoolLayout global = from_text_config(tc);
+        if (tp_size == 1) return global;
+        const uint32_t kh = tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16;
+        const uint32_t vh = tc.linear_num_value_heads != 0 ? tc.linear_num_value_heads : 16;
+        if ((kh % tp_size) != 0 || (vh % tp_size) != 0) {
+            return Status::unsupported(
+                "qwen35 tp requires GDN head counts divisible by tp_size",
+                __FILE__, __LINE__);
+        }
+        const uint32_t local_kh = kh / tp_size;
+        const uint32_t local_vh = vh / tp_size;
+        return make(global.num_gdn_states,
+                    2u * local_kh * global.head_k + local_vh * global.head_v,
+                    global.conv_history, local_vh, global.head_k, global.head_v);
+    }
+
     static GdnStatePoolLayout qwen35_0_8b() {
         return make(18, 6144, 3, 16, 128, 128);
     }
