@@ -105,6 +105,7 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/optimized/sampling.hip
     src/phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.hip
     src/phaseshift/models/qwen35/kernels/optimized/constraint_candidates.hip
+    src/phaseshift/models/qwen35/kernels/optimized/psq8_candidate_rerank.hip
     src/phaseshift/models/qwen35/kernels/dflash2/candidate_selector.hip
     src/phaseshift/models/qwen35/kernels/dflash2/feature_concat.hip
     src/phaseshift/models/qwen35/kernels/dflash2/grouped_dynamic_conv.hip
@@ -112,8 +113,6 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/dflash2/rmsnorm.hip
     src/phaseshift/models/qwen35/kernels/dflash2/topk.hip
     src/phaseshift/models/qwen35/kernels/dflash2/topk_optimized.hip
-    src/phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.hip
-    src/phaseshift/models/qwen35/kernels/dflash2/coarse_topn.hip
     src/phaseshift/models/qwen35/kernels/dflash2/radix_topn.hip
     src/phaseshift/models/qwen35/kernels/dflash2/swiglu.hip
     src/phaseshift/models/qwen35/kernels/dflash2/attention.hip
@@ -161,7 +160,6 @@ set(
     src/phaseshift/models/qwen35/model/qwen35_model.cpp
     src/phaseshift/models/qwen35/model/lower_to_primitives.cpp
     src/phaseshift/models/qwen35/dflash2/config.cpp
-    src/phaseshift/models/qwen35/dflash2/draft_vocab_profile.cpp
     src/phaseshift/models/qwen35/dflash2/weights.cpp
     src/phaseshift/models/qwen35/dflash2/context_state.hip
 )
@@ -186,11 +184,7 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/prefix_cache.cpp
     src/phaseshift/models/qwen35/runtime/program_executor.hip
     src/phaseshift/models/qwen35/runtime/executor.hip
-    src/phaseshift/models/qwen35/runtime/mtp_kv_state.cpp
-    src/phaseshift/models/qwen35/runtime/mtp_executor.hip
     src/phaseshift/models/qwen35/runtime/spec_decode.cpp
-    src/phaseshift/models/qwen35/runtime/ngram_tail.cpp
-    src/phaseshift/models/qwen35/runtime/spec_decoder.cpp
     src/phaseshift/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/phaseshift/models/qwen35/runtime/gdn_spec_history.hip
     src/phaseshift/models/qwen35/runtime/optimized_dispatch.hip
@@ -219,7 +213,7 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/sampling_selector.cpp
     src/phaseshift/models/qwen35/runtime/sampling_dispatch.hip
     src/phaseshift/models/qwen35/runtime/decode_perf_stats.cpp
-    src/phaseshift/models/qwen35/runtime/lm_head_proxy.hip
+    src/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.hip
     src/phaseshift/models/qwen35/dflash2/executor.hip
 )
 target_compile_features(phaseshift_qwen35_runtime PRIVATE cxx_std_20)
@@ -228,9 +222,6 @@ target_include_directories(phaseshift_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SO
 target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_xgrammar)
 target_compile_options(phaseshift_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 phaseshift_set_hip_archs(phaseshift_qwen35_runtime)
-if(PHASESHIFT_PA_PROBE)
-    target_compile_definitions(phaseshift_qwen35_runtime PRIVATE PHASESHIFT_PA_PROBE=1)
-endif()
 if(PHASESHIFT_HIP_GRAPH)
     set_source_files_properties(
         src/phaseshift/models/qwen35/runtime/program_executor.hip

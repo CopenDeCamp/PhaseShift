@@ -14,7 +14,6 @@ namespace {
 constexpr uint32_t kWarmup = 100u;
 constexpr uint32_t kBatch = 200u;
 constexpr uint32_t kBatches = 24u;
-constexpr uint32_t kLegacyLaunches = 2u;
 constexpr uint32_t kRadixLaunches = 10u;
 
 struct Sample {
@@ -52,10 +51,6 @@ void fill_logits(std::vector<float>& logits, bool tie_heavy) {
 
 struct Runners {
     float* logits = nullptr;
-    int32_t* legacy_ids = nullptr;
-    float* legacy_values = nullptr;
-    int32_t* legacy_scratch_ids = nullptr;
-    float* legacy_scratch_values = nullptr;
     int32_t* radix_ids = nullptr;
     float* radix_values = nullptr;
     void* radix_scratch = nullptr;
@@ -83,36 +78,22 @@ Sample measure(const std::vector<hipEvent_t>& events, Launch&& launch) {
 
 void run_matrix(const std::vector<hipEvent_t>& events, bool tie_heavy) {
     const uint32_t vocab = 248320u;
-    const uint32_t legacy_partitions = ps::kernel::dflash2_int2_default_partitions(vocab);
     const uint32_t radix_partitions = ps::kernel::dflash2_radix_default_partitions(vocab);
     const std::size_t radix_scratch_bytes =
         ps::kernel::dflash2_radix_topn_scratch_bytes(8u, radix_partitions, vocab);
 
-    std::printf("input=%s vocab=%u legacy_partitions=%u radix_partitions=%u "
-                "radix_scratch=%zuB legacy_launches=%u radix_launches=%u warmup=%u "
+    std::printf("input=%s vocab=%u radix_partitions=%u "
+                "radix_scratch=%zuB radix_launches=%u warmup=%u "
                 "batch=%u batches=%u\n",
-                tie_heavy ? "tie" : "random", vocab, legacy_partitions, radix_partitions,
-                radix_scratch_bytes, kLegacyLaunches, kRadixLaunches, kWarmup, kBatch,
-                kBatches);
-    std::printf("%4s %5s | %10s %10s %10s | %10s %10s %10s | %7s\n", "rows", "pool",
-                "legacy_med", "legacy_p10", "legacy_p90", "radix_med", "radix_p10",
-                "radix_p90", "speedup");
+                tie_heavy ? "tie" : "random", vocab, radix_partitions,
+                radix_scratch_bytes, kRadixLaunches, kWarmup, kBatch, kBatches);
+    std::printf("%4s %5s | %10s %10s %10s\n", "rows", "pool",
+                "radix_med", "radix_p10", "radix_p90");
 
     for (uint32_t rows : {1u, 2u, 4u, 8u}) {
-        const uint32_t legacy_scratch_stride = legacy_partitions * ps::kernel::kDflash2Int2MaxPool;
         Runners r;
         const std::size_t logit_elems = static_cast<std::size_t>(rows) * vocab;
         bool ok = hipMalloc(&r.logits, logit_elems * sizeof(float)) == hipSuccess &&
-                  hipMalloc(&r.legacy_ids, static_cast<std::size_t>(rows) * 128u * sizeof(int32_t)) ==
-                      hipSuccess &&
-                  hipMalloc(&r.legacy_values, static_cast<std::size_t>(rows) * 128u * sizeof(float)) ==
-                      hipSuccess &&
-                  hipMalloc(&r.legacy_scratch_ids,
-                            static_cast<std::size_t>(rows) * legacy_scratch_stride * sizeof(int32_t)) ==
-                      hipSuccess &&
-                  hipMalloc(&r.legacy_scratch_values,
-                            static_cast<std::size_t>(rows) * legacy_scratch_stride * sizeof(float)) ==
-                      hipSuccess &&
                   hipMalloc(&r.radix_ids, static_cast<std::size_t>(rows) * 128u * sizeof(int32_t)) ==
                       hipSuccess &&
                   hipMalloc(&r.radix_values, static_cast<std::size_t>(rows) * 128u * sizeof(float)) ==
@@ -128,28 +109,16 @@ void run_matrix(const std::vector<hipEvent_t>& events, bool tie_heavy) {
                         hipMemcpyHostToDevice);
 
         for (uint32_t pool : {16u, 24u, 32u, 48u, 64u, 96u, 128u}) {
-            const Sample legacy = measure(events, [&] {
-                (void)ps::kernel::launch_dflash2_coarse_topn(
-                    r.logits, rows, vocab, vocab, pool, r.legacy_ids, r.legacy_values,
-                    r.legacy_scratch_ids, r.legacy_scratch_values, legacy_scratch_stride,
-                    legacy_partitions, nullptr);
-            });
             const Sample radix = measure(events, [&] {
                 (void)ps::kernel::launch_dflash2_radix_topn(
                     r.logits, rows, vocab, vocab, pool, r.radix_ids, r.radix_values,
                     radix_partitions, r.radix_scratch, radix_scratch_bytes, nullptr);
             });
-            std::printf("%4u %5u | %10.3f %10.3f %10.3f | %10.3f %10.3f %10.3f | %7.2fx\n",
-                        rows, pool, legacy.median_us, legacy.p10_us, legacy.p90_us,
-                        radix.median_us, radix.p10_us, radix.p90_us,
-                        legacy.median_us / radix.median_us);
+            std::printf("%4u %5u | %10.3f %10.3f %10.3f\n",
+                        rows, pool, radix.median_us, radix.p10_us, radix.p90_us);
         }
 
         (void)hipFree(r.logits);
-        (void)hipFree(r.legacy_ids);
-        (void)hipFree(r.legacy_values);
-        (void)hipFree(r.legacy_scratch_ids);
-        (void)hipFree(r.legacy_scratch_values);
         (void)hipFree(r.radix_ids);
         (void)hipFree(r.radix_values);
         (void)hipFree(r.radix_scratch);

@@ -21,9 +21,7 @@
 ```
 
 `--dflash2-model-dir` 指定時のみ DFlash2 経路に入る。
-spec decode の構成は `phaseshift-compute` の既定（`--dflash2-drafts 7`、
-NgramTail 無効）を使う。NgramTail を有効化する場合は `phaseshift-compute` を直接起動し、
-`--dflash2-ngram-tail 8 --dflash2-ngram-n 5` を指定する（cli は ngram option を転送しない）。
+spec decode の構成は `phaseshift-compute` の既定（`--dflash2-drafts 7`）を使う。
 詳細は [../developer/dflash2.md](../developer/dflash2.md) を参照。
 
 ## 使い方

@@ -17,7 +17,7 @@
 --page-tokens N        paged KV page size in tokens (default 16)
 --device N             GPU device (default 0)
 --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)
---decode-backend TYPE  host | gpu-mcu (default host)
+--decode-backend TYPE  host (default)
 --verify-weights 0|1   verify quantized payload CRC32 on load (default 0)
 --dump-logits PATH     append per-step sampled logits rows (raw f32) to PATH
 --temperature F        sampling temperature (default 0 = greedy)
@@ -26,8 +26,6 @@
 --seed N               sampling seed (default 0)
 --dflash2-model-dir PATH  DFlash2 draft model directory（指定で DFlash mode）
 --dflash2-drafts N     speculative draft tokens per round (default 7)
---dflash2-ngram-tail N NgramTail extension length per round (default 0 = disabled)
---dflash2-ngram-n N    NgramTail n-gram size (default 0 = disabled)
 --dflash2-stats 0|1    print speculative decode statistics (default 1)
 --serve-stdio          serve JSON Lines generation requests on stdin/stdout
 --help                 show this help
@@ -39,9 +37,7 @@
 `--kv-cache-dtype psq4` / `psq8` は `head_dim == 256` を要求する。prefix cache と
 併用でき、cache pool も同じ KV dtype で作られる。
 
-`--decode-backend gpu-mcu` は model load 前に exit 2 で拒否される。
-backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation はこの build に
-含まれない。指定しても `host` へ fallback しない。
+backend contract は `host` のみ。
 
 ### DFlash2 speculative decoding
 
@@ -53,84 +49,15 @@ backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation は�
 
 - `--dump-logits`
 - `--dflash2-drafts` が `block_size - 1` を超える
-- `--dflash2-drafts` と `--dflash2-ngram-tail` の合計が verify capacity 64 行
-  （draft 63）を超える
-- `--dflash2-ngram-tail` と `--dflash2-ngram-n` のどちらか一方だけが 0
-  （両方 0 で NgramTail 無効、両方正の値で有効）
-- `--dflash2-model-dir` なしでの `--dflash2-ngram-tail` / `--dflash2-ngram-n` 指定
 
-### NgramTail extension（opt-in）
-
-`--dflash2-ngram-tail` / `--dflash2-ngram-n` は**既定 0（無効）**である。両方が正の値の
-ときだけ有効になり、片方だけ 0 なら model load 前に exit 2 で拒否される。
-Gate 2 の推奨構成は `--dflash2-ngram-tail 8 --dflash2-ngram-n 5`（window 2048、
-Exact verify）である。
-
-- 有効時も target verify は `rows <= 16`（draft 15 + anchor 1）に収まり、既存の R16
-  verify 経路を維持する。
-- GDN history は `K + T` row を確保する（T=8 で 2.15 GiB）。guard は 1.5 GiB →
-  2.25 GiB（rows ≤ 15）。超過は decoder create で明示 error。
-- 効果は workload 依存（[../rnd/spec_decode/ngram_tail_gate3.md](../rnd/spec_decode/ngram_tail_gate3.md)）。
-  反復構造の workload では改善し、非反復では verify 幅増で悪化するため、
-  利用可否は workload で判断する。
-- ngram lookup は committed token のみを対象とする CPU linear scan で、
-  proposal token は seed にだけ使う（future leakage なし）。
-- `--dflash2-stats 1` は `DFLASH2_NGRAM_*` と `DFLASH2_GDN_MODE` 行も出力する。
-
-target の lm_head proxy（`PHASESHIFT_TARGET_LM_HEAD_PROXY`）は DFlash2 有効時に
-未指定なら `0`（proxy 停止）として起動する。明示指定した場合はその値を使う。
-理由は [../developer/dflash2.md](../developer/dflash2.md) の verify 数値契約を参照。
+constrained な LM head の候補展開最適化（`PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT`）は
+既定 0（無効）である。有効時も制約の正しさは full path の sampling filter が担保する。
 
 `--serve-stdio` と `--kv-cache-dtype psq4` は併用できる。serve mode では
 `grammar` / `structural_tag` / `prefix_cache_checkpoint_position` / `temperature > 0`
 を DFlash2 経路でも受け付ける。constraint は target verify の各行に適用され、
 generation は grammar 準拠である。prefix cache の checkpoint は prompt boundary
 （prompt 全体）で保存する。
-
-### 固定draft語彙の配置と明示有効化
-
-固定語彙はopt-inであり、profileを配置しただけではDFlash2の既定動作を変えない。
-`PHASESHIFT_DFLASH2_DRAFT_VOCAB=1`を指定すると、対応する標準profileを検証してINT2＋固定語彙を使う。
-通常利用者はprofile配布物だけを用意し、SWE-chat等の生成元コーパスを取得する必要はない。
-配置にはPython 3の標準ライブラリだけを使い、推論時のPython依存は追加しない。
-
-Qwen3.8-27B用の[語彙profileを取得](https://github.com/jyohukuchan/PhaseShift/releases/download/draft-vocab-qwen38-v1/qwen38-draft-vocab-98304-v1.tar.gz)して展開する。
-SHA-256は`b7bd94c9131c3ef3573c27c92a512b5463bc9676c57a1a70ac0223fc2f8df246`。
-この配布物はcontributorのforkで提供する。
-
-```sh
-python3 tools/quantization/prepare_draft_vocab.py install \
-  --bundle-dir /path/to/extracted-vocabulary-profile \
-  --model-dir /path/to/target-PSQ-model
-```
-
-配置先は`--model-dir`のtarget側であり、`--dflash2-model-dir`ではない。
-toolはmodel形状とtokenizerのtoken→ID対応を照合し、次の3ファイルを配置する。
-
-- `dflash2-draft-vocab.u32`
-- `dflash2-draft-vocab.json`
-- `DRAFT_VOCAB_NOTICE.txt`
-
-異なる既存内容を置き換える場合だけ`--overwrite`を指定する。同梱NOTICEは保持する。
-未指定時はprofileの有無・内容によらずfull PSQ8 headを使い、標準profileを読まない。
-明示有効化時にprofileがない、または正常だが別tokenizer/形状向けなら、理由をstderrへ示して
-従来経路を使う。明示有効化時の部分配置、破損・不正なprofileはエラーになる。
-
-有効化と比較の指定:
-
-```sh
-PHASESHIFT_DFLASH2_DRAFT_VOCAB=1 ./build-gfx1201/phaseshift-compute ...
-PHASESHIFT_DFLASH2_INT2_HEAD=1 ./build-gfx1201/phaseshift-compute ...
-PHASESHIFT_DFLASH2_INT2_HEAD=0 ./build-gfx1201/phaseshift-compute ...
-```
-
-順に固定語彙INT2、全語彙INT2、full PSQ8を選ぶ。
-`INT2_HEAD=1`だけではprofile配置済みでも全語彙INT2を使う。
-`INT2_HEAD=0/2`は標準profileの有効化より優先する。
-明示的な独自語彙は`PHASESHIFT_DFLASH2_DRAFT_VOCAB_FILE`で指定でき、INT2経路を選ぶ。
-この明示ファイルと`INT2_HEAD=0/2`または`DRAFT_VOCAB=0`の同時指定はエラーになる。
-
-profile作成者向けの`pack`手順と契約は[開発者文書](../developer/dflash2.md#固定語彙profile)を参照する。
 
 ## serve-stdio
 

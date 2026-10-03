@@ -344,8 +344,10 @@ Result<Qwen35ModelWeights> load_qwen35_weights_bf16(
         if (!st.ok()) return st;
     }
 
-    Status mtp = load_mtp_bf16(arena, stream, collection, options, weights);
-    if (!mtp.ok()) return mtp;
+    if (options.load_mtp_layers) {
+        Status mtp = load_mtp_bf16(arena, stream, collection, options, weights);
+        if (!mtp.ok()) return mtp;
+    }
 
     hipError_t sync_err = hipStreamSynchronize(stream);
     if (sync_err != hipSuccess) {
@@ -563,8 +565,10 @@ Result<Qwen35ModelWeights> load_qwen35_weights_from_quantized_safetensors(
         if (!st.ok()) return st;
     }
 
-    Status mtp = load_mtp_quantized(arena, stream, reader, options.weights, weights);
-    if (!mtp.ok()) return mtp;
+    if (options.load_mtp_layers) {
+        Status mtp = load_mtp_quantized(arena, stream, reader, options.weights, weights);
+        if (!mtp.ok()) return mtp;
+    }
 
     hipError_t sync_err = hipStreamSynchronize(stream);
     if (sync_err != hipSuccess) {

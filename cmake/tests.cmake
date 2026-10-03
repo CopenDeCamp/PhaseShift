@@ -92,11 +92,7 @@ phaseshift_add_test(NAME test_fp8_block128_payload SOURCE unit/test_fp8_block128
 phaseshift_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_dflash2_draft_vocab_profile SOURCE unit/test_dflash2_draft_vocab_profile.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_test(NAME test_prepare_draft_vocab
-    COMMAND ${Python3_EXECUTABLE} "${_PS_TESTS_ROOT}/unit/test_prepare_draft_vocab.py")
-set_tests_properties(test_prepare_draft_vocab PROPERTIES LABELS "cpu;required" TIMEOUT 30)
 phaseshift_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_quantization_adapter SOURCE unit/test_dflash2_quantization_adapter.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_quantizer_core)
 phaseshift_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
@@ -114,32 +110,14 @@ phaseshift_add_test(NAME test_dflash2_kv_ring SOURCE unit/test_dflash2_kv_ring.h
 phaseshift_add_test(NAME test_dflash2_attention_ring SOURCE unit/test_dflash2_attention_ring.hip LABELS "gpu1;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized)
 phaseshift_add_test(NAME test_dflash2_psq4_shapes SOURCE unit/test_dflash2_psq4_shapes.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_qwen35_runtime phaseshift_quant_reference phaseshift_gpu)
 target_include_directories(test_dflash2_psq4_shapes PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_dflash2_int2_pack SOURCE unit/test_dflash2_int2_pack.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_dflash2_int2_coarse_head SOURCE unit/test_dflash2_int2_coarse_head.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_dflash2_coarse_topn SOURCE unit/test_dflash2_coarse_topn.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_psq8_rerank SOURCE unit/test_dflash2_psq8_rerank.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_constraint_candidates SOURCE unit/test_constraint_candidates.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_target_lm_proxy_error_bound SOURCE unit/test_target_lm_proxy_error_bound.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_target_lm_proxy_upper_topn SOURCE unit/test_target_lm_proxy_upper_topn.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_target_lm_proxy_certificate SOURCE unit/test_target_lm_proxy_certificate.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_target_lm_proxy_fallback SOURCE unit/test_target_lm_proxy_fallback.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_verify_lm_proxy_direct SOURCE unit/test_verify_lm_proxy_direct.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
-phaseshift_add_test(NAME test_qwen35_mtp_primitives SOURCE unit/test_qwen35_mtp_primitives.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
-target_include_directories(test_qwen35_mtp_primitives PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_mtp_kv_cache SOURCE unit/test_qwen35_mtp_kv_cache.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
-target_include_directories(test_qwen35_mtp_kv_cache PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_mtp_state SOURCE unit/test_qwen35_mtp_state.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
-target_include_directories(test_qwen35_mtp_state PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_lm_head_proxy_path SOURCE unit/test_lm_head_proxy_path.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_ngram_tail SOURCE unit/test_ngram_tail.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_decode_backend_contract SOURCE unit/test_decode_backend_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_qwen35_spec_transaction SOURCE unit/test_qwen35_spec_transaction.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
-target_include_directories(test_qwen35_spec_transaction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES phaseshift_qwen35_state)
 phaseshift_add_test(NAME test_constraint_mask SOURCE unit/test_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_dflash2_constraint_mask SOURCE unit/test_dflash2_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
@@ -254,17 +232,9 @@ add_custom_target(
         test_dflash2_kv_ring
         test_dflash2_attention_ring
         test_dflash2_psq4_shapes
-        test_dflash2_int2_pack
-        test_dflash2_int2_coarse_head
-        test_dflash2_coarse_topn
         test_dflash2_radix_topn
         test_dflash2_psq8_rerank
         test_constraint_candidates
-        test_target_lm_proxy_error_bound
-        test_target_lm_proxy_upper_topn
-        test_target_lm_proxy_certificate
-        test_target_lm_proxy_fallback
-        test_verify_lm_proxy_direct
         test_paged_types
         test_paged_attention_split_reduce_exact
         test_tensor
@@ -314,14 +284,8 @@ add_custom_target(
         test_stochastic_topk
         test_qwen35_mtp_lowering
         test_qwen35_lowering_contract
-        test_qwen35_mtp_primitives
-        test_qwen35_mtp_kv_cache
-        test_qwen35_mtp_state
         test_qwen35_spec_verify
-        test_lm_head_proxy_path
-        test_ngram_tail
         test_decode_backend_contract
-        test_qwen35_spec_transaction
         test_architecture_boundaries
         test_qwen35_prefix_cache
         test_qwen35_psq_kv_pool
@@ -381,22 +345,14 @@ endif()
 
 # ---------------------------------------------------------------------------
 # phaseshift-compute decode backend contract (CPU-only: no GPU, no model).
-# --decode-backend must be decided before any model load: GPU-MCU is rejected
-# with an explicit error, host keeps reaching the ordinary startup path.
+# --decode-backend must be decided before any model load: host keeps reaching
+# the ordinary startup path.
 # ---------------------------------------------------------------------------
-add_test(NAME test_compute_decode_backend_gpu_mcu
-         COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend gpu-mcu)
-set_tests_properties(test_compute_decode_backend_gpu_mcu PROPERTIES
-                     LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "GPU-MCU backend is not available in this build"
-                     FAIL_REGULAR_EXPRESSION "model-dir required")
-
 add_test(NAME test_compute_decode_backend_host
          COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend host)
 set_tests_properties(test_compute_decode_backend_host PROPERTIES
                      LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "model-dir required"
-                     FAIL_REGULAR_EXPRESSION "GPU-MCU backend is not available in this build")
+                     PASS_REGULAR_EXPRESSION "model-dir required")
 
 # ---------------------------------------------------------------------------
 # Qwen3.5-4B full application E2E.
@@ -556,69 +512,13 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
     target_include_directories(test_dflash2_target_taps PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Target lm_head certified proxy: real hidden probe (num_output_rows large).
-    phaseshift_add_test(NAME test_target_lm_proxy_real_probe SOURCE unit/test_target_lm_proxy_real_probe.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_target_lm_proxy_real_probe PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Target lm_head certified proxy: real hidden shadow (pool / margin sweep).
-    phaseshift_add_test(NAME test_target_lm_proxy_real_hidden SOURCE unit/test_target_lm_proxy_real_hidden.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-    target_include_directories(test_target_lm_proxy_real_hidden PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Target lm_head certified proxy: isolated real-head performance (Gate 6/7).
-    phaseshift_add_test(NAME test_target_lm_proxy_real_perf SOURCE unit/test_target_lm_proxy_real_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-    target_include_directories(test_target_lm_proxy_real_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    phaseshift_add_test(NAME test_lm_head_constraint_perf SOURCE unit/test_lm_head_constraint_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-    target_include_directories(test_lm_head_constraint_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
-    # Verify lm_head certified proxy: real verify-round shadow (Gate V2/V3).
-    phaseshift_add_test(NAME test_verify_lm_proxy_real_verify SOURCE unit/test_verify_lm_proxy_real_verify.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-    target_include_directories(test_verify_lm_proxy_real_verify PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
-    # LM head residual certificate survey (Gate R1/R2): weight-only residual structure.
-    phaseshift_add_test(NAME test_lm_head_residual_survey SOURCE unit/test_lm_head_residual_survey.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-    target_include_directories(test_lm_head_residual_survey PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
-    # MTP Gate 1: 1-step draft forward vs vLLM reference (golden fixture).
     # Model dir via PHASESHIFT_MODEL_DIR_MTP or PHASESHIFT_MODEL_DIR_4B.
-    # Fixture root via PHASESHIFT_MTP_GATE1_DIR (default artifacts/mtp_gate1,
-    # generated by tools/reference/export_qwen35_mtp_gate1.py).
-    phaseshift_add_test(NAME test_qwen35_mtp_forward_real SOURCE unit/test_qwen35_mtp_forward_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_forward_real SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_mtp_forward_real PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
-    # MTP Gate 2: persistent KV / state synchronization vs vLLM reference.
-    # Fixture root via PHASESHIFT_MTP_GATE2_DIR (default artifacts/mtp_gate2,
-    # generated by tools/reference/export_qwen35_mtp_gate2.py).
-    phaseshift_add_test(NAME test_qwen35_mtp_state_real SOURCE unit/test_qwen35_mtp_state_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_state_real SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_mtp_state_real PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    phaseshift_add_test(NAME test_qwen35_mtp_spec_real SOURCE unit/test_qwen35_mtp_spec_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_spec_real SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_mtp_spec_real PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    phaseshift_add_test(NAME test_qwen35_mtp_gate3_replay SOURCE unit/test_qwen35_mtp_gate3_replay.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_gate3_replay SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_mtp_gate3_replay PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    phaseshift_add_test(NAME test_qwen35_mtp_multistep SOURCE unit/test_qwen35_mtp_multistep.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_multistep SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_mtp_multistep PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    phaseshift_add_test(NAME test_qwen35_mtp_spec_perf SOURCE unit/test_qwen35_mtp_spec_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_spec_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    phaseshift_add_test(NAME test_qwen35_mtp_verify_divergence SOURCE unit/test_qwen35_mtp_verify_divergence.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_verify_divergence SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_mtp_verify_divergence PRIVATE "${CMAKE_SOURCE_DIR}/src")
-    phaseshift_add_test(NAME test_qwen35_mtp_gate4e SOURCE unit/test_qwen35_mtp_gate4e.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_mtp_gate4e SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_mtp_gate4e PRIVATE "${CMAKE_SOURCE_DIR}/src")
-
-    # NgramTail Gate 1: target-only oracle stream + offline NgramTail replay.
-    # Model dir via PHASESHIFT_MODEL_DIR_MTP, corpus via
-    # PHASESHIFT_NGRAM_TAIL_GATE1_CORPUS (default tests/data/mtp_perf).
-    phaseshift_add_test(NAME test_qwen35_ngram_tail_gate1 SOURCE unit/test_qwen35_ngram_tail_gate1.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_ngram_tail_gate1 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_ngram_tail_gate1 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-
-    # NgramTail Gate 2: DFlash2 + NgramTail live speculative verify.
-    # Mode via PHASESHIFT_NGRAM_TAIL_GATE2_MODE (correctness | perf).
-    phaseshift_add_test(NAME test_dflash2_ngram_tail_gate2 SOURCE unit/test_dflash2_ngram_tail_gate2.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_dflash2_ngram_tail_gate2 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_dflash2_ngram_tail_gate2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
 endif()

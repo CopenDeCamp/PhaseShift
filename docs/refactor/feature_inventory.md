@@ -1,5 +1,12 @@
 # PhaseShift 全機能インベントリ
 
+> **実行状況**: 本棚卸しの後、REMOVE CANDIDATE の主要対象を `srcTrash/` へ隔離した
+> (R&D tools / PA probe / NgramTail / GpuMcu stub / MTP runtime / LM head proxy /
+> DFlash2 INT2 / 固定語彙)。経緯・commit・検証結果は
+> [refactor_candidates.md](refactor_candidates.md) の「実行状況」、
+> 隔離ファイルの正本は `srcTrash/README.md` を参照。
+> **本表の Default Enabled / Removed に該当する行は隔離前の状態を記録したものである。**
+
 PhaseShift リポジトリの全機能棚卸し。すべてコード側(call site / CMake / default / runtime 分岐 / tests)で確認し、docs 記述のみの機能は「現行機能」と判定していない。
 
 - 調査方式: read-only。ソース・CMake・tests は変更していない。

@@ -3,7 +3,7 @@
 #include <phaseshift/models/qwen35/runtime/sampling_selector.h>
 #include <phaseshift/models/qwen35/kernels/optimized/sampling.h>
 #include <phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.h>
-#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/radix_topn.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
 #include <hip/hip_runtime.h>
 

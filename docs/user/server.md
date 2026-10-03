@@ -113,9 +113,7 @@ debug / repro用には保守的profileを明示指定できる。
 `--dflash2-model-dir` を指定すると DFlash2 を有効化する。詳細は
 [../developer/dflash2.md](../developer/dflash2.md) を参照。
 
-spec decode の構成は `phaseshift-compute` の既定（`--dflash2-drafts 7`、NgramTail 無効）である。
-NgramTail を有効化する option は server に無く、`phaseshift-compute` を直接起動して
-`--dflash2-ngram-tail 8 --dflash2-ngram-n 5` を指定する。
+spec decode の構成は `phaseshift-compute` の既定（`--dflash2-drafts 7`）である。
 
 指定時の挙動:
 

@@ -57,7 +57,7 @@ Result<OptimizedLaunchResult> try_launch_optimized(
     HostExecutionContext& ctx,
     hipStream_t stream);
 
-Result<OptimizedLaunchResult> try_launch_lm_head_proxy_fusion(
+Result<OptimizedLaunchResult> try_launch_constraint_lm_head_exact(
     const ::ps::runtime::Program& program,
     size_t dispatch_index,
     HostExecutionContext& ctx,

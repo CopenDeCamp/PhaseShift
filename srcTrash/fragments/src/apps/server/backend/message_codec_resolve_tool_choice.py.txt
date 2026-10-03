@@ -1,0 +1,30 @@
+# origin: src/apps/server/backend/message_codec.py
+# feature: dead resolve_tool_choice (call site 0; production uses tool_constraint.resolve_tool_choice)
+# baseline: 7e27739c (isolation pre-image)
+
+def resolve_tool_choice(tool_choice: str) -> str:
+    """Normalize LocalAI's ToolChoice into one of auto / none / required / name.
+
+    Anything more specific than ``required`` is reported as ``name`` so the
+    backend can reject it explicitly rather than silently treating it as auto.
+    """
+    if tool_choice is None:
+        return "auto"
+    raw = tool_choice.strip()
+    if raw == "":
+        return "auto"
+    if raw in ("auto", "none", "required"):
+        return raw
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return "auto"
+    if isinstance(parsed, str) and parsed in ("auto", "none", "required"):
+        return parsed
+    if isinstance(parsed, dict):
+        function = parsed.get("function")
+        if isinstance(function, dict) and function.get("name"):
+            return "name"
+        if parsed.get("type") == "function":
+            return "name"
+    return "name"

@@ -1,6 +1,6 @@
 #include <phaseshift/models/qwen35/kernels/optimized/sampling.h>
 #include <phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.h>
-#include <phaseshift/models/qwen35/kernels/dflash2/draft_head_int2.h>
+#include <phaseshift/models/qwen35/kernels/dflash2/radix_topn.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
 #include <phaseshift/core/gpu/cleanup.h>
 #include <phaseshift/core/memory/types.h>

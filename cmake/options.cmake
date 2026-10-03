@@ -217,8 +217,3 @@ option(PHASESHIFT_BUILD_BENCHMARKS "Build PhaseShift benchmark executables" ON)
 # per-submission kernel sequence). Experimental.
 option(PHASESHIFT_HIP_GRAPH "Enable HIP graph execution mode" OFF)
 
-# R&D instrumentation for KV page pruning research. When OFF the probe dump
-# code is compiled out of the paged-attention dispatch and has no effect on
-# the production runtime.
-option(PHASESHIFT_PA_PROBE "Enable KV page pruning probe dump instrumentation" OFF)
-

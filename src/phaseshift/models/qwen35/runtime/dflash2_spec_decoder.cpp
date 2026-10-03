@@ -171,22 +171,6 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
         return Status::invalid_argument(
             "create_dflash2_spec_decoder: num_drafts out of range", __FILE__, __LINE__);
     }
-    const bool ngram_enabled = config.ngram_n > 0u && config.ngram_max_tail > 0u;
-    if ((config.ngram_n > 0u) != (config.ngram_max_tail > 0u)) {
-        return Status::invalid_argument(
-            "create_dflash2_spec_decoder: ngram_n and ngram_max_tail must be set together",
-            __FILE__, __LINE__);
-    }
-    if (ngram_enabled && config.ngram_window == 0u) {
-        return Status::invalid_argument(
-            "create_dflash2_spec_decoder: ngram_window must be positive", __FILE__, __LINE__);
-    }
-    if (static_cast<uint64_t>(config.num_drafts) + config.ngram_max_tail >
-        kDFlash2SpecMaxVerifyDrafts) {
-        return Status::invalid_argument(
-            "create_dflash2_spec_decoder: ngram tail exceeds verify capacity", __FILE__,
-            __LINE__);
-    }
 
     DFlash2SpecDecoder decoder;
     decoder.target = &target;
@@ -242,10 +226,6 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     decoder.gdn_rerun_reference =
         rerun_env != nullptr && rerun_env[0] != '\0' && rerun_env[0] != '0';
     uint32_t history_rows = config.num_drafts;
-    if (ngram_enabled) {
-        history_rows = std::min<uint32_t>(
-            kDFlash2SpecMaxVerifyDrafts, config.num_drafts + config.ngram_max_tail);
-    }
     const GdnStatePoolDeviceView pool_view = gdn_pool.device_view();
     if (decoder.gdn_rerun_reference || compact_requested) {
         if (decoder.gdn_conv_bytes != 0u) {
@@ -679,8 +659,6 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         room_max = std::min(remaining_tokens - 1u, room - 1u);
     }
     const uint32_t dflash_k = std::min(decoder.config.num_drafts, room_max);
-    const bool ngram_enabled =
-        decoder.config.ngram_n > 0u && decoder.config.ngram_max_tail > 0u;
 
     if (dflash_k == 0u) {
         Status st = run_single_target(decoder, pending_token, out);
@@ -689,23 +667,15 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         return out;
     }
 
-    NgramTailConfig ngram_cfg;
-    ngram_cfg.n = decoder.config.ngram_n;
-    ngram_cfg.max_tail = decoder.config.ngram_max_tail;
-    ngram_cfg.window = decoder.config.ngram_window;
-
     const bool bridge = decoder.device_token_bridge &&
                         decoder.verify_token_ids_device != nullptr &&
                         decoder.decision_staging_device != nullptr;
     const bool want_timing = tm != nullptr;
     int32_t* proposal_device = decoder.draft->proposal_tokens.data<int32_t>();
     std::array<int32_t, kDFlash2SpecMaxVerifyDrafts> drafts{};
-    std::array<int32_t, kDFlash2SpecMaxVerifyDrafts> tail_tokens{};
     std::array<int32_t, kDFlash2SpecMaxVerifyRows> sampled{};
     std::array<int32_t, kDFlash2SpecMaxVerifyRows> verify_host{};
     std::array<int32_t, 2u * kDFlash2SpecMaxVerifyRows> decision_host{};
-    NgramTailMatch ngram_match;
-    uint32_t tail_k = 0u;
     bool draft_events_recorded = false;
     bool verify_events_recorded = false;
 
@@ -776,13 +746,11 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
     }
 
     const bool need_host_seed =
-        ngram_enabled || decoder.host_proposal_visibility || decoder.constraint != nullptr;
+        decoder.host_proposal_visibility || decoder.constraint != nullptr;
     if (!bridge || need_host_seed) {
         ScopedTimer t(want_timing ? &tm->draft_d2h_ms : nullptr);
         {
-            ScopedTimer tw(want_timing ? (bridge ? &tm->ngram_seed_wait_ms
-                                                 : &tm->proposal_wait_ms)
-                                       : nullptr);
+            ScopedTimer tw(want_timing ? &tm->proposal_wait_ms : nullptr);
             if (hipStreamSynchronize(decoder.stream) != hipSuccess) {
                 return Status::hip_error(
                     "dflash2 draft sync", hipGetErrorString(hipGetLastError()), __FILE__,
@@ -802,47 +770,8 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         }
     }
 
-    if (ngram_enabled) {
-        {
-            ScopedTimer t(want_timing ? &tm->ngram_lookup_ms : nullptr);
-            Status st = propose_ngram_tail_into(
-                std::span<const int32_t>(decoder.token_history),
-                std::span<const int32_t>(drafts.data(), dflash_k), ngram_cfg,
-                std::span<int32_t>(tail_tokens.data(), tail_tokens.size()), ngram_match);
-            if (!st.ok()) return st;
-        }
-        const uint32_t max_total = std::min(room_max, kDFlash2SpecMaxVerifyDrafts);
-        uint32_t proposed = ngram_match.count;
-        if (dflash_k + proposed > max_total) {
-            proposed = max_total - dflash_k;
-        }
-        if (proposed == 0u) {
-            ngram_match = NgramTailMatch{};
-            tail_k = 0u;
-        } else {
-            ngram_match.count = proposed;
-            tail_k = proposed;
-            for (uint32_t i = 0u; i < tail_k; ++i) {
-                drafts[dflash_k + i] = tail_tokens[i];
-            }
-            if (bridge) {
-                ScopedTimer t(want_timing ? &tm->ngram_tail_h2d_ms : nullptr);
-                const hipError_t err = hipMemcpyAsync(
-                    decoder.verify_token_ids_device + 1u + dflash_k, tail_tokens.data(),
-                    static_cast<std::size_t>(tail_k) * sizeof(int32_t),
-                    hipMemcpyHostToDevice, decoder.stream);
-                if (err != hipSuccess) {
-                    return Status::hip_error("dflash2 ngram tail upload",
-                                             hipGetErrorString(err), __FILE__, __LINE__);
-                }
-            }
-        }
-    }
-
-    out.ngram = ngram_match;
     out.num_dflash_drafts = dflash_k;
-    out.num_tail_drafts = tail_k;
-    const uint32_t total_k = dflash_k + tail_k;
+    const uint32_t total_k = dflash_k;
     out.num_drafts = total_k;
 
     if (decoder.gdn_rerun_reference || decoder.gdn_compact_commit) {
@@ -1283,17 +1212,6 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
         tm->generated_tokens += out.emitted_count;
         tm->verify_rows_total += total_k + 1u;
         if (accepted >= dflash_k) ++tm->dflash_prefix_full_accepts;
-        if (ngram_enabled && tail_k > 0u) {
-            ++tm->ngram_hit_rounds;
-            tm->ngram_proposed_tokens += tail_k;
-            const uint32_t tail_accepted = accepted > dflash_k ? accepted - dflash_k : 0u;
-            tm->ngram_accepted_tokens += tail_accepted;
-            if (accepted >= dflash_k) {
-                ++tm->tail_reached_rounds;
-            } else {
-                ++tm->tail_blocked_rounds;
-            }
-        }
         tm->gdn_history_bytes = decoder.gdn_history_enabled
                                     ? static_cast<uint64_t>(decoder.gdn_history.rows) *
                                           static_cast<uint64_t>(

@@ -21,7 +21,7 @@ Qwen3.5 の推論を実際に走らせる、ホスト側ランタイムから GP
 2つのパスが同居する。
 
 - **Correctness** : 1 dispatch ごとに単一カーネル `model_dispatch_kernel` を1回 launch し、デバイス内で `host_execute_binding` の switch によって op 分岐する。実装は `correctness/detail/*.inc` に分割し、単一 TU に include する。
-- **Optimized(Auto)** : 各 dispatch を op ごとの専用 launcher で実行する。`lm_head_proxy` は複数 dispatch を消費し得るが、その他の単体 launcher は 1 dispatch を消費する。
+- **Optimized(Auto)** : 各 dispatch を op ごとの専用 launcher で実行する。`constraint_lm_head_exact` は複数 dispatch を消費し得るが、その他の単体 launcher は 1 dispatch を消費する。
 
 モードは環境変数 `PHASESHIFT_QWEN35_KERNEL_MODE` で決まる。
 
@@ -43,7 +43,7 @@ submit_batch
        ├─ (PHASESHIFT_HIP_GRAPH) graph capture/launch
        └─ launch_host_backend
             └─ execute_program      (program_executor.hip)
-                 ├─ [Auto] try_launch_lm_head_proxy_fusion  (複数 dispatch を消費し得る)
+                 ├─ [Auto] try_launch_constraint_lm_head_exact  (複数 dispatch を消費し得る)
                  ├─ [Auto] try_launch_optimized   (optimized_dispatch.hip)
                  │    └─ 1 dispatch を消費
                  └─ [fallback] launch_host_binding
@@ -63,7 +63,7 @@ complete_batch                    (executor.hip)
 
 ### 2.1 検証
 
-- `config.backend` が `Host`（`GpuMcu` は `Status::unsupported`）
+- `config.backend` が `Host`
 - `config.max_scheduled_tokens` / `max_scheduled_requests` が > 0
 - `kv_pool.dtype()` が `BF16` か `FP8_E4M3`
 - FP8 時は body/scale の要素数と device 一致
@@ -217,8 +217,8 @@ bf16 linear（非量子化）はアクティベーション量子化を挟まず
 3. `for i in 0..program.dispatches.size()`:
    - `OpDumpTimer`（`PHASESHIFT_OP_DUMP` 有効時）
    - `semantic_timing_start`（`PHASESHIFT_OP_SYNC` 有効時）
-   - **Auto モード**（`lm_head_proxy` → 単体 launcher の順に試す）:
-     - `try_launch_lm_head_proxy_fusion`
+   - **Auto モード**（`constraint_lm_head_exact` → 単体 launcher の順に試す）:
+     - `try_launch_constraint_lm_head_exact`
      - `try_launch_optimized(program, i, ctx, stream)`
      - `Launched` / `Skipped` なら `consumed_dispatches` を検証し、`i += consumed` でループ継続
      - `NotApplicable` なら fallthrough
@@ -288,75 +288,35 @@ embedding / output）に置き、`model_dispatch_correctness.hip` が単一 TU �
 
 ## 7. Optimized パス
 
-Auto モードでは `execute_program` が `lm_head_proxy`、単体 launcher の順に試す。
+Auto モードでは `execute_program` が `constraint_lm_head_exact`、単体 launcher の順に試す。
 
-### 7.1 lm_head_proxy
+### 7.1 constraint lm_head exact
 
-`try_launch_lm_head_proxy_fusion` を試す。`Launched` でなければ単体 launcher を試す。
+`try_launch_constraint_lm_head_exact` を試す。`Launched` でなければ単体 launcher を試す。
 
-適用可否は `lm_head_proxy_path(role, stochastic_outputs, constrained, mode)` が決める
-（`include/phaseshift/models/qwen35/runtime/lm_head_proxy.h`）。
+`PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT` が有効（非 0）のときだけ動作する（**既定 OFF**）。
+無効時は constrained full PSQ8 + sampling filter の full path が常に実行される。
 
-| role / mode | 既定 | mode=0 | mode=1 | mode=2 |
-| --- | --- | --- | --- | --- |
-| Verify | Fast | off | Fast | off |
-| Decode（greedy） | off | off | Fast | Shadow |
-| Decode（stochastic） / Prefill | off | off | off | off |
+適用条件:
 
-- `mode` は `PHASESHIFT_TARGET_LM_HEAD_PROXY`。**未指定時は Verify のみ Fast、
- Decode は off**（既存挙動を維持する）。`=0` で proxy 完全停止、`=1` で Fast、
- `=2` で Decode だけ Shadow。
- 例外として `phaseshift-compute` は DFlash2 有効時に未指定・空文字のときだけ `0` を
- 設定して起動する（verify の proxy は decode と logits が一致せず、DFlash2 の生成列が
- target-only greedy から分岐するため。[dflash2.md](dflash2.md) を参照）。
- 明示指定した値は DFlash2 有効時でも尊重する。
-- pool は `PHASESHIFT_TARGET_LM_HEAD_PROXY_POOL`（既定 32、`kDflash2Int2MaxPool` まで）。
-- Top-N は `dflash2_radix_topn_preferred(pool)` で legacy / radix を選ぶ。
+- constraint 付き batch（`constraint_masks` あり）かつ `role == Decode`
+- weight は PSQ8 / preshuffled / `weight_scale_group == 32` / `k_padded % 32 == 0`
+- pattern は `ACTIVATION_QUANTIZE_W4A8` → `LINEAR_PSQ8` → `SAMPLING` の 3 連続 dispatch
+- 全 output row が constraint 付き、`stochastic_outputs == 0`、`sampled == outputs`、
+  allowed count が全 row で 1 以上
+- `max(allowed) <= kConstraintLmHeadExactMaxAllowed`（128）
 
-constraint 付きの batch は `lm_head_proxy_path` を使わず、
-`select_lm_head_constrained(role, stochastic, sampled, outputs, allowed_counts, rows,
-small_threshold, coarse_pool)` が決める（同じヘッダ）。
+それ以外（mixed な constrained / unconstrained row、stochastic constraint、allowed 0、
+`max(allowed) > 128`）は full path へ fallback する。constraint で処理を諦めて
+制約を無視する fallback は無い。
 
-適用は `role == Decode`、`stochastic_outputs == 0`、`sampled == outputs`、
-全 output row が constraint 付き、allowed count が全 row で 1 以上のときだけ。
-それ以外（mixed な constrained / unconstrained row、stochastic constraint、
-allowed 0、small / large が混在）は従来の full path へ fallback する。
-constraint で処理を諦めて制約を無視する fallback は無い。
+経路: activation quantize → constraint mask から allowed token を token id 昇順に
+candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。候補集合が全 allowed token を含む限り、full PSQ8 の constrained argmax と
+同じ token を返す（exact）。candidate capacity は batch 内の `max(allowed)`、
+バッファは `kConstraintLmHeadExactMaxAllowed` で確保する。
 
-| 条件 | 経路 |
-| --- | --- |
-| `max(allowed) <= small_threshold` | ExactCandidates |
-| `min(allowed) > small_threshold` かつ `min(allowed) >= coarse_pool` | MaskedCoarse |
-| それ以外 | full path へ fallback |
-
-- **ExactCandidates**: activation quantize → constraint mask から allowed token を
-  token id 昇順に candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。
-  INT2 coarse を計算しない。候補集合が全 allowed token を含む限り、
-  full PSQ8 の constrained argmax と同じ token を返す（exact）。
-- **MaskedCoarse**: activation quantize → INT2 coarse full-vocab → constraint mask で
-  許可外を `-INFINITY` に潰す → Radix Top-N → PSQ8 exact rerank → argmax。
-  INT2 は candidate 生成にしか使わず、final score は PSQ8。
-  `min(allowed) >= coarse_pool` を要するのは、Top-N の候補が埋まらないと
-  未使用スロットに不正な ID が入るため。
-- `small_threshold` は `PHASESHIFT_TARGET_LM_HEAD_PROXY_CONSTRAINT_THRESHOLD`
-  （既定 128 = `kDflash2Int2MaxPool`、これより大きくはならない）。
-- candidate capacity は batch 内の `max(allowed)`。バッファは
-  `kDflash2Int2MaxPool` で確保する。
-- mode=2 のときは同じ経路の候補を proxy 自有 buffer へ書き、production output は
-  従来どおり full PSQ8 側にする。比較と集計は unconstrained と同じ shadow 機構を使う。
-
-適用時も前提は同じで、weight は PSQ8 / preshuffled / `weight_scale_group == 32` /
-`k_padded % 32 == 0`、pattern は `ACTIVATION_QUANTIZE_W4A8` → `LINEAR_PSQ8` →
-`SAMPLING` の 3 連続 dispatch。
-
-- **Fast**: `LmHeadCandidateProxy::select()`（activation quantize → INT2 coarse →
-  Top-N → PSQ8 candidate rerank → pool argmax）が sampling 出力へ token を書き、
-  3 dispatch を消費する。full vocab logits は計算しない。
-- **Shadow**: `select_shadow()` が proxy 自有の buffer へ書き、3 dispatch は
-  通常どおり実行される（`consumed_dispatches` を消費しない）。比較は
-  `execute_program_range` の末尾で `compare_shadow()` が行い、
-  device counter（decisions / mismatches）へ加算する。
-  Host への退避と `TARGET_LM_HEAD_PROXY_SHADOW` 行の出力は shutdown 時のみ。
+実装は `include/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.h` と
+`src/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.hip`。
 
 ### 7.2 単体 launcher の dispatch 順序
 
@@ -488,8 +448,8 @@ constraint で処理を諦めて制約を無視する fallback は無い。
   - `try_launch_kv_append` / `try_launch_paged_attention` / `try_launch_gdn_conv1d` /
     `try_launch_gdn_recurrence` / `try_launch_output_gather`
   - `read_qwen35_kernel_mode`
-- `src/phaseshift/models/qwen35/runtime/lm_head_proxy.hip`
-  - `try_launch_lm_head_proxy_fusion`
+- `src/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.hip`
+  - `try_launch_constraint_lm_head_exact`
 
 ### Correctness
 

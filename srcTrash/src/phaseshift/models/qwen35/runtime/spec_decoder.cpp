@@ -1,6 +1,5 @@
 #include <phaseshift/models/qwen35/runtime/spec_decoder.h>
 
-#include <phaseshift/models/qwen35/runtime/ngram_tail.h>
 #include <phaseshift/models/qwen35/runtime/scheduled_batch.h>
 
 #include <algorithm>
@@ -188,36 +187,6 @@ void record_token_history(SpecDecoder& decoder, const std::vector<int32_t>& emit
     }
 }
 
-void append_ngram_tail(
-    SpecDecoder& decoder, int32_t pending_token, SpecDraftSet& drafts, uint32_t k_max) {
-    const uint32_t n = decoder.config.ngram_n;
-    if (n == 0u || drafts.steps.size() >= k_max) return;
-    const std::vector<int32_t>& hist = decoder.token_history;
-
-    std::vector<int32_t> seq;
-    seq.reserve(hist.size() + 1u + drafts.steps.size());
-    seq.insert(seq.end(), hist.begin(), hist.end());
-    seq.push_back(pending_token);
-    for (const SpecDraftStep& s : drafts.steps)
-        seq.push_back(static_cast<int32_t>(s.draft_token));
-
-    NgramTailConfig cfg;
-    cfg.n = decoder.config.ngram_n;
-    cfg.max_tail = decoder.config.ngram_max_tail;
-    cfg.window = decoder.config.ngram_window;
-    auto proposal = propose_ngram_tail(seq, cfg);
-    if (!proposal.ok()) return;
-    const NgramTailProposal& value = proposal.value();
-    if (!value.hit) return;
-
-    for (int32_t token : value.tokens) {
-        if (drafts.steps.size() >= k_max) break;
-        SpecDraftStep s{};
-        s.draft_token = static_cast<uint32_t>(token);
-        drafts.steps.push_back(s);
-    }
-}
-
 Status spec_decoder_sync_prompt(
     SpecDecoder& decoder,
     const int32_t* prompt_tokens,
@@ -340,7 +309,6 @@ Result<SpecIterationOutput> spec_decoder_step(
         }
         return out;
     }
-    append_ngram_tail(decoder, pending_token, drafts, k_eff);
     const uint32_t actual_k = static_cast<uint32_t>(drafts.steps.size());
 
     std::vector<int32_t> verify_tokens(actual_k + 1u);

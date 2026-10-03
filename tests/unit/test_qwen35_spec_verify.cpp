@@ -20,7 +20,6 @@ void check(bool cond, const std::string& msg) {
 }
 
 using ps::qwen35::runtime::SpecPhase;
-using ps::qwen35::runtime::SpecTransaction;
 using ps::qwen35::runtime::SpecVerifyResult;
 
 bool tokens_equal(const std::vector<int32_t>& a, const std::vector<int32_t>& b) {
@@ -157,37 +156,6 @@ int main() {
         SpecVerifyResult out;
         auto st = ps::qwen35::runtime::spec_greedy_accept(nullptr, 2u, target, true, out);
         check(!st.ok(), "null drafts with num_drafts>0 rejected");
-    }
-
-    {
-        SpecTransaction txn;
-        ps::qwen35::runtime::MtpKvState mtp;
-        ps::qwen35::PagedSequenceState target;
-        auto st = ps::qwen35::runtime::spec_transaction_begin(txn, mtp, target);
-        check(!st.ok(), "begin rejects uninitialized states");
-        check(txn.phase == SpecPhase::IDLE, "phase stays IDLE after failed begin");
-    }
-    {
-        SpecTransaction txn;
-        auto st = ps::qwen35::runtime::spec_transaction_begin_verify(txn);
-        check(!st.ok(), "begin_verify rejects IDLE");
-    }
-    {
-        SpecTransaction txn;
-        ps::qwen35::runtime::MtpKvState mtp;
-        ps::qwen35::PagedSequenceState target;
-        SpecVerifyResult result;
-        auto st = ps::qwen35::runtime::spec_transaction_commit(txn, result, mtp, target, nullptr);
-        check(!st.ok(), "commit rejects IDLE");
-    }
-    {
-        SpecTransaction txn;
-        ps::qwen35::runtime::MtpKvState mtp;
-        ps::qwen35::PagedSequenceState target;
-        auto st = ps::qwen35::runtime::spec_transaction_rollback(txn, mtp, target, nullptr);
-        check(!st.ok(), "rollback rejects IDLE");
-        st = ps::qwen35::runtime::spec_transaction_abort(txn, mtp, target, nullptr);
-        check(!st.ok(), "abort rejects IDLE");
     }
 
     std::printf("test_qwen35_spec_verify: passed=%d failed=%d\n", g_pass, g_fail);

@@ -1,7 +1,7 @@
 #include <phaseshift/core/gpu/cleanup.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
-#include <phaseshift/models/qwen35/runtime/lm_head_proxy.h>
+#include <phaseshift/models/qwen35/runtime/constraint_lm_head_exact.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
 #include <phaseshift/models/qwen35/runtime/kv_calib_dump.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
@@ -476,9 +476,9 @@ Status execute_program_range(
         const uint32_t sem_seq = sem_on ? semantic_timing_start(stream) : 0xFFFFFFFFu;
         if (mode == Qwen35KernelMode::Auto) {
             OptimizedLaunchResult opt_result{};
-            auto lm_proxy = try_launch_lm_head_proxy_fusion(program, i, ctx, stream);
-            if (!lm_proxy.ok()) return lm_proxy.status();
-            opt_result = lm_proxy.value();
+            auto lm_exact = try_launch_constraint_lm_head_exact(program, i, ctx, stream);
+            if (!lm_exact.ok()) return lm_exact.status();
+            opt_result = lm_exact.value();
             if (opt_result.kind != OptimizedLaunchKind::Launched) {
                 auto optimized = try_launch_optimized(program, i, ctx, stream);
                 if (!optimized.ok()) return optimized.status();
@@ -543,18 +543,6 @@ Status execute_program_range(
             if (!tst.ok()) return tst;
         }
         ++i;
-    }
-    if (ctx.lm_head_shadow_pending) {
-        Status shadow_status = Status::make_ok();
-        if (ctx.lm_head_proxy != nullptr) {
-            shadow_status = ctx.lm_head_proxy->compare_shadow(
-                ctx.lm_head_shadow_full, ctx.lm_head_shadow_rows, stream);
-        }
-        ctx.lm_head_shadow_pending = false;
-        ctx.lm_head_shadow_full = nullptr;
-        ctx.lm_head_shadow_rows = 0;
-        if (!shadow_status.ok())
-            return shadow_status;
     }
 #ifdef PHASESHIFT_HIP_GRAPH
     if (ctx.staging_pool != nullptr) {

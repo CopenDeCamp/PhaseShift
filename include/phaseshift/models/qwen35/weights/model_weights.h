@@ -66,6 +66,7 @@ struct Qwen35ModelWeights {
 
 struct Qwen35LoadOptions {
     bool verify_quantized_payload_crc = false;
+    bool load_mtp_layers = false;
     ps::weights::WeightLoadOptions weights;
 };
 

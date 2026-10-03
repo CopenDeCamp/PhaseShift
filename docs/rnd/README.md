@@ -6,6 +6,11 @@
 - 現在の contract は `docs/developer/`、現在の性能値は `docs/perf/` を参照する。
 - 外部資料・外部 repository・ISA は `docs/references/` を参照する。
 - 過去のコードは Git history に任せる。archive directory は作らない。
+- この directory が参照する R&D 専用 script の一部は、production から隔離するため
+  `srcTrash/` へ移動済みである（`srcTrash/README.md` を参照）。
+  記述本文は履歴として変更していないため、リンク先は `srcTrash/tools/...` に置き換わっている。
+- 同様に、production から隔離した `docs/developer/mtp.md` / `docs/now_mtp.md` は
+  `srcTrash/docs/` へ移動している。
 - 各研究は「目的 → 条件 → 結果 → 判断 → 現在への影響」が読めることを目標とする。
   実装 diff の逐語説明や大量の途中ログは Git history へ任せる。
 

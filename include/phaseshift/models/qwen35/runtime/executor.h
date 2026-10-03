@@ -6,7 +6,7 @@
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
-#include <phaseshift/models/qwen35/runtime/lm_head_proxy.h>
+#include <phaseshift/models/qwen35/runtime/constraint_lm_head_exact.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/program/program.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
@@ -107,7 +107,7 @@ struct Executor {
     ::ps::runtime::DeviceBatchContext* batch_context = nullptr;
     ::ps::quantization::imatrix::ImatrixCollector* imatrix_collector = nullptr;
     runtime::ValueTraceSink* value_trace = nullptr;
-    runtime::LmHeadCandidateProxy lm_head_proxy;
+    runtime::ConstraintLmHeadExact constraint_lm_head;
     void* host_request_staging = nullptr;
     size_t host_staging_bytes = 0;
     void* host_pending_staging = nullptr;

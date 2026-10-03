@@ -15,7 +15,7 @@
 
 namespace ps::qwen35::runtime {
 
-class LmHeadCandidateProxy;
+class ConstraintLmHeadExact;
 
 constexpr uint64_t kDecodeAttnPartialBytes = 32u * 1024u * 1024u;
 
@@ -78,10 +78,7 @@ struct HostExecutionContext {
     uint32_t stochastic_topk_partitions = 0;
     uint32_t stochastic_topk_scratch_bytes = 0;
     uint32_t* stochastic_topk_active_counts = nullptr;
-    LmHeadCandidateProxy* lm_head_proxy = nullptr;
-    bool lm_head_shadow_pending = false;
-    const int32_t* lm_head_shadow_full = nullptr;
-    uint32_t lm_head_shadow_rows = 0;
+    ConstraintLmHeadExact* constraint_lm_head = nullptr;
     DispatchStagingPool* staging_pool = nullptr;
     const ProgramStagingMeta* program_meta = nullptr;
     ::ps::quantization::imatrix::ImatrixCollector* imatrix_collector = nullptr;

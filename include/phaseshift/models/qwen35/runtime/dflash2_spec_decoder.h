@@ -6,7 +6,6 @@
 #include <phaseshift/models/qwen35/dflash2/executor.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
-#include <phaseshift/models/qwen35/runtime/ngram_tail.h>
 #include <phaseshift/models/qwen35/runtime/token_constraint.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
@@ -31,9 +30,6 @@ struct DFlash2SpecDecoderConfig {
     StopTokens eos_tokens;
     ::ps::runtime::VerifyNumericMode verify_numeric_mode =
         ::ps::runtime::VerifyNumericMode::Exact;
-    uint32_t ngram_n = 0u;
-    uint32_t ngram_max_tail = 0u;
-    uint32_t ngram_window = 2048u;
 };
 
 struct DFlash2SpecTiming;
@@ -148,21 +144,13 @@ struct DFlash2SpecTiming {
     double rerun_ms = 0.0;
     double dflash_commit_ms = 0.0;
     double round_ms = 0.0;
-    double ngram_seed_wait_ms = 0.0;
-    double ngram_lookup_ms = 0.0;
-    double ngram_tail_h2d_ms = 0.0;
     uint32_t rounds = 0u;
     uint32_t full_accepts = 0u;
     uint32_t reruns = 0u;
     uint32_t partial_accepts = 0u;
     uint32_t accepted_drafts = 0u;
     uint32_t generated_tokens = 0u;
-    uint32_t ngram_hit_rounds = 0u;
-    uint32_t ngram_proposed_tokens = 0u;
-    uint32_t ngram_accepted_tokens = 0u;
     uint32_t dflash_prefix_full_accepts = 0u;
-    uint32_t tail_reached_rounds = 0u;
-    uint32_t tail_blocked_rounds = 0u;
     uint64_t verify_rows_total = 0u;
     uint64_t gdn_history_bytes = 0u;
 };
@@ -173,9 +161,7 @@ struct DFlash2SpecIterationOutput {
     int32_t pending_token = -1;
     uint32_t num_drafts = 0u;
     uint32_t num_dflash_drafts = 0u;
-    uint32_t num_tail_drafts = 0u;
     uint32_t num_accepted = 0u;
-    NgramTailMatch ngram{};
     bool rerun = false;
     bool finished = false;
 };

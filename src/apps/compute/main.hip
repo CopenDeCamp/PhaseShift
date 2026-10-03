@@ -2,12 +2,10 @@
 
 #include <phaseshift/models/qwen35/dflash2/config.h>
 #include <phaseshift/models/qwen35/dflash2/context_state.h>
-#include <phaseshift/models/qwen35/dflash2/draft_vocab_profile.h>
 #include <phaseshift/models/qwen35/dflash2/executor.h>
 #include <phaseshift/models/qwen35/dflash2/weights.h>
 #include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
 #include <phaseshift/models/qwen35/runtime/decode_backend.h>
-#include <phaseshift/models/qwen35/runtime/lm_head_proxy.h>
 #include <phaseshift/models/qwen35/runtime/runtime_request.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
@@ -62,8 +60,7 @@ void usage(const char* prog) {
     printf("  --constraint-tokenizer-info PATH  xgrammar tokenizer info sidecar path\n");
     printf("  --device N             GPU device (default 0)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)\n");
-    printf("  --decode-backend TYPE  host | gpu-mcu (default host);\n");
-    printf("                          gpu-mcu is unavailable in this build\n");
+    printf("  --decode-backend TYPE  host (default)\n");
     printf("  --verify-weights 0|1      verify quantized payload CRC32 on load (default 0)\n");
     printf("  --dump-logits PATH      append per-step sampled logits rows (raw f32) to PATH\n");
     printf("                          row k aligns with GENERATED_IDS[k] (prefill row first)\n");
@@ -74,9 +71,6 @@ void usage(const char* prog) {
     printf("  --dflash2-model-dir PATH  DFlash2 draft model directory; enables greedy\n");
     printf("                            speculative decoding (requires --temperature 0)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
-    printf("  --dflash2-ngram-tail N NgramTail extension length per round "
-           "(default 0 = disabled)\n");
-    printf("  --dflash2-ngram-n N    NgramTail n-gram size (default 0 = disabled)\n");
     printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
@@ -509,8 +503,6 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
                      const ps::qwen35::dflash2::DFlash2Config& dflash_config,
                      const std::string& dflash2_model_dir,
                      unsigned long dflash2_drafts,
-                     unsigned long dflash2_ngram_tail,
-                     unsigned long dflash2_ngram_n,
                      int dflash2_stats,
                      const std::string& kv_cache_dtype,
                      const ps::qwen35::runtime::SamplingConfig& sampling) {
@@ -538,25 +530,11 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
 
     const uint32_t max_seq = runtime.config().max_seq_len;
 
-    auto vocab_profile_result = ps::qwen35::dflash2::resolve_draft_vocab_profile(
-        runtime.config().model_dir, static_cast<uint32_t>(text_config.vocab_size),
-        static_cast<uint32_t>(text_config.hidden_size),
-        ps::qwen35::dflash2::draft_vocab_resolve_options_from_environment());
-    if (!vocab_profile_result.ok()) {
-        fprintf(stderr, "dflash2 draft vocabulary profile failed: %s\n",
-                vocab_profile_result.status().message().c_str());
-        return 1;
-    }
-    const auto vocab_profile = vocab_profile_result.release();
-    fprintf(stderr, "DFLASH2_DRAFT_VOCAB=%s\n", vocab_profile.reason.c_str());
-
     ps::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
     draft_config.max_rows = static_cast<uint32_t>(dflash_config.block_size);
     draft_config.max_context_rows = static_cast<uint32_t>(dflash_config.sliding_window);
     draft_config.target_lm_head = &model.weights().lm_head;
     draft_config.target_embed_tokens = &model.weights().embed_tokens;
-    draft_config.draft_vocab_file = vocab_profile.vocab_file;
-    draft_config.int2_head_mode = static_cast<int32_t>(vocab_profile.int2_head_mode);
     auto draft_result = ps::qwen35::dflash2::create_dflash2_executor(
         dflash_config, dflash_weights, arena, draft_config);
     if (!draft_result.ok()) {
@@ -591,8 +569,6 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
     decoder_config.num_drafts = static_cast<uint32_t>(dflash2_drafts);
     decoder_config.eos_tokens = text_config.stop_tokens;
     decoder_config.verify_numeric_mode = ps::runtime::VerifyNumericMode::Exact;
-    decoder_config.ngram_n = static_cast<uint32_t>(dflash2_ngram_n);
-    decoder_config.ngram_max_tail = static_cast<uint32_t>(dflash2_ngram_tail);
     auto decoder_result = ps::qwen35::runtime::create_dflash2_spec_decoder(
         executor, draft, context, sequence, gdn_pool, arena, decoder_config, stream);
     if (!decoder_result.ok()) {
@@ -671,9 +647,6 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
         printf("DFLASH2_DRAFTS=%u\n", decoder_config.num_drafts);
         printf("DFLASH2_BLOCK_SIZE=%zu\n", dflash_config.block_size);
         printf("DFLASH2_VERIFY_NUMERIC_MODE=Exact\n");
-        printf("DFLASH2_NGRAM_N=%u\n", decoder_config.ngram_n);
-        printf("DFLASH2_NGRAM_TAIL=%u\n", decoder_config.ngram_max_tail);
-        printf("DFLASH2_NGRAM_WINDOW=%u\n", decoder_config.ngram_window);
         printf("DFLASH2_ROUNDS=%u\n", timing.rounds);
         printf("DFLASH2_FULL_ACCEPTS=%u\n", timing.full_accepts);
         printf("DFLASH2_RERUNS=%u\n", timing.reruns);
@@ -692,11 +665,6 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
         printf("DFLASH2_MEAN_ACCEPTED=%.3f\n", mean_accepted);
         printf("DFLASH2_FULL_ACCEPT_RATE=%.3f\n", full_rate);
         printf("DFLASH2_EMITTED_PER_ROUND=%.3f\n", emitted_per_round);
-        printf("DFLASH2_NGRAM_HIT_ROUNDS=%u\n", timing.ngram_hit_rounds);
-        printf("DFLASH2_NGRAM_PROPOSED=%u\n", timing.ngram_proposed_tokens);
-        printf("DFLASH2_NGRAM_ACCEPTED=%u\n", timing.ngram_accepted_tokens);
-        printf("DFLASH2_TAIL_REACHED_ROUNDS=%u\n", timing.tail_reached_rounds);
-        printf("DFLASH2_TAIL_BLOCKED_ROUNDS=%u\n", timing.tail_blocked_rounds);
         printf("DFLASH2_DRAFT_MS=%.2f\n", timing.draft_ms);
         printf("DFLASH2_D2H_MS=%.2f\n", timing.draft_d2h_ms);
         printf("DFLASH2_DRAFT_GPU_MS=%.2f\n", timing.draft_gpu_ms);
@@ -840,8 +808,6 @@ struct DFlashServeContext {
     ps::qwen35::dflash2::DFlash2Config config{};
     std::string model_dir;
     uint32_t drafts = 7u;
-    uint32_t ngram_tail = 0u;
-    uint32_t ngram_n = 0u;
     ps::qwen35::dflash2::DFlash2Weights weights{};
     ps::qwen35::dflash2::DFlash2Executor executor{};
     bool executor_ready = false;
@@ -1245,8 +1211,6 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     decoder_config.num_drafts = dflash.drafts;
     decoder_config.eos_tokens = eos_tokens;
     decoder_config.verify_numeric_mode = ps::runtime::VerifyNumericMode::Exact;
-    decoder_config.ngram_n = dflash.ngram_n;
-    decoder_config.ngram_max_tail = dflash.ngram_tail;
     auto decoder_result = ps::qwen35::runtime::create_dflash2_spec_decoder(
         runtime.executor(), dflash.executor, *session->context, *session->sequence,
         gdn_pool, arena, decoder_config, stream);
@@ -1582,25 +1546,11 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         dflash.weights = weights_result.release();
 
         const auto& text_config = runtime.model().text_config();
-        auto vocab_profile_result = ps::qwen35::dflash2::resolve_draft_vocab_profile(
-            runtime.config().model_dir, static_cast<uint32_t>(text_config.vocab_size),
-            static_cast<uint32_t>(text_config.hidden_size),
-            ps::qwen35::dflash2::draft_vocab_resolve_options_from_environment());
-        if (!vocab_profile_result.ok()) {
-            fprintf(stderr, "dflash2 draft vocabulary profile failed: %s\n",
-                    vocab_profile_result.status().message().c_str());
-            return 1;
-        }
-        const auto vocab_profile = vocab_profile_result.release();
-        fprintf(stderr, "DFLASH2_DRAFT_VOCAB=%s\n", vocab_profile.reason.c_str());
-
         ps::qwen35::dflash2::DFlash2ExecutorConfig draft_config;
         draft_config.max_rows = static_cast<uint32_t>(dflash.config.block_size);
         draft_config.max_context_rows = static_cast<uint32_t>(dflash.config.sliding_window);
         draft_config.target_lm_head = &runtime.model().weights().lm_head;
         draft_config.target_embed_tokens = &runtime.model().weights().embed_tokens;
-        draft_config.draft_vocab_file = vocab_profile.vocab_file;
-        draft_config.int2_head_mode = static_cast<int32_t>(vocab_profile.int2_head_mode);
         auto draft_result = ps::qwen35::dflash2::create_dflash2_executor(
             dflash.config, dflash.weights, runtime.arena(), draft_config);
         if (!draft_result.ok()) {
@@ -1707,10 +1657,6 @@ int main(int argc, char** argv) {
     unsigned long top_k = 0;
     std::string dflash2_model_dir;
     unsigned long dflash2_drafts = 7;
-    unsigned long dflash2_ngram_tail = 0;
-    unsigned long dflash2_ngram_n = 0;
-    bool dflash2_ngram_tail_given = false;
-    bool dflash2_ngram_n_given = false;
     int dflash2_stats = 1;
 
     for (int i = 1; i < argc; ++i) {
@@ -1759,14 +1705,14 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(argv[i], "--decode-backend") == 0 && i + 1 < argc) {
             if (!ps::qwen35::runtime::parse_decode_backend(argv[++i], &decode_backend)) {
-                fprintf(stderr, "bad --decode-backend: %s (expected host | gpu-mcu)\n", argv[i]);
+                fprintf(stderr, "bad --decode-backend: %s (expected host)\n", argv[i]);
                 return 2;
             }
             const ps::Status decode_backend_status =
                 ps::qwen35::runtime::validate_decode_backend(decode_backend);
             if (!decode_backend_status.ok()) {
                 fprintf(stderr, "%s (requested: %s)\n",
-                        ps::qwen35::runtime::kGpuMcuUnavailableMessage,
+                        decode_backend_status.message().c_str(),
                         ps::qwen35::runtime::decode_backend_name(decode_backend));
                 return 2;
             }
@@ -1778,12 +1724,6 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(argv[i], "--dump-logits") == 0 && i + 1 < argc) {
             dump_logits_path = argv[++i];
-            if (ps::qwen35::runtime::target_lm_head_proxy_decode_mode() != 0u) {
-                fprintf(stderr,
-                        "--dump-logits does not support the decode lm-head proxy fast path "
-                        "(set PHASESHIFT_TARGET_LM_HEAD_PROXY=0)\n");
-                return 2;
-            }
         } else if (std::strcmp(argv[i], "--temperature") == 0 && i + 1 < argc) {
             if (!parse_float(argv[++i], sampling.temperature)) { fprintf(stderr, "bad --temperature\n"); return 2; }
         } else if (std::strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {
@@ -1800,18 +1740,6 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "bad --dflash2-drafts\n");
                 return 2;
             }
-        } else if (std::strcmp(argv[i], "--dflash2-ngram-tail") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], dflash2_ngram_tail)) {
-                fprintf(stderr, "bad --dflash2-ngram-tail\n");
-                return 2;
-            }
-            dflash2_ngram_tail_given = true;
-        } else if (std::strcmp(argv[i], "--dflash2-ngram-n") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], dflash2_ngram_n)) {
-                fprintf(stderr, "bad --dflash2-ngram-n\n");
-                return 2;
-            }
-            dflash2_ngram_n_given = true;
         } else if (std::strcmp(argv[i], "--dflash2-stats") == 0 && i + 1 < argc) {
             dflash2_stats = std::atoi(argv[++i]);
             if (dflash2_stats != 0 && dflash2_stats != 1) {
@@ -1833,28 +1761,7 @@ int main(int argc, char** argv) {
     }
 
     const bool dflash_enabled = !dflash2_model_dir.empty();
-    if (!dflash_enabled && (dflash2_ngram_tail_given || dflash2_ngram_n_given)) {
-        fprintf(stderr,
-                "--dflash2-ngram-tail / --dflash2-ngram-n require --dflash2-model-dir\n");
-        return 2;
-    }
-    if (dflash_enabled && (dflash2_ngram_tail == 0) != (dflash2_ngram_n == 0)) {
-        fprintf(stderr,
-                "--dflash2-ngram-tail and --dflash2-ngram-n must be set together "
-                "(0 and 0 disables NgramTail)\n");
-        return 2;
-    }
-    if (dflash_enabled && dflash2_drafts + dflash2_ngram_tail >
-                              ps::qwen35::runtime::kDFlash2SpecMaxVerifyDrafts) {
-        fprintf(stderr, "--dflash2-drafts + --dflash2-ngram-tail exceeds verify capacity %u\n",
-                ps::qwen35::runtime::kDFlash2SpecMaxVerifyDrafts);
-        return 2;
-    }
     if (dflash_enabled) {
-        const char* proxy_env = std::getenv("PHASESHIFT_TARGET_LM_HEAD_PROXY");
-        if (proxy_env == nullptr || proxy_env[0] == '\0') {
-            setenv("PHASESHIFT_TARGET_LM_HEAD_PROXY", "0", 1);
-        }
         if (!dump_logits_path.empty()) {
             fprintf(stderr, "dflash2 speculative decoding does not support --dump-logits\n");
             return 2;
@@ -1919,8 +1826,8 @@ int main(int argc, char** argv) {
         config.max_scheduled_tokens = config.max_seq_len;
         if (dflash_enabled) {
             config.max_scheduled_tokens = config.max_seq_len;
-            config.max_scheduled_output_rows = static_cast<uint32_t>(
-                dflash_config.block_size + dflash2_ngram_tail);
+            config.max_scheduled_output_rows =
+                static_cast<uint32_t>(dflash_config.block_size);
             config.target_hidden_tap_count =
                 static_cast<uint32_t>(dflash_config.num_target_layer_ids);
             for (std::size_t t = 0; t < dflash_config.num_target_layer_ids; ++t) {
@@ -1944,7 +1851,7 @@ int main(int argc, char** argv) {
         }
         if (dflash_enabled) {
             const unsigned long dflash_rows =
-                static_cast<unsigned long>(dflash_config.block_size) + dflash2_ngram_tail;
+                static_cast<unsigned long>(dflash_config.block_size);
             unsigned long dflash_tokens =
                 std::max<unsigned long>(prompt_ids.size(), dflash_rows);
             dflash_tokens = std::min<unsigned long>(dflash_tokens, 2048UL);
@@ -1976,8 +1883,6 @@ int main(int argc, char** argv) {
         dflash_serve.config = dflash_config;
         dflash_serve.model_dir = dflash2_model_dir;
         dflash_serve.drafts = static_cast<uint32_t>(dflash2_drafts);
-        dflash_serve.ngram_tail = static_cast<uint32_t>(dflash2_ngram_tail);
-        dflash_serve.ngram_n = static_cast<uint32_t>(dflash2_ngram_n);
     }
 
     if (serve_stdio) {
@@ -1985,8 +1890,8 @@ int main(int argc, char** argv) {
     }
     if (dflash_enabled) {
         return run_dflash2_shot(*runtime, prompt_ids, max_new_tokens, dflash_config,
-                                dflash2_model_dir, dflash2_drafts, dflash2_ngram_tail,
-                                dflash2_ngram_n, dflash2_stats, kv_cache_dtype, sampling);
+                                dflash2_model_dir, dflash2_drafts, dflash2_stats,
+                                kv_cache_dtype, sampling);
     }
     return run_single_shot(*runtime, prompt_ids, max_new_tokens, sampling,
                            kv_cache_dtype, dump_logits_path);

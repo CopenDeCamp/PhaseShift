@@ -94,14 +94,12 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
         src/apps/bench/l2_normalize.hip
         src/apps/bench/kv_append.hip
         src/apps/bench/paged_attention.hip
-        src/apps/bench/paged_prune.cpp
         src/apps/bench/rope.hip
         src/apps/bench/gdn_recurrence.hip
         src/apps/bench/gdn_conv1d.hip
         src/apps/bench/elementwise.hip
         src/apps/bench/embedding.hip
         src/apps/bench/sampling.hip
-        src/apps/bench/mtp.hip
         src/apps/bench/gpu_memory.hip
     )
     phaseshift_set_rocm_rpath(phaseshift-bench)
@@ -109,9 +107,6 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
     target_link_libraries(phaseshift-bench PRIVATE phaseshift)
     phaseshift_set_hip_archs(phaseshift-bench)
     target_include_directories(phaseshift-bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    if(PHASESHIFT_PA_PROBE)
-        target_compile_definitions(phaseshift-bench PRIVATE PHASESHIFT_PA_PROBE=1)
-    endif()
     execute_process(
         COMMAND git -C "${CMAKE_SOURCE_DIR}" rev-parse --short HEAD
         OUTPUT_VARIABLE PHASESHIFT_GIT_SHA

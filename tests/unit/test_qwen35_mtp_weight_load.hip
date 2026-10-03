@@ -35,6 +35,12 @@ static void check(bool cond, const std::string& msg) {
     if (!cond) fail(msg);
 }
 
+static qwen35::Qwen35LoadOptions mtp_load_options() {
+    qwen35::Qwen35LoadOptions o;
+    o.load_mtp_layers = true;
+    return o;
+}
+
 static void check_eq_u64(uint64_t got, uint64_t want, const std::string& msg) {
     if (got != want) fail(msg + " got=" + std::to_string(got) + " want=" + std::to_string(want));
 }
@@ -287,6 +293,7 @@ static void test_mtp_bf16_contract(gpu::GpuArena& arena, hipStream_t stream) {
     MtpFixture fixture = build_mtp_model("mtp_correct", MtpFixtureOptions{});
 
     qwen35::Qwen35LoadOptions options;
+    options.load_mtp_layers = true;
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream, options);
     if (!wr.ok()) { fail("mtp load: " + wr.status().message()); return; }
     qwen35::Qwen35ModelWeights w = wr.release();
@@ -364,6 +371,7 @@ static void test_mtp_bf16_contract(gpu::GpuArena& arena, hipStream_t stream) {
                                (body_lower.ok() ? "" : body_lower.status().message().c_str()));
 
     qwen35::Qwen35LoadOptions no_pre;
+    no_pre.load_mtp_layers = true;
     no_pre.weights.preshuffle = false;
     auto wr2 = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream, no_pre);
     if (!wr2.ok()) { fail("mtp load skip_preshuffle: " + wr2.status().message()); return; }
@@ -381,7 +389,7 @@ static void test_mtp_absent(gpu::GpuArena& arena, hipStream_t stream) {
     MtpFixture fixture = build_mtp_model("mtp_absent", opts);
 
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream,
-                                                           qwen35::Qwen35LoadOptions{});
+                                                           mtp_load_options());
     if (!wr.ok()) { fail("mtp absent load: " + wr.status().message()); return; }
     qwen35::Qwen35ModelWeights w = wr.release();
     check(!w.mtp.present, "case C mtp.present == false");
@@ -401,7 +409,7 @@ static void test_mtp_fc_transposed(gpu::GpuArena& arena, hipStream_t stream) {
     MtpFixture fixture = build_mtp_model("mtp_fc_t", opts);
 
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream,
-                                                           qwen35::Qwen35LoadOptions{});
+                                                           mtp_load_options());
     if (!wr.ok()) { fail("case D load: " + wr.status().message()); return; }
     qwen35::Qwen35ModelWeights w = wr.release();
     check(w.mtp.present, "case D mtp present");
@@ -424,7 +432,7 @@ static void test_mtp_missing_norm(gpu::GpuArena& arena, hipStream_t stream) {
     MtpFixture fixture = build_mtp_model("mtp_missing_norm", opts);
 
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream,
-                                                           qwen35::Qwen35LoadOptions{});
+                                                           mtp_load_options());
     check(!wr.ok(), "case E load must fail on missing norm");
     if (!wr.ok()) {
         check_contains(wr.status().message(), "mtp.pre_fc_norm_hidden.weight", "case E message");
@@ -438,7 +446,7 @@ static void test_mtp_wrong_norm_size(gpu::GpuArena& arena, hipStream_t stream) {
     MtpFixture fixture = build_mtp_model("mtp_norm31", opts);
 
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream,
-                                                           qwen35::Qwen35LoadOptions{});
+                                                           mtp_load_options());
     if (!wr.ok()) { fail("case F load: " + wr.status().message()); return; }
     qwen35::Qwen35ModelWeights w = wr.release();
 
@@ -458,7 +466,7 @@ static void test_mtp_mlp_transposed(gpu::GpuArena& arena, hipStream_t stream) {
     MtpFixture fixture = build_mtp_model("mtp_gate_t", opts);
 
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream,
-                                                           qwen35::Qwen35LoadOptions{});
+                                                           mtp_load_options());
     if (!wr.ok()) { fail("case G load: " + wr.status().message()); return; }
     qwen35::Qwen35ModelWeights w = wr.release();
 
@@ -479,7 +487,7 @@ static void test_mtp_attn_wrong_geometry(gpu::GpuArena& arena, hipStream_t strea
     MtpFixture fixture = build_mtp_model("mtp_q_t", opts);
 
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream,
-                                                           qwen35::Qwen35LoadOptions{});
+                                                           mtp_load_options());
     if (!wr.ok()) { fail("case H load: " + wr.status().message()); return; }
     qwen35::Qwen35ModelWeights w = wr.release();
 
@@ -496,7 +504,7 @@ static void test_mtp_attn_wrong_geometry(gpu::GpuArena& arena, hipStream_t strea
     opts2.mtp_k_proj_shape = {17, 32};
     MtpFixture fixture2 = build_mtp_model("mtp_k_bad", opts2);
     auto wr2 = qwen35::load_qwen35_weights_from_safetensors(fixture2.dir.string(), arena, stream,
-                                                            qwen35::Qwen35LoadOptions{});
+                                                            mtp_load_options());
     if (!wr2.ok()) { fail("case H2 load: " + wr2.status().message()); return; }
     qwen35::Qwen35ModelWeights w2 = wr2.release();
     auto lower2 = qwen35::lower_qwen35_mtp_to_primitives(config, w2);
@@ -513,7 +521,7 @@ static void test_mtp_multi_layer_rejected(gpu::GpuArena& arena, hipStream_t stre
     MtpFixture fixture = build_mtp_model("mtp_2layers", opts);
 
     auto wr = qwen35::load_qwen35_weights_from_safetensors(fixture.dir.string(), arena, stream,
-                                                           qwen35::Qwen35LoadOptions{});
+                                                           mtp_load_options());
     check(!wr.ok(), "case I load must fail with 2 MTP layers");
     if (!wr.ok()) {
         check_contains(wr.status().message(), "checkpoint contains 2 MTP layers", "case I message");
