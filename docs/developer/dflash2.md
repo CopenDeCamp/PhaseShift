@@ -34,8 +34,7 @@ Exact 数値モードで verify し、一致した prefix だけを commit す�
 - runtime 統合は `phaseshift-compute` の `run_dflash2_shot()` にある。executor / pool /
   arena / stream は `Qwen35ComputeRuntime` の accessor から取得する。`phaseshift-cli` は
   `--dflash2-model-dir` / `--dflash2-drafts` / `--dflash2-stats` を
-  `phaseshift-compute` に転送し、NgramTail option（`--dflash2-ngram-tail` /
-  `--dflash2-ngram-n`、既定 0）は転送しない。
+  `phaseshift-compute` に転送する。
 - `--serve-stdio` は `DFlashServeContext` 経由で同じ decoder 設定を作る。
   `phaseshift-server` も `--dflash2-model-dir` / `--dflash2-drafts` のみ転送する。
 
@@ -754,34 +753,11 @@ installは`tokenizer_vocab_sha256`により表現形式に依存しないtoken�
    sampled token を emit して target tap 1 row を ring へ append する。
 3. `K > 0` のとき:
    - DFlash proposal（`dflash2_propose_cached`）を行い、draft 列を得る。
-   - NgramTail が有効（`ngram_n > 0` かつ `ngram_max_tail > 0`）のときは、
-     proposal の D2H により draft 列を host へ取り出し、`propose_ngram_tail_into()` で
-     `token_history`（committed のみ）を linear scan して tail を得る。
-     composite は `[anchor, draft_0..draft_{K-1}, tail_0..tail_{T'-1}]`
-     （`T' = min(提案数, room, verify capacity - K)`）となる。
-   - target verify: `[anchor, composite]` の `1 + K + T'` 行を
+   - target verify: `[anchor, composite]` の `1 + K` 行を
      `execution_class = PREFILL`（行数 > 1 のとき）, `speculative_verify = true`,
      `verify_numeric_mode = config.verify_numeric_mode`（既定 **Exact**）,
-     `num_output_rows = 1 + K + T'`, `prefix_tokens = position` で実行する。
+     `num_output_rows = 1 + K`, `prefix_tokens = position` で実行する。
    - target samples から `spec_greedy_accept` で longest-prefix acceptance を行う。
-
-### NgramTail extension
-
-`DFlash2SpecDecoderConfig` の `ngram_n` / `ngram_max_tail` / `ngram_window`
-（既定 0 / 0 / 2048 = 無効）が有効なとき、DFlash proposal の後ろへ CPU で n-gram
-continuation を append する。実装は `propose_ngram_tail_into()`
-（`src/phaseshift/models/qwen35/runtime/ngram_tail.cpp`、allocation-free）。
-
-- seed = `(token_history + DFlash drafts)` の末尾 `n` token。
-  `token_history` は target が確定した token のみを保持する。
-- candidate は `token_history` の直近 `window` token を後方から走査した最初の一致。
-  DFlash draft は seed に使うが candidate / continuation の源には使わない。
-- continuation は `token_history[candidate_end ...]` から
-  `min(max_tail, 残り token 数, 出力 buffer)` 個。
-- future leakage: `candidate_start < hsize`、`candidate_end <= hsize`、
-  `candidate_end + count <= hsize`（`hsize = token_history.size()`）。
-- window 内に一致がなければ tail は 0 で、verify 行は DFlash 分だけになる。
-  hit しない round の追加コストは proposal D2H（seed 取得）のみである。
 
 ### accept / reject / commit
 
@@ -837,20 +813,14 @@ compact と history で生成列は一致する。round 時間は compact が +2
     （live slot と同一 layout）
   - `recurrent`: history path のみ `[row][num_gdn_states][num_v_heads][head_k][head_v]` F32
     （live slot と同一 layout）
-- rows = `config.num_drafts + config.ngram_max_tail`（NgramTail 無効なら
-  `config.num_drafts`）。capture_rows は round の実 draft 数（`K + T'`）。
-  NgramTail 有効構成（K=7 + T=8）では 15 row である。
+- rows = `config.num_drafts`。capture_rows は round の実 draft 数（`K`）。
 - allocation は create 時の 1 回のみ。hot path allocation は行わない。
 - history / compact log は `DFlash2SpecDecoder` ごとに確保する。arena は bump のみで
   個別 free が無いため、同時 N decoder はこの値を N 倍で確保する。
 - create 時に `history bytes > kDFlash2SpecHistoryBytesMax`（2.25 GiB）なら
   decoder create を FAIL する（FP16 化等で逃げない）。27B geometry
-  （146.8 MiB/row）では rows ≤ 15 が上限で、これは opt-in 推奨構成の K=7 + T=8 に
- ちょうど合う。
+  （146.8 MiB/row）では rows ≤ 15 が上限である。
 - `DFlash2SpecDecoderConfig::num_drafts` は `1..max_draft_tokens()` でなければ error。
-- `ngram_n` / `ngram_max_tail` はどちらも 0 かどちらも正の値でなければ error。
-  正の値のとき `num_drafts + ngram_max_tail <= kDFlash2SpecMaxVerifyDrafts`（63）を
-  要求する。
 
 capture:
 
@@ -955,12 +925,6 @@ executor input buffer の D2D をそのまま capture する。
 
 proposal → target verify の間に `hipStreamSynchronize` も D2H も存在しない。
 
-NgramTail 有効時は proposal 直後に追加の sync が入る。proposal D2H
-（`ngram_seed_wait_ms` / `proposal_copy_ms`）→ CPU lookup（`ngram_lookup_ms`）→
-tail のみ H2D（`ngram_tail_h2d_ms`）→ verify submit の順で、DFlash 部分は
-device のまま（D2D relay）である。composite 全体を host 経由で再アップロードはしない。
-NgramTail 無効時は上記 1..7 のとおり round 中の Host sync は 1 回である。
-
 legacy Host bridge では proposal 直後に `hipStreamSynchronize` + D2H を行い、target
 samples を別途 D2H する。
 
@@ -982,20 +946,13 @@ samples を別途 D2H する。
 
 - `--dflash2-model-dir PATH`: DFlash2 draft model directory（指定で DFlash mode）
 - `--dflash2-drafts N`: 1 round の DFlash draft 数（default 7、`block_size - 1` 以下）
-- `--dflash2-ngram-tail N`: NgramTail extension の最大長（default **0** = 無効）
-- `--dflash2-ngram-n N`: NgramTail の n-gram 長（default **0** = 無効）
 - `--dflash2-stats 0|1`: speculative decode 統計行の出力（default 1）
 
-DFlash2 有効時の既定構成は **DFlash2 K=7 + NgramTail 無効**、target verify は
-`VerifyNumericMode::Exact`、GDN は history path である。NgramTail は opt-in であり、
-有効時の推奨値は Gate 2 の結論に従って
-`--dflash2-ngram-tail 8 --dflash2-ngram-n 5`（window 2048、`T >= 16` は不採用）である。
-採否は workload 依存（`docs/rnd/spec_decode/ngram_tail_gate3.md`）。
-`window` は CLI option を持たず `DFlash2SpecDecoderConfig::ngram_window` の既定 2048 を
-使う。両 ngram option はどちらも 0（無効）かどちらも正の値でなければならない。
+DFlash2 有効時の既定構成は **DFlash2 K=7**、target verify は
+`VerifyNumericMode::Exact`、GDN は history path である。
 
 `phaseshift-cli` / `phaseshift-server` は `--dflash2-model-dir` と `--dflash2-drafts` のみ
-`phaseshift-compute` へ転送し、ngram option は転送しない（= compute の既定をそのまま使う）。
+`phaseshift-compute` へ転送する（= compute の既定をそのまま使う）。
 
 ### lm_head proxy（DFlash2 有効時）
 
@@ -1010,9 +967,6 @@ DFlash2 有効時は `PHASESHIFT_TARGET_LM_HEAD_PROXY` が未指定・空文字�
 
 - `--dump-logits`
 - `--dflash2-drafts` が `block_size - 1` を超える
-- `--dflash2-drafts + --dflash2-ngram-tail` が verify capacity（draft 63）を超える
-- `--dflash2-ngram-tail` / `--dflash2-ngram-n` の片方だけが 0
-- `--dflash2-model-dir` なしでの ngram option 指定
 
 silent fallback は行わない。
 
@@ -1097,13 +1051,10 @@ pool leak 検査（kv page / seq slot / gdn slot）は DFlash mode でも共通�
 
 ```
 DFLASH2_DRAFTS, DFLASH2_BLOCK_SIZE, DFLASH2_VERIFY_NUMERIC_MODE=Exact,
-DFLASH2_NGRAM_N, DFLASH2_NGRAM_TAIL, DFLASH2_NGRAM_WINDOW,
 DFLASH2_ROUNDS, DFLASH2_FULL_ACCEPTS, DFLASH2_RERUNS, DFLASH2_PARTIAL_ACCEPTS,
 DFLASH2_GDN_HISTORY_BYTES, DFLASH2_GDN_SNAPSHOT_BYTES, DFLASH2_GDN_COMPACT_BYTES,
 DFLASH2_GDN_MODE, DFLASH2_ACCEPTED_DRAFTS,
 DFLASH2_MEAN_ACCEPTED, DFLASH2_FULL_ACCEPT_RATE, DFLASH2_EMITTED_PER_ROUND,
-DFLASH2_NGRAM_HIT_ROUNDS, DFLASH2_NGRAM_PROPOSED, DFLASH2_NGRAM_ACCEPTED,
-DFLASH2_TAIL_REACHED_ROUNDS, DFLASH2_TAIL_BLOCKED_ROUNDS,
 DFLASH2_DRAFT_MS, DFLASH2_D2H_MS, DFLASH2_DRAFT_GPU_MS, DFLASH2_PROPOSAL_WAIT_MS,
 DFLASH2_PROPOSAL_COPY_MS, DFLASH2_VERIFY_MS, DFLASH2_VERIFY_GPU_MS,
 DFLASH2_DECISION_WAIT_MS, DFLASH2_DECISION_D2H_MS, DFLASH2_DEVICE_TOKEN_BRIDGE,
@@ -1129,9 +1080,7 @@ DFlash mode の出力を扱える。
   停止時。DFlash2 有効時の既定がこれである）。
 - target verify は Exact 数値モードで行う。
 - drafter kernel は D2D memcpy による relay を行わない。
-- NgramTail 無効時、hot-path enqueue API は sync / D2H / H2D / allocation を行わない。
-  NgramTail 有効時の seed D2H と tail H2D は `dflash2_spec_step` の明示経路であり、
-  proposal 側の enqueue API には含まれない。
+- hot-path enqueue API は sync / D2H / H2D / allocation を行わない。
 - PSQ4 drafter でも `GENERATED_IDS` は target-only greedy と一致する。
 - すべての契約違反・非対応構成は明示的な error とし、silent fallback しない。
 - buffer は所有側（`Executor` / `DFlash2Executor` / `DFlash2ContextState` /
@@ -1155,7 +1104,7 @@ DFlash mode の出力を扱える。
 - attention GQA kernel は `q_heads == 4 * kv_heads`、`head_dim == 128` を要求し、それ以外は
   ring 参照実装へフォールバックする（不成立自体はエラーではない）。
 - GDN history は `history bytes > 2.25 GiB` のとき create を FAIL する。
-  27B geometry では `num_drafts + ngram_max_tail <= 15` が上限になる。
+  27B geometry では `num_drafts <= 15` が上限になる。
 - INT2 coarse head は preshuffled な PSQ8 lm_head を要求する。作れない場合は error。
 - PSQ4 drafter の activation 量子化は allowlist geometry を要求し、非対応時は error。
 - `--dflash2-drafts` は `block_size - 1` 以下。`block_size <= max_scheduled_tokens` を

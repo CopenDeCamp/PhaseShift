@@ -511,11 +511,6 @@ int main() {
                                       std::getenv("PHASESHIFT_MTP_DRAFT_DISCARD_TAU"), nullptr)
                                 : -1.0e30f;
                     }
-                    if (const char* ng = std::getenv("PHASESHIFT_MTP_NGRAM_N"))
-                        dcfg_k.ngram_n = static_cast<uint32_t>(std::strtoul(ng, nullptr, 10));
-                    if (const char* nt = std::getenv("PHASESHIFT_MTP_NGRAM_TAIL"))
-                        dcfg_k.ngram_max_tail =
-                            static_cast<uint32_t>(std::strtoul(nt, nullptr, 10));
                     dcfg_k.verify_numeric_mode = verify_exact
                         ? ps::runtime::VerifyNumericMode::Exact
                         : ps::runtime::VerifyNumericMode::Fast;

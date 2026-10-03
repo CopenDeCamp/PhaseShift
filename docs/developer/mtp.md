@@ -319,15 +319,14 @@ conv / recurrent を `spec_gdn_snapshot`（D2D copy）し、partial accept で�
    `K == 0` なら transaction を開かず `run_single_decode` で 1 token を生成する。
 2. transaction begin、GDN snapshot、`mtp_generate_drafts`。
    draft が 0 本なら rollback して single decode に落とす。
-3. optional の n-gram tail（`ngram_n > 0`）を draft 列へ append する。
-4. target verify: `[pending, draft_0..draft_{K-1}]` の `actual_k + 1` 行を
+3. target verify: `[pending, draft_0..draft_{K-1}]` の `actual_k + 1` 行を
    `speculative_verify = true`、`verify_numeric_mode = config.verify_numeric_mode`、
    `num_output_rows = actual_k + 1`、`prefix_tokens = sequence.position` で実行する。
-5. `spec_transaction_begin_verify` の後、`spec_greedy_accept` で accept を決める。
-6. 全 accept: verify の `final_hidden[actual_k]` を `pending_hidden` にして commit する。
-7. partial accept: GDN を restore し `sequence.position` を戻し、`[pending, accepted
+4. `spec_transaction_begin_verify` の後、`spec_greedy_accept` で accept を決める。
+5. 全 accept: verify の `final_hidden[actual_k]` を `pending_hidden` にして commit する。
+6. partial accept: GDN を restore し `sequence.position` を戻し、`[pending, accepted
    drafts]` を再 forward して、その `final_hidden` を `pending_hidden` にして commit する。
-8. emitted token と pending token を返す。stop token（`eos_tokens`）は emitted を最初の
+7. emitted token と pending token を返す。stop token（`eos_tokens`）は emitted を最初の
    stop token まで truncate し `finished = true`。pending が stop token でも `finished = true`。
 
 `SpecIterationOutput` は emitted / pending のほかに 1 update の内訳と状態遷移を返す。
@@ -336,7 +335,7 @@ conv / recurrent を `spec_gdn_snapshot`（D2D copy）し、partial accept で�
 | --- | --- |
 | `num_accepted_drafts` | accept した draft 数 |
 | `num_drafts_generated` | verify に渡した draft 数 |
-| `num_mtp_drafts` | `mtp_generate_drafts` が返した draft 数（n-gram tail 未加算） |
+| `num_mtp_drafts` | `mtp_generate_drafts` が返した draft 数 |
 | `mtp_length_before` | transaction 開始時、すなわち draft 開始直前の MTP `logical_length` |
 | `mtp_length_after` | commit / rollback 後の MTP `logical_length` |
 | `rerun` | partial accept で accepted prefix の再 forward を行ったとき true |
@@ -414,9 +413,6 @@ MTP KV 容量は `num_pages * page_tokens`（既定 64 token）である。
 | `eos_tokens` | 空 | generation stop token 列（空で無効。いずれかで停止） |
 | `verify_numeric_mode` | `Fast` | verify の numeric mode |
 | `draft_policy` | 無効 | dynamic / discard policy |
-| `ngram_n` | 0 | n-gram tail の n（0 で無効） |
-| `ngram_max_tail` | 0 | n-gram tail の最大長 |
-| `ngram_window` | 2048 | n-gram 探索窓 |
 
 `MtpDraftPolicy`: `dynamic`（既定 false）、`stop_margin`、`min_drafts`（既定 1）、
 `enable_discard`（既定 false）、`discard_margin`。

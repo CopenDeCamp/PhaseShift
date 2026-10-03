@@ -136,7 +136,6 @@ phaseshift_add_test(NAME test_qwen35_mtp_state SOURCE unit/test_qwen35_mtp_state
 target_include_directories(test_qwen35_mtp_state PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_lm_head_proxy_path SOURCE unit/test_lm_head_proxy_path.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_ngram_tail SOURCE unit/test_ngram_tail.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_decode_backend_contract SOURCE unit/test_decode_backend_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_qwen35_spec_transaction SOURCE unit/test_qwen35_spec_transaction.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35 phaseshift_qwen35_runtime)
 target_include_directories(test_qwen35_spec_transaction PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -319,7 +318,6 @@ add_custom_target(
         test_qwen35_mtp_state
         test_qwen35_spec_verify
         test_lm_head_proxy_path
-        test_ngram_tail
         test_decode_backend_contract
         test_qwen35_spec_transaction
         test_architecture_boundaries
@@ -608,17 +606,4 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
     phaseshift_add_test(NAME test_qwen35_mtp_gate4e SOURCE unit/test_qwen35_mtp_gate4e.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_qwen35_mtp_gate4e SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
     target_include_directories(test_qwen35_mtp_gate4e PRIVATE "${CMAKE_SOURCE_DIR}/src")
-
-    # NgramTail Gate 1: target-only oracle stream + offline NgramTail replay.
-    # Model dir via PHASESHIFT_MODEL_DIR_MTP, corpus via
-    # PHASESHIFT_NGRAM_TAIL_GATE1_CORPUS (default tests/data/mtp_perf).
-    phaseshift_add_test(NAME test_qwen35_ngram_tail_gate1 SOURCE unit/test_qwen35_ngram_tail_gate1.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_qwen35_ngram_tail_gate1 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_qwen35_ngram_tail_gate1 PRIVATE "${CMAKE_SOURCE_DIR}/src")
-
-    # NgramTail Gate 2: DFlash2 + NgramTail live speculative verify.
-    # Mode via PHASESHIFT_NGRAM_TAIL_GATE2_MODE (correctness | perf).
-    phaseshift_add_test(NAME test_dflash2_ngram_tail_gate2 SOURCE unit/test_dflash2_ngram_tail_gate2.hip LABELS "gpu1;optional;external_files" TIMEOUT 7200 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    target_include_directories(test_dflash2_ngram_tail_gate2 SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/vendor")
-    target_include_directories(test_dflash2_ngram_tail_gate2 PRIVATE "${CMAKE_SOURCE_DIR}/src")
 endif()

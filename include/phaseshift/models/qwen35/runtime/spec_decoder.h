@@ -18,9 +18,6 @@ struct SpecDecoderConfig {
     ::ps::runtime::VerifyNumericMode verify_numeric_mode =
         ::ps::runtime::VerifyNumericMode::Fast;
     MtpDraftPolicy draft_policy;
-    uint32_t ngram_n = 0u;
-    uint32_t ngram_max_tail = 0u;
-    uint32_t ngram_window = 2048u;
 };
 
 struct SpecDecoderTiming {
