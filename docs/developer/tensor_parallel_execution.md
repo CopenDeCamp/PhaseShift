@@ -195,6 +195,10 @@ class TpTransport {
 `hipDeviceCanAccessPeer` は両方向 1 を返すが、**kernel からの peer load は
 正しいデータを返さない**（ゼロまたは別データ。サイズ・実行ごとに変動）。
 `hipMemcpyPeerAsync` も不安定で、`HSA_FORCE_FINE_GRAIN_PCIE=1` は改善しない。
+peer READ は source を H2D で初期化しても `__threadfence_system` を付けても
+D2D copy を経由しても壊れるため、L2 writeback ではなく PCIe remote-read path
+自体の問題である。SDMA も PUSH（source device stream = local read + posted peer
+write）は安定し、PULL（destination device stream = remote read）は壊れる。
 一方 **kernel からの peer store は 4 KiB〜1 MiB / 両方向 / 1000 回で再現性を
 もって正常**である。本 transport は peer store のみで構成している。
 切り分けの記録は [docs/rnd/tp_exec2_p2p.md](../rnd/tp_exec2_p2p.md)。

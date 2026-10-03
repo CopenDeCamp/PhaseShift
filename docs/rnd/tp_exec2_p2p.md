@@ -42,6 +42,33 @@ local fill/verify は GPU0/GPU1 とも PASS（P2P 以前の問題ではない）
 `hipMemcpyPeerAsync` は 4 KiB で約 50%、64 KiB / 1 MiB で 100% 不一致。
 DMA copy path は read 側の欠陥を引きずる。
 
+### Gate 11: peer READ の source provenance
+
+peer READ の source データの生成方法を変えて比較（4 KiB、repeat=100）。
+
+| source の作り方 | peer READ |
+|---|---|
+| GPU1 kernel fill | FAIL 100/100 |
+| GPU1 kernel fill + `__threadfence_system()` | FAIL 100/100 |
+| GPU1 へ H2D (`hipMemcpy` HostToDevice) | FAIL 100/100 |
+| GPU1 kernel fill → local D2D copy → その copy を read | FAIL 100/100 |
+
+kernel が書いた L2 dirty line が原因なら H2D 初期化や D2D copy で改善するはずだが、
+全 provenance で FAIL。**gfx1201 の L2 / system-scope writeback 説は否定**され、
+PCIe remote-read path そのものが本命となる。
+
+### Gate 12: SDMA の PUSH と PULL
+
+`hipMemcpyPeerAsync` は stream がどの device に属するかで「local read + peer write」
+になるか「peer read + local write」になるかが変わる。
+
+| mode | stream | 経路 | 結果 |
+|---|---|---|---|
+| PUSH | source device | local read + posted peer write | **PASS 100/100**（両方向） |
+| PULL | destination device | peer read + local write | **FAIL 100/100**（両方向） |
+
+shader の peer-store が安定し peer-load が壊れるのと同じ構図。
+
 ### Gate 9: HSA_FORCE_FINE_GRAIN_PCIE
 
 `HSA_FORCE_FINE_GRAIN_PCIE=1` を付けても READ の不一致は改善しなかった
@@ -71,6 +98,12 @@ record は同 device event で行う）だけで peer write → local reduce →
 
 - 原因は kernel の **peer load** 経路（および DMA copy path）にあり、
   PhaseShift 側の実装ではない。`HSA_FORCE_FINE_GRAIN_PCIE` では回復しない。
+- H2D 初期化・`__threadfence_system`・D2D copy のいずれでも peer READ は壊れるため、
+  L2 / system-scope writeback ではなく **PCIe の Memory Read Request →
+  Completion With Data 経路そのもの**が成立していない。
+- SDMA でも PUSH（local read + posted peer write）は安定し、PULL（remote read）は
+  壊れる。**「他 GPU のメモリを読む経路」だけが異常**で、「他 GPU のメモリへ
+  posted write する経路」は正常である。
 - **kernel の peer store は安定**しているため、peer store のみで reduction を
   構成すれば正しい P2P が成立する。
 
