@@ -226,12 +226,19 @@
 | Phase | commit 内容 | 対象 | 結果 |
 | --- | --- | --- | --- |
 | 1 | archive obsolete rnd tools | `tools/rnd/` ほか 61ファイル | build のみ(PASS) |
-| 2 | archive paged attention pruning poc | `paged_prune.cpp` + PA probe 221行 | 134/134 PASS |
+| 2 | archive paged attention pruning poc | `paged_prune.cpp` + PA probe 221行(**後日完全削除**) | 134/134 PASS |
 | 3 | remove ngram tail from active runtime | NgramTail 一式 + CLI 2本 | 133/133 PASS |
 | 4 | remove gpu mcu placeholder | `DecodeBackend::GpuMcu` + dead helper | 132/132 PASS |
 | 5 | archive unused mtp runtime | MTP runtime / bench / tests / docs | 128/128 PASS |
 | 6 | split exact constrained lm head path | proxy 隔離 + ExactCandidates 分離 | 122/122 PASS |
 | 7 | archive dflash2 int2 and fixed vocab paths | INT2 / 固定語彙 + radix/psq8 分離 | 117/117 PASS |
+
+### 後続の完全削除(2026-10-03)
+
+Phase 2 で srcTrash へ隔離した PA probe / paged-prune は、
+「runtime 未統合・call site 0 件・既定 OFF で生成経路すらない」ことを確認した上で
+**srcTrash からも完全削除した**(AGENTS.md「history は Git で管理する」に準拠)。
+復元は `git show 325bc5b7^:<path>`。研究記録 `docs/rnd/attention/kv_page_pruning_*.md` は残存。
 
 ### 承認済みの逸脱
 

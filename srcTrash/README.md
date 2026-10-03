@@ -37,21 +37,26 @@
   (個別の rnd 記述本文は履歴として変更していない)。
 - **restore note**: `git mv` 済み。元 path から戻せる。
 
-### 2. PA probe / paged-prune
+### 2. PA probe / paged-prune(完全削除)
 
 - **reason**: KV page pruning 研究は runtime 未統合。probe は **call site が 0 件**
   (`probe_dump_inputs` / `probe_dump_output` は定義のみ)で、`PHASESHIFT_PA_PROBE=ON`
-  にしても dump は生成されなかった。
+  にしても dump は生成されなかった。`paged-prune` は既存 dump を読むだけの PoC で、
+  dump を生成できる経路自体が機能していない。
 - **original path**: `src/apps/bench/paged_prune.cpp`(642行)、
   `src/phaseshift/models/qwen35/runtime/paged_attention_dispatch.hip` の probe block
   (include 9行 + 実装 221行)
-- **fallback path**: fragment に pre-image を保存
-  (`srcTrash/fragments/src/phaseshift/models/qwen35/runtime/paged_attention_dispatch_PA_PROBE.txt`)
-- **moved tests**: なし(`paged-prune` は `test_bench_help_*` の対象外)
+- **削除状況**: 2026-10-03 に **srcTrash からも完全削除した**
+  (本 README と `docs/refactor/` の記録だけを残す)。
 - **removed CLI/env**: `phaseshift-bench paged-prune` subcommand、
   `PHASESHIFT_PA_PROBE` CMake option、`PHASESHIFT_PA_PROBE_DIR` / `_LAYER` / `_CONTEXT`
 - **removal rationale**: 既定ビルドと同一挙動(既定 OFF かつ未呼び出し)。
-- **restore note**: fragment + Git history。
+  AGENTS.md「history は Git で管理する」に従い archive は残さない。
+- **restore note**: Git history のみ。
+  - `git show 325bc5b7^:src/apps/bench/paged_prune.cpp`
+  - `git show 325bc5b7^:src/phaseshift/models/qwen35/runtime/paged_attention_dispatch.hip`
+    (probe block は当該 revision の `#if defined(PHASESHIFT_PA_PROBE)` 範囲)
+  - 研究の経緯は `docs/rnd/attention/kv_page_pruning_*.md` に残存。
 
 ### 3. NgramTail
 
@@ -187,8 +192,9 @@
 
 ## 統計
 
-- 隔離した独立ファイル: tools 61 / tests 34 / src 11 / include 7 / docs 3
-- 隔離した断片(fragment): 7
+- 隔離した独立ファイル: tools 61 / tests 34 / src 10 / include 7 / docs 3
+- 隔離した断片(fragment): 6
+- 完全削除(PA probe / paged-prune): 2ファイルは srcTrash にも残さず Git history のみ
 - required acceptance(実測): 隔離前 **134件 PASS** → 隔離後 **117件 PASS**
   - Phase 3 (NgramTail): `test_ngram_tail` −1 → 133
   - Phase 4 (GpuMcu): `test_compute_decode_backend_gpu_mcu` −1 → 132
