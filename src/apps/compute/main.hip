@@ -62,8 +62,7 @@ void usage(const char* prog) {
     printf("  --constraint-tokenizer-info PATH  xgrammar tokenizer info sidecar path\n");
     printf("  --device N             GPU device (default 0)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)\n");
-    printf("  --decode-backend TYPE  host | gpu-mcu (default host);\n");
-    printf("                          gpu-mcu is unavailable in this build\n");
+    printf("  --decode-backend TYPE  host (default)\n");
     printf("  --verify-weights 0|1      verify quantized payload CRC32 on load (default 0)\n");
     printf("  --dump-logits PATH      append per-step sampled logits rows (raw f32) to PATH\n");
     printf("                          row k aligns with GENERATED_IDS[k] (prefill row first)\n");
@@ -1736,14 +1735,14 @@ int main(int argc, char** argv) {
             }
         } else if (std::strcmp(argv[i], "--decode-backend") == 0 && i + 1 < argc) {
             if (!ps::qwen35::runtime::parse_decode_backend(argv[++i], &decode_backend)) {
-                fprintf(stderr, "bad --decode-backend: %s (expected host | gpu-mcu)\n", argv[i]);
+                fprintf(stderr, "bad --decode-backend: %s (expected host)\n", argv[i]);
                 return 2;
             }
             const ps::Status decode_backend_status =
                 ps::qwen35::runtime::validate_decode_backend(decode_backend);
             if (!decode_backend_status.ok()) {
                 fprintf(stderr, "%s (requested: %s)\n",
-                        ps::qwen35::runtime::kGpuMcuUnavailableMessage,
+                        decode_backend_status.message().c_str(),
                         ps::qwen35::runtime::decode_backend_name(decode_backend));
                 return 2;
             }

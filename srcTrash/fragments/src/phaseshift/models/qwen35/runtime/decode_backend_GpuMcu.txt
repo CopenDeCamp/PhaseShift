@@ -1,0 +1,94 @@
+# origin: DecodeBackend::GpuMcu future placeholder (pre-image at 7e27739c)
+# feature: GPU-MCU decode backend placeholder (always Status::unsupported)
+# files:
+#   include/phaseshift/models/qwen35/runtime/decode_backend.h
+#   src/phaseshift/models/qwen35/runtime/decode_backend.cpp
+#   src/apps/compute/main.hip
+#   tests/unit/test_decode_backend_contract.cpp
+#   cmake/tests.cmake
+#   docs/user/compute.md
+
+## include/phaseshift/models/qwen35/runtime/decode_backend.h
+
+enum class DecodeBackend : uint8_t {
+    Host = 0,
+    GpuMcu = 1,
+};
+
+inline constexpr const char* kGpuMcuUnavailableMessage =
+    "GPU-MCU backend is not available in this build";
+
+## src/phaseshift/models/qwen35/runtime/decode_backend.cpp
+
+const char* decode_backend_name(DecodeBackend backend) {
+    switch (backend) {
+        case DecodeBackend::Host:
+            return "Host";
+        case DecodeBackend::GpuMcu:
+            return "GpuMcu";
+    }
+    return "unknown";
+}
+
+    if (strcasecmp(text, "gpu-mcu") == 0) {
+        *out = DecodeBackend::GpuMcu;
+        return true;
+    }
+
+Status validate_decode_backend(DecodeBackend backend) {
+    if (backend == DecodeBackend::Host) {
+        return Status::make_ok();
+    }
+    return Status::unsupported(kGpuMcuUnavailableMessage, __FILE__, __LINE__);
+}
+
+## src/apps/compute/main.hip (help)
+
+    printf("  --decode-backend TYPE  host | gpu-mcu (default host);\n");
+    printf("                          gpu-mcu is unavailable in this build\n");
+
+## src/apps/compute/main.hip (parser)
+
+        } else if (std::strcmp(argv[i], "--decode-backend") == 0 && i + 1 < argc) {
+            if (!ps::qwen35::runtime::parse_decode_backend(argv[++i], &decode_backend)) {
+                fprintf(stderr, "bad --decode-backend: %s (expected host | gpu-mcu)\n", argv[i]);
+                return 2;
+            }
+            const ps::Status decode_backend_status =
+                ps::qwen35::runtime::validate_decode_backend(decode_backend);
+            if (!decode_backend_status.ok()) {
+                fprintf(stderr, "%s (requested: %s)\n",
+                        ps::qwen35::runtime::kGpuMcuUnavailableMessage,
+                        ps::qwen35::runtime::decode_backend_name(decode_backend));
+                return 2;
+            }
+
+## tests/unit/test_decode_backend_contract.cpp (GpuMcu contract)
+
+    check(std::strcmp(backend::decode_backend_name(DecodeBackend::GpuMcu), "GpuMcu") == 0,
+          "GpuMcu name is GpuMcu");
+    check(parse_is("gpu-mcu", DecodeBackend::GpuMcu), "gpu-mcu parses to GpuMcu");
+    check(parse_is("GPU-MCU", DecodeBackend::GpuMcu), "GPU-MCU parses to GpuMcu");
+    const ps::Status mcu_status = backend::validate_decode_backend(DecodeBackend::GpuMcu);
+    check(!mcu_status.ok() && mcu_status.code() == ps::Status::Code::unsupported,
+          "GpuMcu is unsupported");
+    check(mcu_status.message().find(backend::kGpuMcuUnavailableMessage)
+              != std::string::npos,
+          "GpuMcu reports the unavailable message");
+    DecodeBackend requested = DecodeBackend::Host;
+    const bool requested_ok = backend::parse_decode_backend("gpu-mcu", &requested);
+    check(requested_ok && requested == DecodeBackend::GpuMcu,
+          "a gpu-mcu request stays GpuMcu");
+    check(!backend::validate_decode_backend(requested).ok(),
+          "a gpu-mcu request never validates as runnable");
+
+## cmake/tests.cmake
+
+    add_test(NAME test_compute_decode_backend_gpu_mcu
+             COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend gpu-mcu)
+
+## docs/user/compute.md
+
+--decode-backend TYPE  host | gpu-mcu (default host)
+`--decode-backend gpu-mcu` は model load 前に exit 2 で拒否される。
+backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation はこの build に

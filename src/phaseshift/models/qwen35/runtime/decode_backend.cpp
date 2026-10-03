@@ -10,8 +10,6 @@ const char* decode_backend_name(DecodeBackend backend) {
     switch (backend) {
         case DecodeBackend::Host:
             return "Host";
-        case DecodeBackend::GpuMcu:
-            return "GpuMcu";
     }
     return "unknown";
 }
@@ -24,10 +22,6 @@ bool parse_decode_backend(const char* text, DecodeBackend* out) {
         *out = DecodeBackend::Host;
         return true;
     }
-    if (strcasecmp(text, "gpu-mcu") == 0) {
-        *out = DecodeBackend::GpuMcu;
-        return true;
-    }
     return false;
 }
 
@@ -35,7 +29,8 @@ Status validate_decode_backend(DecodeBackend backend) {
     if (backend == DecodeBackend::Host) {
         return Status::make_ok();
     }
-    return Status::unsupported(kGpuMcuUnavailableMessage, __FILE__, __LINE__);
+    return Status::unsupported("decode backend is not available in this build", __FILE__,
+                               __LINE__);
 }
 
 }  // namespace runtime

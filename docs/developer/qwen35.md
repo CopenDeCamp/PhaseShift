@@ -63,7 +63,7 @@ complete_batch                    (executor.hip)
 
 ### 2.1 検証
 
-- `config.backend` が `Host`（`GpuMcu` は `Status::unsupported`）
+- `config.backend` が `Host`
 - `config.max_scheduled_tokens` / `max_scheduled_requests` が > 0
 - `kv_pool.dtype()` が `BF16` か `FP8_E4M3`
 - FP8 時は body/scale の要素数と device 一致

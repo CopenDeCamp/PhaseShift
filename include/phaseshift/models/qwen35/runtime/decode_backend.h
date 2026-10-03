@@ -10,11 +10,7 @@ namespace runtime {
 
 enum class DecodeBackend : uint8_t {
     Host = 0,
-    GpuMcu = 1,
 };
-
-inline constexpr const char* kGpuMcuUnavailableMessage =
-    "GPU-MCU backend is not available in this build";
 
 const char* decode_backend_name(DecodeBackend backend);
 

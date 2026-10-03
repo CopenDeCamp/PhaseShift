@@ -379,22 +379,14 @@ endif()
 
 # ---------------------------------------------------------------------------
 # phaseshift-compute decode backend contract (CPU-only: no GPU, no model).
-# --decode-backend must be decided before any model load: GPU-MCU is rejected
-# with an explicit error, host keeps reaching the ordinary startup path.
+# --decode-backend must be decided before any model load: host keeps reaching
+# the ordinary startup path.
 # ---------------------------------------------------------------------------
-add_test(NAME test_compute_decode_backend_gpu_mcu
-         COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend gpu-mcu)
-set_tests_properties(test_compute_decode_backend_gpu_mcu PROPERTIES
-                     LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "GPU-MCU backend is not available in this build"
-                     FAIL_REGULAR_EXPRESSION "model-dir required")
-
 add_test(NAME test_compute_decode_backend_host
          COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend host)
 set_tests_properties(test_compute_decode_backend_host PROPERTIES
                      LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "model-dir required"
-                     FAIL_REGULAR_EXPRESSION "GPU-MCU backend is not available in this build")
+                     PASS_REGULAR_EXPRESSION "model-dir required")
 
 # ---------------------------------------------------------------------------
 # Qwen3.5-4B full application E2E.

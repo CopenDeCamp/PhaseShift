@@ -17,7 +17,7 @@
 --page-tokens N        paged KV page size in tokens (default 16)
 --device N             GPU device (default 0)
 --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)
---decode-backend TYPE  host | gpu-mcu (default host)
+--decode-backend TYPE  host (default)
 --verify-weights 0|1   verify quantized payload CRC32 on load (default 0)
 --dump-logits PATH     append per-step sampled logits rows (raw f32) to PATH
 --temperature F        sampling temperature (default 0 = greedy)
@@ -37,9 +37,7 @@
 `--kv-cache-dtype psq4` / `psq8` は `head_dim == 256` を要求する。prefix cache と
 併用でき、cache pool も同じ KV dtype で作られる。
 
-`--decode-backend gpu-mcu` は model load 前に exit 2 で拒否される。
-backend contract は `host` / `gpu-mcu` の2値で、GPU-MCU implementation はこの build に
-含まれない。指定しても `host` へ fallback しない。
+backend contract は `host` のみ。
 
 ### DFlash2 speculative decoding
 
