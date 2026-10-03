@@ -100,7 +100,6 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
         src/apps/bench/elementwise.hip
         src/apps/bench/embedding.hip
         src/apps/bench/sampling.hip
-        src/apps/bench/mtp.hip
         src/apps/bench/gpu_memory.hip
     )
     phaseshift_set_rocm_rpath(phaseshift-bench)

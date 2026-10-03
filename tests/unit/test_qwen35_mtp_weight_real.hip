@@ -193,6 +193,7 @@ int main() {
     std::printf("format: %s\n", quantized ? "quantized (phaseshift)" : "plain safetensors (bf16)");
 
     qwen35::Qwen35LoadOptions options;
+    options.load_mtp_layers = true;
     options.verify_quantized_payload_crc = false;
     auto wr = qwen35::load_qwen35_weights_from_safetensors(model_dir, arena, stream, options);
     if (!wr.ok()) {

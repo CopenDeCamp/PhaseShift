@@ -2,7 +2,6 @@
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/scheduled_batch.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
-#include <phaseshift/models/qwen35/runtime/mtp_executor.h>
 #include <phaseshift/models/qwen35/weights/model_weights.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
@@ -44,9 +43,6 @@ struct BenchOptions {
     int gap_keepalive = 0;
     int gap_keepalive_flags = hipEventDisableSystemFence;
     std::string perf_stats_output;
-    bool mtp = false;
-    int draft_k = 4;
-    bool mtp_chain_post = true;
     std::string tokens_file;
     int tokens_offset = 0;
 };
@@ -69,9 +65,6 @@ void print_usage(FILE* out) {
         "  --gap-keepalive-flags N      (default hipEventDisableSystemFence;\n"
         "                                -1 = hipEventCreate)\n"
         "  --perf-stats-output PATH     (default none, diagnostic decode counters)\n"
-        "  --mtp                        run MTP speculative decode (requires --mode greedy)\n"
-        "  --draft-k N                  MTP drafts per verify round (default 4)\n"
-        "  --mtp-chain pre|post         hidden fed to draft step >=2 (default post)\n"
         "  --tokens-file PATH           PSKLDTOK corpus file used as the context\n"
         "  --tokens-offset N            corpus position to start the context (default 0)\n");
 }
@@ -187,23 +180,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
             opts.output = need_value();
         } else if (key == "--perf-stats-output") {
             opts.perf_stats_output = need_value();
-        } else if (key == "--mtp") {
-            opts.mtp = true;
-        } else if (key == "--draft-k") {
-            if (!parse_int(need_value(), opts.draft_k) || opts.draft_k < 1) {
-                fprintf(stderr, "invalid --draft-k\n");
-                return false;
-            }
-        } else if (key == "--mtp-chain") {
-            const std::string v = need_value();
-            if (v == "post") {
-                opts.mtp_chain_post = true;
-            } else if (v == "pre") {
-                opts.mtp_chain_post = false;
-            } else {
-                fprintf(stderr, "invalid --mtp-chain\n");
-                return false;
-            }
         } else if (key == "--tokens-file") {
             opts.tokens_file = need_value();
         } else if (key == "--tokens-offset") {
@@ -225,14 +201,6 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
     }
     if (opts.mode == "greedy" && !opts.compute_logits) {
         fprintf(stderr, "greedy mode requires --compute-logits 1\n");
-        return false;
-    }
-    if (opts.mtp && opts.mode != "greedy") {
-        fprintf(stderr, "--mtp requires --mode greedy\n");
-        return false;
-    }
-    if (opts.mtp && opts.context < 1) {
-        fprintf(stderr, "--mtp requires --context >= 1\n");
         return false;
     }
     if (opts.model_dir.empty()) {
@@ -360,16 +328,11 @@ int run_tg(int argc, char** argv) {
     const uint32_t vocab_size = static_cast<uint32_t>(tc.vocab_size);
     const uint32_t hidden_size = static_cast<uint32_t>(tc.hidden_size);
 
-    if (opts.mtp && !model.weights().mtp.present) {
-        fprintf(stderr, "model has no MTP weights\n");
-        return 1;
-    }
-
     const uint32_t required_seq_len =
         static_cast<uint32_t>(opts.context)
         + static_cast<uint32_t>(opts.warmup)
         + static_cast<uint32_t>(opts.tokens)
-        + (opts.mtp ? static_cast<uint32_t>(opts.draft_k) + 2u : 1u);
+        + 1u;
 
     const uint32_t num_pages = ceil_div(required_seq_len, static_cast<uint32_t>(opts.page_tokens)) + 1;
 
@@ -402,12 +365,9 @@ int run_tg(int argc, char** argv) {
     auto kv_pool = kv_pool_result.release();
 
     ps::qwen35::ExecutorConfig exec_config;
-    exec_config.max_scheduled_tokens = std::max(
-        std::max(opts.prefill_chunk, opts.tokens + opts.warmup + 16),
-        opts.mtp ? opts.context : 0);
+    exec_config.max_scheduled_tokens =
+        std::max(opts.prefill_chunk, opts.tokens + opts.warmup + 16);
     exec_config.max_scheduled_requests = 1;
-    if (opts.mtp)
-        exec_config.max_scheduled_output_rows = static_cast<uint32_t>(opts.draft_k) + 4u;
 
     auto exec_result = ps::qwen35::create_model_executor(
         model, seq_pool, rec_pool, kv_pool, arena, exec_config);
@@ -418,58 +378,6 @@ int run_tg(int argc, char** argv) {
     }
     auto executor = exec_result.release();
 
-    std::optional<ps::qwen35::runtime::MtpExecutor> mtp;
-    ps::gpu::Tensor mtp_hidden;
-    ps::bf16_t* mtp_hlast = nullptr;
-    void* mtp_gdn_snap_conv = nullptr;
-    void* mtp_gdn_snap_rec = nullptr;
-    std::size_t mtp_gdn_conv_bytes = 0;
-    std::size_t mtp_gdn_rec_bytes = 0;
-    if (opts.mtp) {
-        ps::qwen35::runtime::MtpExecutorConfig mtp_config;
-        mtp_config.page_tokens = static_cast<uint32_t>(opts.page_tokens);
-        mtp_config.num_pages = num_pages;
-        mtp_config.max_rows = 16u;
-        auto mtp_result = ps::qwen35::runtime::create_mtp_executor(
-            model, ps::qwen35::KVCacheDType::BF16, arena, mtp_config, stream);
-        if (!mtp_result.ok()) {
-            fprintf(stderr, "create_mtp_executor failed: %s\n",
-                mtp_result.status().message().c_str());
-            return 1;
-        }
-        mtp.emplace(std::move(mtp_result.release()));
-        auto hid_alloc = arena.allocate_aligned(
-            static_cast<std::size_t>(hidden_size) * sizeof(ps::bf16_t), 128);
-        if (!hid_alloc.ok()) {
-            fprintf(stderr, "mtp hidden alloc failed\n");
-            return 1;
-        }
-        auto hid_backing = hid_alloc.release();
-        auto hid_tensor = ps::gpu::Tensor::create<ps::bf16_t>(
-            hid_backing, {hidden_size}, {1u});
-        if (!hid_tensor.ok()) {
-            fprintf(stderr, "mtp hidden tensor failed\n");
-            return 1;
-        }
-        mtp_hidden = hid_tensor.release();
-        mtp_hlast = mtp_hidden.data<ps::bf16_t>();
-
-        const ps::qwen35::GdnStatePoolDeviceView gdn_view = rec_pool.device_view();
-        mtp_gdn_conv_bytes = gdn_view.conv_slot_stride * sizeof(ps::bf16_t);
-        mtp_gdn_rec_bytes = gdn_view.recurrent_slot_stride * sizeof(float);
-        auto snap_conv_alloc = arena.allocate_aligned(mtp_gdn_conv_bytes, 256);
-        if (!snap_conv_alloc.ok()) {
-            fprintf(stderr, "gdn snapshot conv alloc failed\n");
-            return 1;
-        }
-        mtp_gdn_snap_conv = snap_conv_alloc.release().data();
-        auto snap_rec_alloc = arena.allocate_aligned(mtp_gdn_rec_bytes, 256);
-        if (!snap_rec_alloc.ok()) {
-            fprintf(stderr, "gdn snapshot rec alloc failed\n");
-            return 1;
-        }
-        mtp_gdn_snap_rec = snap_rec_alloc.release().data();
-    }
 
     auto seq_result = ps::qwen35::create_paged_sequence_state(
         seq_pool, rec_pool, kv_pool, required_seq_len, stream);
@@ -517,93 +425,6 @@ int run_tg(int argc, char** argv) {
         }
     }
 
-    if (opts.mtp) {
-        ps::qwen35::ScheduledRequest req;
-        req.sequence = &seq; req.handle = seq.request_handle();
-        req.execution_class = ps::runtime::ExecutionClass::PREFILL;
-        req.token_begin = 0;
-        req.num_tokens = static_cast<uint32_t>(opts.context);
-        req.prefix_tokens = seq.position;
-        req.compute_logits = true;
-        req.sample = true;
-        req.num_output_rows = 1;
-        std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-        ps::qwen35::ScheduledBatch batch;
-        batch.token_ids = context_tokens.data();
-        batch.requests = reqs;
-        batch.num_tokens = static_cast<uint32_t>(opts.context);
-        batch.num_requests = 1;
-        batch.num_decode_requests = 0;
-        batch.num_verify_requests = 0;
-        batch.num_prefill_requests = 1;
-        auto st = ps::qwen35::execute_batch(executor, batch, stream);
-        if (!st.ok()) {
-            fprintf(stderr, "mtp prefill failed: %s\n", st.status().message().c_str());
-            return 1;
-        }
-        auto pout = std::move(st.release());
-        if (pout.num_outputs != 1) {
-            fprintf(stderr, "mtp prefill: expected 1 output, got %u\n", pout.num_outputs);
-            return 1;
-        }
-        hip_err = hipMemcpy(&token_id, pout.sampled_tokens.data<int32_t>(),
-                            sizeof(int32_t), hipMemcpyDeviceToHost);
-        if (hip_err != hipSuccess) {
-            fprintf(stderr, "mtp prefill sample copy failed: %s\n", hipGetErrorString(hip_err));
-            return 1;
-        }
-        hip_err = hipMemcpy(mtp_hlast, pout.final_hidden.data<void>(),
-                            static_cast<std::size_t>(hidden_size) * sizeof(ps::bf16_t),
-                            hipMemcpyDeviceToDevice);
-        if (hip_err != hipSuccess) {
-            fprintf(stderr, "mtp prefill hidden copy failed: %s\n", hipGetErrorString(hip_err));
-            return 1;
-        }
-        if (const char* thp = std::getenv("PS_TOK_HIDDEN_DBG")) {
-            if (pout.token_hidden.data<ps::bf16_t>() == nullptr) {
-                fprintf(stderr, "tok hidden dbg: no token_hidden\n");
-                return 1;
-            }
-            std::vector<ps::bf16_t> thhost(
-                static_cast<std::size_t>(opts.context) * hidden_size);
-            hipError_t therr = hipMemcpy(
-                thhost.data(), pout.token_hidden.data<ps::bf16_t>(),
-                thhost.size() * sizeof(ps::bf16_t), hipMemcpyDeviceToHost);
-            if (therr != hipSuccess) {
-                fprintf(stderr, "tok hidden dbg copy failed: %s\n", hipGetErrorString(therr));
-                return 1;
-            }
-            FILE* tf = std::fopen(thp, "wb");
-            if (tf == nullptr) {
-                fprintf(stderr, "tok hidden dbg: cannot open %s\n", thp);
-                return 1;
-            }
-            std::fwrite(thhost.data(), 2, thhost.size(), tf);
-            std::fclose(tf);
-            fprintf(stderr, "tok hidden dbg: dumped %s (%d x %d)\n", thp, opts.context,
-                    hidden_size);
-        }
-        if (static_cast<uint32_t>(opts.context) > 1u) {
-            const uint32_t kv_rows = static_cast<uint32_t>(opts.context) - 1u;
-            const ps::bf16_t* tok_hidden = pout.token_hidden.data<ps::bf16_t>();
-            std::vector<int32_t> chunk_tokens;
-            for (uint32_t c = 0; c < kv_rows; c += mtp->max_rows) {
-                const uint32_t rows = std::min<uint32_t>(mtp->max_rows, kv_rows - c);
-                chunk_tokens.resize(rows);
-                for (uint32_t i = 0; i < rows; ++i) {
-                    chunk_tokens[i] = context_tokens[static_cast<std::size_t>(c) + 1u + i];
-                }
-                auto kr = ps::qwen35::runtime::run_mtp_rows(
-                    *mtp, tok_hidden + static_cast<std::size_t>(c) * hidden_size,
-                    chunk_tokens.data(), rows, c, stream);
-                if (!kr.ok()) {
-                    fprintf(stderr, "mtp kv prefill failed at %u: %s\n", c,
-                            kr.status().message().c_str());
-                    return 1;
-                }
-            }
-        }
-    } else {
         const uint32_t chunk = std::min<uint32_t>(
             static_cast<uint32_t>(opts.prefill_chunk), exec_config.max_scheduled_tokens);
         uint32_t processed = 0;
@@ -634,7 +455,6 @@ int run_tg(int argc, char** argv) {
             (void)st.release();
             processed += chunk_len;
         }
-    }
 
     hip_err = hipStreamSynchronize(stream);
     if (hip_err != hipSuccess) {
@@ -667,13 +487,11 @@ int run_tg(int argc, char** argv) {
         return ps::Status::make_ok();
     };
 
-    if (!opts.mtp) {
-        for (int i = 0; i < opts.warmup; ++i) {
-            auto st = run_decode_step(false, false);
-            if (!st.ok()) {
-                fprintf(stderr, "warmup forward failed at %d: %s\n", i, st.message().c_str());
-                return 1;
-            }
+    for (int i = 0; i < opts.warmup; ++i) {
+        auto st = run_decode_step(false, false);
+        if (!st.ok()) {
+            fprintf(stderr, "warmup forward failed at %d: %s\n", i, st.message().c_str());
+            return 1;
         }
     }
 
@@ -737,264 +555,7 @@ int run_tg(int argc, char** argv) {
         return 1;
     }
 
-    long long mtp_rounds = 0;
-    long long mtp_reruns = 0;
-    long long mtp_sum_accept = 0;
-    uint32_t mtp_emitted = 0;
-    std::vector<int32_t> mtp_tokens;
-
-    if (opts.mtp) {
-        mtp_tokens.push_back(token_id);
-        std::vector<int32_t> emitted;
-        emitted.reserve(static_cast<std::size_t>(opts.tokens));
-        std::vector<int32_t> vtok(static_cast<std::size_t>(opts.draft_k) + 1u);
-        std::vector<int32_t> vsamp(static_cast<std::size_t>(opts.draft_k) + 1u);
-        std::vector<uint32_t> drafts(static_cast<std::size_t>(opts.draft_k));
-        const uint32_t draft_k = static_cast<uint32_t>(opts.draft_k);
-        uint32_t P = static_cast<uint32_t>(opts.context) - 1u;
-        bool dbg_done = false;
-        const char* dbg_path = std::getenv("PS_MTP_DBG");
-        if (std::getenv("PS_MTP_DBG_ZERO_HIDDEN") != nullptr) {
-            hipError_t zerr = hipMemsetAsync(mtp_hlast, 0,
-                                             static_cast<std::size_t>(hidden_size) * sizeof(ps::bf16_t),
-                                             stream);
-            if (zerr != hipSuccess) {
-                fprintf(stderr, "mtp dbg zero hidden failed: %s\n", hipGetErrorString(zerr));
-                return 1;
-            }
-        }
-
-        auto dv = rec_pool.device_view();
-        ps::bf16_t* gdn_conv =
-            dv.conv_base + static_cast<std::size_t>(seq.slot) * dv.conv_slot_stride;
-        float* gdn_rec =
-            dv.recurrent_base + static_cast<std::size_t>(seq.slot) * dv.recurrent_slot_stride;
-        auto gdn_snapshot = [&]() -> bool {
-            return hipMemcpyAsync(mtp_gdn_snap_conv, gdn_conv, mtp_gdn_conv_bytes,
-                                  hipMemcpyDeviceToDevice, stream) == hipSuccess &&
-                   hipMemcpyAsync(mtp_gdn_snap_rec, gdn_rec, mtp_gdn_rec_bytes,
-                                  hipMemcpyDeviceToDevice, stream) == hipSuccess;
-        };
-        auto gdn_restore = [&]() -> bool {
-            return hipMemcpyAsync(gdn_conv, mtp_gdn_snap_conv, mtp_gdn_conv_bytes,
-                                  hipMemcpyDeviceToDevice, stream) == hipSuccess &&
-                   hipMemcpyAsync(gdn_rec, mtp_gdn_snap_rec, mtp_gdn_rec_bytes,
-                                  hipMemcpyDeviceToDevice, stream) == hipSuccess;
-        };
-
-        while (static_cast<uint32_t>(emitted.size()) < static_cast<uint32_t>(opts.tokens)) {
-            if (!gdn_snapshot()) {
-                fprintf(stderr, "gdn snapshot failed\n");
-                return 1;
-            }
-            ps::bf16_t* hid = mtp_hlast;
-            int32_t in_tok = token_id;
-            for (uint32_t k = 0; k < draft_k; ++k) {
-                auto dr = ps::qwen35::runtime::run_mtp_head(
-                    *mtp, hid, in_tok, P + k, stream);
-                if (!dr.ok()) {
-                    fprintf(stderr, "mtp draft failed at pos %u: %s\n",
-                            P + k, dr.status().message().c_str());
-                    return 1;
-                }
-                drafts[k] = dr.value();
-                if (!dbg_done && dbg_path != nullptr && k == 0u) {
-                    dbg_done = true;
-                    std::vector<ps::bf16_t> hhost(static_cast<std::size_t>(hidden_size));
-                    std::vector<float> lhost(static_cast<std::size_t>(vocab_size));
-                    hipError_t derr = hipMemcpy(
-                        hhost.data(), hid,
-                        static_cast<std::size_t>(hidden_size) * sizeof(ps::bf16_t),
-                        hipMemcpyDeviceToHost);
-                    derr = derr == hipSuccess
-                               ? hipMemcpy(lhost.data(), mtp->logits.data<float>(),
-                                           static_cast<std::size_t>(vocab_size) * sizeof(float),
-                                           hipMemcpyDeviceToHost)
-                               : derr;
-                    if (derr != hipSuccess) {
-                        fprintf(stderr, "mtp dbg dump failed: %s\n", hipGetErrorString(derr));
-                        return 1;
-                    }
-                    FILE* f = std::fopen(dbg_path, "wb");
-                    if (f == nullptr) {
-                        fprintf(stderr, "mtp dbg: cannot open %s\n", dbg_path);
-                        return 1;
-                    }
-                    const int32_t cur = in_tok;
-                    const int32_t pos = static_cast<int32_t>(P + k);
-                    const int32_t hsz = static_cast<std::size_t>(hidden_size);
-                    std::fwrite(&cur, 4, 1, f);
-                    std::fwrite(&pos, 4, 1, f);
-                    std::fwrite(&hsz, 4, 1, f);
-                    std::fwrite(hhost.data(), 2, static_cast<std::size_t>(hidden_size), f);
-                    std::fwrite(lhost.data(), 4, static_cast<std::size_t>(vocab_size), f);
-                    if (mtp->kv_state.pool.has_value()) {
-                        const auto& pool = *mtp->kv_state.pool;
-                        const uint32_t np = pool.num_pages();
-                        const uint32_t pt = pool.page_tokens();
-                        const uint32_t kvf = pool.kv_heads() * pool.head_dim();
-                        const uint32_t hd = pool.head_dim();
-                        std::vector<ps::bf16_t> kflat(
-                            static_cast<std::size_t>(np) * pt * kvf);
-                        std::vector<ps::bf16_t> vflat(
-                            static_cast<std::size_t>(np) * pt * kvf);
-                        std::vector<uint32_t> btbl(np);
-                        hipError_t kerr = hipMemcpy(
-                            kflat.data(), pool.k_pool().data<ps::bf16_t>(),
-                            kflat.size() * sizeof(ps::bf16_t), hipMemcpyDeviceToHost);
-                        kerr = kerr == hipSuccess
-                                   ? hipMemcpy(vflat.data(), pool.v_pool().data<ps::bf16_t>(),
-                                               vflat.size() * sizeof(ps::bf16_t),
-                                               hipMemcpyDeviceToHost)
-                                   : kerr;
-                        kerr = kerr == hipSuccess
-                                   ? hipMemcpy(
-                                           btbl.data(),
-                                           mtp->kv_state.slots->device_view().block_tables,
-                                           np * sizeof(uint32_t), hipMemcpyDeviceToHost)
-                                   : kerr;
-                        if (kerr != hipSuccess) {
-                            fprintf(stderr, "mtp dbg kv dump failed: %s\n",
-                                    hipGetErrorString(kerr));
-                            return 1;
-                        }
-                        std::fwrite(&np, 4, 1, f);
-                        std::fwrite(&pt, 4, 1, f);
-                        std::fwrite(&kvf, 4, 1, f);
-                        std::fwrite(&hd, 4, 1, f);
-                        std::fwrite(kflat.data(), 2, kflat.size(), f);
-                        std::fwrite(vflat.data(), 2, vflat.size(), f);
-                        std::fwrite(btbl.data(), 4, btbl.size(), f);
-                    } else {
-                        const uint32_t zero = 0;
-                        std::fwrite(&zero, 4, 1, f);
-                    }
-                    std::fclose(f);
-                    fprintf(stderr, "mtp dbg: dumped %s (cur=%d pos=%d d0=%u)\n",
-                            dbg_path, cur, pos, drafts[k]);
-                }
-                hid = opts.mtp_chain_post
-                          ? mtp->hidden_out_normed.data<ps::bf16_t>()
-                          : mtp->hidden_out.data<ps::bf16_t>();
-                in_tok = static_cast<int32_t>(drafts[k]);
-            }
-
-            vtok[0] = token_id;
-            for (uint32_t k = 0; k < draft_k; ++k) vtok[k + 1u] = static_cast<int32_t>(drafts[k]);
-
-            ps::qwen35::ScheduledRequest req;
-            req.sequence = &seq; req.handle = seq.request_handle();
-            req.execution_class = ps::runtime::ExecutionClass::PREFILL;
-            req.token_begin = 0;
-            req.num_tokens = draft_k + 1u;
-            req.prefix_tokens = seq.position;
-            req.compute_logits = true;
-            req.sample = true;
-            req.num_output_rows = draft_k + 1u;
-            std::vector<ps::qwen35::ScheduledRequest> reqs = {req};
-            ps::qwen35::ScheduledBatch batch;
-            batch.token_ids = vtok.data();
-            batch.requests = reqs;
-            batch.num_tokens = draft_k + 1u;
-            batch.num_requests = 1;
-            batch.num_decode_requests = 0;
-            batch.num_verify_requests = 0;
-            batch.num_prefill_requests = 1;
-            auto res = ps::qwen35::execute_batch(executor, batch, stream);
-            if (!res.ok()) {
-                fprintf(stderr, "mtp verify failed: %s\n", res.status().message().c_str());
-                return 1;
-            }
-            ps::qwen35::BatchExecutionOutput vout = std::move(res.release());
-            if (vout.num_outputs != draft_k + 1u) {
-                fprintf(stderr, "mtp verify: expected %u outputs, got %u\n",
-                        draft_k + 1u, vout.num_outputs);
-                return 1;
-            }
-            hip_err = hipMemcpy(vsamp.data(), vout.sampled_tokens.data<int32_t>(),
-                                vtok.size() * sizeof(int32_t), hipMemcpyDeviceToHost);
-            if (hip_err != hipSuccess) {
-                fprintf(stderr, "mtp verify sample copy failed: %s\n", hipGetErrorString(hip_err));
-                return 1;
-            }
-            uint32_t a = 0;
-            while (a < draft_k && vsamp[a] == static_cast<int32_t>(drafts[a])) ++a;
-            const int32_t bonus = vsamp[a];
-            for (uint32_t k = 0; k < a; ++k) emitted.push_back(static_cast<int32_t>(drafts[k]));
-            emitted.push_back(bonus);
-            ++mtp_rounds;
-            mtp_sum_accept += static_cast<long long>(a);
-
-            const uint32_t newP = P + 1u + a;
-            if (a == draft_k) {
-                const ps::bf16_t* row =
-                    vout.token_hidden.data<ps::bf16_t>() + static_cast<std::size_t>(a) * hidden_size;
-                hip_err = hipMemcpy(mtp_hlast, row,
-                                    static_cast<std::size_t>(hidden_size) * sizeof(ps::bf16_t),
-                                    hipMemcpyDeviceToDevice);
-                if (hip_err != hipSuccess) {
-                    fprintf(stderr, "mtp hidden copy failed: %s\n", hipGetErrorString(hip_err));
-                    return 1;
-                }
-            } else {
-                if (!gdn_restore()) {
-                    fprintf(stderr, "gdn restore failed\n");
-                    return 1;
-                }
-                ++mtp_reruns;
-                seq.position = P + 1u;
-                ps::qwen35::ScheduledRequest r2;
-                r2.sequence = &seq; r2.handle = seq.request_handle();
-                r2.execution_class = ps::runtime::ExecutionClass::PREFILL;
-                r2.token_begin = 0;
-                r2.num_tokens = a + 1u;
-                r2.prefix_tokens = seq.position;
-                r2.compute_logits = true;
-                r2.sample = true;
-                r2.num_output_rows = 1u;
-                std::vector<ps::qwen35::ScheduledRequest> r2s = {r2};
-                ps::qwen35::ScheduledBatch b2;
-                b2.token_ids = vtok.data();
-                b2.requests = r2s;
-                b2.num_tokens = a + 1u;
-                b2.num_requests = 1;
-                b2.num_decode_requests = 0;
-                b2.num_verify_requests = 0;
-                b2.num_prefill_requests = 1;
-                auto rres = ps::qwen35::execute_batch(executor, b2, stream);
-                if (!rres.ok()) {
-                    fprintf(stderr, "mtp rerun failed: %s\n", rres.status().message().c_str());
-                    return 1;
-                }
-                ps::qwen35::BatchExecutionOutput rout = std::move(rres.release());
-                if (rout.num_outputs != 1u) {
-                    fprintf(stderr, "mtp rerun: expected 1 output, got %u\n", rout.num_outputs);
-                    return 1;
-                }
-                hip_err = hipMemcpy(mtp_hlast, rout.final_hidden.data<void>(),
-                                    static_cast<std::size_t>(hidden_size) * sizeof(ps::bf16_t),
-                                    hipMemcpyDeviceToDevice);
-                if (hip_err != hipSuccess) {
-                    fprintf(stderr, "mtp rerun hidden copy failed: %s\n", hipGetErrorString(hip_err));
-                    return 1;
-                }
-            }
-            P = newP;
-            token_id = bonus;
-        }
-        mtp_emitted = static_cast<uint32_t>(emitted.size());
-        mtp_tokens.insert(mtp_tokens.end(), emitted.begin(), emitted.end());
-        hip_err = hipEventRecord(stop_event, stream);
-        if (hip_err != hipSuccess) {
-            fprintf(stderr, "hipEventRecord failed: %s\n", hipGetErrorString(hip_err));
-            return 1;
-        }
-        hip_err = hipEventSynchronize(stop_event);
-        if (hip_err != hipSuccess) {
-            fprintf(stderr, "hipEventSynchronize failed: %s\n", hipGetErrorString(hip_err));
-            return 1;
-        }
-    } else if (opts.mode == "forward") {
+    if (opts.mode == "forward") {
         ps::qwen35::BatchExecutionOutput last_out;
         for (int i = 0; i < opts.tokens; ++i) {
             std::vector<int32_t> token_ids = {token_id};
@@ -1156,7 +717,7 @@ int run_tg(int argc, char** argv) {
     const double wall_ms =
         std::chrono::duration<double, std::milli>(wall_stop - wall_start).count();
 
-    const uint32_t measured_tokens = opts.mtp ? mtp_emitted : static_cast<uint32_t>(opts.tokens);
+    const uint32_t measured_tokens = static_cast<uint32_t>(opts.tokens);
     const double gpu_us_per_token = gpu_ms * 1000.0 / static_cast<double>(measured_tokens);
     const double wall_us_per_token = wall_ms * 1000.0 / static_cast<double>(measured_tokens);
     const double gpu_tokens_per_sec =
@@ -1165,7 +726,7 @@ int run_tg(int argc, char** argv) {
         static_cast<double>(measured_tokens) / (wall_ms / 1000.0);
 
     const int final_position = opts.context + static_cast<int>(measured_tokens);
-    const char* mode_label = opts.mtp ? "greedy+mtp" : opts.mode.c_str();
+    const char* mode_label = opts.mode.c_str();
 
     const uint32_t kv_used_pages = seq.kv_pool()->num_used_pages();
     const std::size_t kv_reserved_bytes = seq.kv_pool()->reserved_bytes();
@@ -1184,24 +745,6 @@ int run_tg(int argc, char** argv) {
     printf("warmup=%d\n", opts.warmup);
     printf("compute_logits=%d\n", opts.compute_logits ? 1 : 0);
     printf("page_tokens=%d\n", opts.page_tokens);
-    if (opts.mtp) {
-        printf("mtp=1\n");
-        printf("draft_k=%d\n", opts.draft_k);
-        printf("mtp_chain=%s\n", opts.mtp_chain_post ? "post" : "pre");
-        printf("tokens_emitted=%u\n", mtp_emitted);
-        printf("mtp_rounds=%lld\n", mtp_rounds);
-        printf("mtp_reruns=%lld\n", mtp_reruns);
-        printf("mtp_mean_accept=%.2f\n",
-               mtp_rounds > 0
-                   ? static_cast<double>(mtp_sum_accept) / static_cast<double>(mtp_rounds)
-                   : 0.0);
-        printf("mtp_tokens=");
-        for (std::size_t i = 0; i < mtp_tokens.size() && i < 8u; ++i) {
-            if (i > 0) printf(" ");
-            printf("%d", mtp_tokens[i]);
-        }
-        printf("\n");
-    }
     printf("\n");
     printf("gpu_ms=%.4f\n", gpu_ms);
     printf("wall_ms=%.4f\n", wall_ms);
@@ -1265,14 +808,6 @@ int run_tg(int argc, char** argv) {
     if (!release_st.ok()) {
         fprintf(stderr, "release_paged_sequence_state failed: %s\n", release_st.message().c_str());
         return 1;
-    }
-
-    if (mtp.has_value()) {
-        auto mtp_st = ps::qwen35::runtime::mtp_executor_shutdown(*mtp);
-        if (!mtp_st.ok()) {
-            fprintf(stderr, "mtp_executor_shutdown failed: %s\n", mtp_st.message().c_str());
-            return 1;
-        }
     }
 
     auto shutdown_st = arena.shutdown();

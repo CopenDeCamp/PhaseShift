@@ -29,7 +29,7 @@ Fusion / DeepFusion は一時的に build option が撤去されている。
 
 model は `--preset psq --backend hip` で再生成できる
 （27B は `--scope text-only` が必要。手順は [../user/quantizer.md](../user/quantizer.md)）。
-MTP linear 8本は PSQ4、norm 7本は BF16（契約は [../developer/mtp.md](../developer/mtp.md)）。
+MTP linear 8本は PSQ4、norm 7本は BF16。
 
 ## Target prefill（pp2048）
 

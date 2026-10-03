@@ -17,7 +17,6 @@ int run_gdn_conv1d(int argc, char** argv);
 int run_elementwise(int argc, char** argv);
 int run_embedding(int argc, char** argv);
 int run_sampling(int argc, char** argv);
-int run_mtp(int argc, char** argv);
 int run_gpu_memory(int argc, char** argv);
 
 namespace {
@@ -53,9 +52,6 @@ void usage() {
     std::printf("  embedding          embedding lookup benchmark\n");
     std::printf("  sampling           greedy argmax sampling benchmark\n");
     std::printf("\n");
-    std::printf("Speculative:\n");
-    std::printf("  mtp                MTP head forward smoke test\n");
-    std::printf("\n");
     std::printf("Memory:\n");
     std::printf("  gpu-memory         global / LDS crossover sweep\n");
     std::printf("\n");
@@ -89,7 +85,6 @@ int main(int argc, char** argv) {
     if (sub == "elementwise") return run_elementwise(argc - 1, argv + 1);
     if (sub == "embedding") return run_embedding(argc - 1, argv + 1);
     if (sub == "sampling") return run_sampling(argc - 1, argv + 1);
-    if (sub == "mtp") return run_mtp(argc - 1, argv + 1);
     if (sub == "gpu-memory") return run_gpu_memory(argc - 1, argv + 1);
     std::fprintf(stderr, "unknown subcommand: %s\n", sub.c_str());
     usage();

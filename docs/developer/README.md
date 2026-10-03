@@ -21,7 +21,6 @@ PoC・Gate・採否判断は `docs/rnd/`、現在の性能値は `docs/perf/`、
 ## speculative decode
 
 - [dflash2.md](dflash2.md) — DFlash2 speculative decoding の現在の設計仕様
-- [mtp.md](mtp.md) — MTP の現在の implementation contract
 
 ## server
 

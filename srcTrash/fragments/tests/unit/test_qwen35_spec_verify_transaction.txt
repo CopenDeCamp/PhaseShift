@@ -1,0 +1,34 @@
+# origin: tests/unit/test_qwen35_spec_verify.cpp
+# feature: SpecTransaction / MtpKvState rejection cases (MTP-only, removed with spec_transaction_*)
+# baseline: 7e27739c (isolation pre-image)
+
+    {
+        SpecTransaction txn;
+        ps::qwen35::runtime::MtpKvState mtp;
+        ps::qwen35::PagedSequenceState target;
+        auto st = ps::qwen35::runtime::spec_transaction_begin(txn, mtp, target);
+        check(!st.ok(), "begin rejects uninitialized states");
+        check(txn.phase == SpecPhase::IDLE, "phase stays IDLE after failed begin");
+    }
+    {
+        SpecTransaction txn;
+        auto st = ps::qwen35::runtime::spec_transaction_begin_verify(txn);
+        check(!st.ok(), "begin_verify rejects IDLE");
+    }
+    {
+        SpecTransaction txn;
+        ps::qwen35::runtime::MtpKvState mtp;
+        ps::qwen35::PagedSequenceState target;
+        SpecVerifyResult result;
+        auto st = ps::qwen35::runtime::spec_transaction_commit(txn, result, mtp, target, nullptr);
+        check(!st.ok(), "commit rejects IDLE");
+    }
+    {
+        SpecTransaction txn;
+        ps::qwen35::runtime::MtpKvState mtp;
+        ps::qwen35::PagedSequenceState target;
+        auto st = ps::qwen35::runtime::spec_transaction_rollback(txn, mtp, target, nullptr);
+        check(!st.ok(), "rollback rejects IDLE");
+        st = ps::qwen35::runtime::spec_transaction_abort(txn, mtp, target, nullptr);
+        check(!st.ok(), "abort rejects IDLE");
+    }

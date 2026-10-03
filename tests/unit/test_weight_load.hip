@@ -542,6 +542,7 @@ static void test_bf16_model_load(gpu::GpuArena& arena, hipStream_t stream) {
     if (!build_bf16_model(dir)) return;
 
     qwen35::Qwen35LoadOptions options;
+    options.load_mtp_layers = true;
     auto wr = qwen35::load_qwen35_weights_from_safetensors(dir.string(), arena, stream, options);
     if (!wr.ok()) { fail("bf16 model load: " + wr.status().message()); return; }
     qwen35::Qwen35ModelWeights w = wr.release();
@@ -589,6 +590,7 @@ static void test_bf16_model_load(gpu::GpuArena& arena, hipStream_t stream) {
     check(!w.mtp.layer.is_gdn, "mtp layer attn");
 
     qwen35::Qwen35LoadOptions no_pre;
+    no_pre.load_mtp_layers = true;
     no_pre.weights.preshuffle = false;
     auto wr2 = qwen35::load_qwen35_weights_from_safetensors(dir.string(), arena, stream, no_pre);
     if (!wr2.ok()) { fail("bf16 model load skip_preshuffle"); return; }
@@ -904,6 +906,7 @@ static void test_qwen35_quantized_model_load(gpu::GpuArena& arena, hipStream_t s
     check(weights::is_quantized_model_dir(dir.string()), "is_quantized_model_dir(model)");
 
     qwen35::Qwen35LoadOptions options;
+    options.load_mtp_layers = true;
     options.verify_quantized_payload_crc = true;
     auto rr = qwen35::load_qwen35_weights_from_safetensors(dir.string(), arena, stream, options);
     if (!rr.ok()) { fail("qwen35 quantized load: " + rr.status().message()); return; }

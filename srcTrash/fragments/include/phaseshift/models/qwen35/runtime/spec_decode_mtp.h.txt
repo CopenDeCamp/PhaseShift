@@ -1,0 +1,39 @@
+# origin: include/phaseshift/models/qwen35/runtime/spec_decode.h
+# feature: MTP-only spec decode declarations (SpecDraftStep/SpecDraftSet/MtpDraftPolicy/mtp_generate_drafts)
+# baseline: 7e27739c (isolation pre-image)
+
+struct SpecDraftStep {
+    int32_t input_token = -1;
+    uint32_t absolute_position = 0u;
+    uint32_t kv_length_before = 0u;
+    uint32_t kv_length_after = 0u;
+    uint32_t draft_token = 0u;
+    uint32_t physical_slot = 0xFFFFFFFFu;
+    float margin = 0.0f;
+};
+
+struct SpecDraftSet {
+    std::vector<SpecDraftStep> steps;
+    uint32_t mtp_length_before = 0u;
+    uint32_t mtp_length_after = 0u;
+};
+
+struct MtpDraftPolicy {
+    bool dynamic = false;
+    float stop_margin = 0.0f;
+    uint32_t min_drafts = 1u;
+    bool enable_discard = false;
+    float discard_margin = 0.0f;
+    bool chain_post_norm = false;
+};
+
+Result<SpecDraftSet> mtp_generate_drafts(
+    MtpExecutor& executor,
+    MtpKvState& state,
+    const bf16_t* first_hidden,
+    int32_t first_token,
+    uint32_t num_drafts,
+    uint32_t first_absolute_position,
+    hipStream_t stream,
+    MtpStateTraceSink* state_trace = nullptr,
+    const MtpDraftPolicy* policy = nullptr);
