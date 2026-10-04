@@ -86,22 +86,64 @@ page=16)` を追加。
 同一 harness（context=64 / 2048、new_tokens=32）での変化:
 
 ```text
-context   metric     before     round1      round2
-64        prefill    6.93 s     0.202 s     0.0589 s
-64        decode     1.59       7.50        36.54 tok/s
-2048      prefill    218.7 s    1.494 s     0.573 s
-2048      decode     0.38       7.49        35.62 tok/s
+context   metric     before     round1      round2      round3
+64        prefill    6.93 s     0.202 s     0.0589 s    0.0605 s
+64        decode     1.59       7.50        36.54       37.74 tok/s
+2048      prefill    218.7 s    1.494 s     0.573 s     0.573 s
+2048      decode     0.38       7.49        35.62       36.83 tok/s
 ```
 
 round2 後は TP=1 を上回る:
 
 ```text
-context   metric     TP=1        TP=2 (round2)
-64        prefill    0.0587 s    0.0589 s
-64        decode     28.05       36.54 tok/s
+context   metric     TP=1        TP=2 (round3)
+64        prefill    0.0587 s    0.0605 s
+64        decode     28.05       37.74 tok/s
 2048      prefill    0.870 s     0.573 s
-2048      decode     27.48       35.62 tok/s
+2048      decode     27.48       36.83 tok/s
 ```
+
+## 第3回: GDN decode1 の TP=2 開放（Phase B step1）
+
+### 背景
+
+`gdn_recurrence_decode1_supported()` は
+
+```cpp
+args.key_heads == 16u && args.num_v_heads == 48u
+```
+
+と TP1 geometry のみを許可していたため、TP=2（8/24）は selector が
+Optimized でも rows=1 の専用 `WmmaDecode1` ではなく通常の `Wmma` に落ちていた。
+
+一方 `phaseshift_qwen35_gdn_recurrence_wmma_decode1` は `key_heads` /
+`num_v_heads` / `repeat` を実行時に計算しており geometry 自体は汎用である
+（`repeat = num_v_heads / key_heads` は TP1・TP2 とも 3 で同じ）。
+
+### 変更
+
+- `src/phaseshift/models/qwen35/kernels/optimized/gdn/recurrence.hip` の
+  `gdn_recurrence_decode1_supported()` に `(8, 24)` を追加。
+- `tests/kernels/optimized/test_gdn_recurrence_decode1.hip` に
+  `Shapes{key_heads=8, num_v_heads=24, head_k=128, head_v=128}` を追加し、
+  `run_sequence`（nreq=1/4, steps=1/16, zero-inputs 含む） /
+  `run_serial_equiv`（rows=2/4/8）/ `run_multirow_equiv`（rows=2/8）を実行。
+
+`decode1` は production lossy WMMA と bit-exact で一致してから開放している。
+
+### 結果（A/B, 同一 harness）
+
+```text
+context   decode      before (generic)   after (decode1)
+64        36.54       37.74 tok/s        +3.3%
+2048      35.62       36.83 tok/s        +3.4%
+```
+
+generic 34.85us → decode1 14.70us は 48 の GDN 層で約 −0.96ms/token 相当であり、
+observed（27.2ms → 26.5ms/token）と整合する。prefill は不変。
+
+- correctness gate 7/7 PASS（TP=1 vs TP=2 greedy token 一致、GDN recurrence 全テスト）。
+- required acceptance 124/124 PASS。
 
 ## 第2回: 残りの correctness fallback（rope / kv_append / l2 / gdn_conv / rmsnorm / elementwise）
 
@@ -141,8 +183,20 @@ round1 後も `KERNEL_TRACE_FALLBACK` が残っていたため、各 dispatch �
 ### 現在残るもの
 
 `KV_APPEND / ROPE / GDN conv1d / L2_NORMALIZE / RMS_NORM / elementwise` の
-correctness fallback は 0 になった。`RcclTpTransport` は従来どおり未導入、
-GDN decode1 の TP=2 開放（Phase B）は未実施。
+correctness fallback は 0 で、GDN decode1 も TP=2 へ開放済み。
+`RcclTpTransport` は従来どおり未導入。
+
+次の候補（未着手）:
+
+1. TP2 PSQ4 decode の unroll（U2/U4/U8/U16）を TP2 実 shape で再 sweep。
+   現状の境界 `out_features <= 2048 ? U16 : U8` は TP1 shape 向け。
+2. TP2 PSQ8 decode の unroll。現在 `psq8_decode1_unroll()` は shape を見ずに
+   8 固定で、U2/U4/U8/U16 の余地がある。
+3. ctx2048 での PSQ4/PSQ8 Prefill2D tile sweep
+   （`PHASESHIFT_PSQ4_PREFILL_2D` / `PHASESHIFT_PSQ8_PREFILL_2D` でコード変更なし）。
+4. TP combine の総時間計測（最大 64 層 × 2 = 128 回/token、rows=1 で
+   約 88us/combine なら約 11ms/token の見込み）と、その後の
+   collective 数削減 / compute-communication overlap。
 
 ## 変更ファイル
 
@@ -176,4 +230,6 @@ tests/kernels/optimized/test_l2_normalize.hip
 tests/kernels/optimized/test_gdn_conv1d.hip
 tests/kernels/optimized/test_rmsnorm.hip
 tests/kernels/optimized/test_elementwise.hip
+src/phaseshift/models/qwen35/kernels/optimized/gdn/recurrence.hip
+tests/kernels/optimized/test_gdn_recurrence_decode1.hip
 ```
