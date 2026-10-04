@@ -176,3 +176,82 @@ host-mediated  2048   20971520 B     22700 us / 1.85 GB/s
 - RCCL backend は引き続き未導入。本ホストの P2P 制約は driver 依存であり、
   安定した peer read が得られる環境では同じ interface でより良い backend を
   追加できる。
+
+## step5: TP combine の実測総時間（collective の実コスト）
+
+`128 回/token × 88 µs ≒ 11.3 ms ≒ 42%` という推計を**実測で置き換える**ため、
+GPU kernel-trace と transport bypass の 2 経路で測定した。
+
+### 方法
+
+1. **`rocprofv3 --kernel-trace`**（`--context 64 --tokens 128`、127 decode steps）
+   transport kernel を `tp_copy_bf16_kernel` / `tp_add_peers_bf16_kernel` で識別し、
+   prefill（`Grid_Size_X = 262144`）と decode（`Grid_Size_X = 5120`）を分離。
+2. **transport bypass A/B**（profiler なし、5反復 interleaved）
+   `TpBarrierGroup::arrive` で `transport_->sum_hidden()` のみをスキップする
+   計測専用フラグを一時的に設け、同一バイナリを env で切り替えて交互に測定。
+   bypass は合計されないため**正しくない実行であり、速度計測のみに使用し計測後に revert 済み**。
+   bypass 実行は garbage token が EOS に当たり **`decode_steps` が 15 に早期終了**するため、
+   per-step は必ず `decode_ms / decode_steps` で算出する（固定 31 と仮定すると過大になる）。
+
+### 結果
+
+GPU kernel-trace（127 steps）:
+
+```text
+collective 回数              : 128 / token（想定どおり、transport kernel = 512/step = 128 × 4）
+transport kernel GPU 時間    : 0.464 ms / token（その agent の busy の 1.7%）
+  内訳 Agent1 58.72 ms / Agent2 58.98 ms over 127 steps
+```
+
+bypass A/B（5反復 interleaved、`ms/token = decode_ms / decode_steps`）:
+
+```text
+config     transport ON   BYPASS    marginal cost   share     同方向
+ctx64        26.523 ms   24.013 ms    2.509 ms      9.5%      5/5
+ctx2048      27.161 ms   24.697 ms    2.465 ms      9.1%      5/5
+
+1 collective あたり : 19.6 µs（ctx64） / 19.3 µs（ctx2048）
+```
+
+### 解釈
+
+| 要素 | ms/token | collective 内の比率 |
+| --- | ---: | ---: |
+| transport kernel（GPU busy） | 0.464 | 19% |
+| host enqueue + barrier + 対 rank 待ち | 2.03 | **81%** |
+| 合計 | 2.49 | 100% |
+
+- **collective のコストは帯域でも kernel でもなく、host 側が支配的**（81%）。
+  payload は 20 KB で 0.5 µs 分しかなく、GPU 上の kernel も 1.9 µs/本。
+- コストが ctx64 と ctx2048 でほぼ同一（2.51 / 2.47 ms）であることから、
+  attention の長さには依存しない**固定の 1 回あたりコスト**である。
+- 旧推計の 88 µs は `phaseshift-bench tp-reduce` が `sum_hidden` に
+  **host 側 `hipStreamSynchronize` を 2 回**挟んで測った値であり、
+  実行時の marginal cost 19.5 µs の約 4.5 倍だった。
+
+### 含意（通信回数を減らす価値）
+
+decode の wall に対する上限は以下で、**通信回数の削減は最大戦略ではない**。
+
+| 手法 | 改善上限（decode tok/s への上乗せ） |
+| --- | ---: |
+| collective を全消 | +9.1%（36.8 → 40.5 tok/s） |
+| **collective を半減**（2/layer → 1/layer、schedule 再構成が要る） | **約 +4.6%** |
+| **host 側コストのみ除去**（schedule 不変、数行の修正） | **約 +7.7%** |
+
+つまり **「回数を減らす」より先に「1 回あたりの host コストを下げる」の方が
+見返りが大きく、改修も軽い**。具体的な候補:
+
+- `TpBarrierGroup::arrive` が毎 barrier で `hipEventRecord(ready_)` を行うが、
+  `HipPeerTpTransport::enqueue_sum` は `invocation.ready` を参照しない
+  （対称 push 化で stream 順序で足りる）→ **未使用の event record 2 回/barrier**
+- `arrive` と `sum_hidden` の `ScopedDevice::create`（`hipGetDevice` + `hipSetDevice`
+  が計 6 回/barrier）。呼び出し元の worker thread は thread 入りで device 設定済み
+
+### 次
+
+- host 側コストの削減を A/B で実測（code は数行、correctness は token 一致で確認）
+- それでも足りなければ overlap（`docs/developer/tensor_parallel_execution.md` §10 の
+  「通信と計算の本格的な overlap は未対応」）を検討
+- 通信回数そのものの削減（2 collective/layer → 1）は上記を先に済ませてから
