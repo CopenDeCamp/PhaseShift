@@ -5,7 +5,6 @@
 #include <phaseshift/models/qwen35/dflash2/executor.h>
 #include <phaseshift/models/qwen35/dflash2/weights.h>
 #include <phaseshift/models/qwen35/runtime/dflash2_spec_decoder.h>
-#include <phaseshift/models/qwen35/runtime/decode_backend.h>
 #include <phaseshift/models/qwen35/runtime/runtime_request.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
@@ -60,7 +59,6 @@ void usage(const char* prog) {
     printf("  --constraint-tokenizer-info PATH  xgrammar tokenizer info sidecar path\n");
     printf("  --device N             GPU device (default 0)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)\n");
-    printf("  --decode-backend TYPE  host (default)\n");
     printf("  --verify-weights 0|1      verify quantized payload CRC32 on load (default 0)\n");
     printf("  --dump-logits PATH      append per-step sampled logits rows (raw f32) to PATH\n");
     printf("                          row k aligns with GENERATED_IDS[k] (prefill row first)\n");
@@ -1648,8 +1646,6 @@ int main(int argc, char** argv) {
     std::string constraint_tokenizer_info;
     unsigned long device = 0;
     std::string kv_cache_dtype = "bf16";
-    ps::qwen35::runtime::DecodeBackend decode_backend =
-        ps::qwen35::runtime::DecodeBackend::Host;
     int verify_weights = 0;
     std::string dump_logits_path;
     bool serve_stdio = false;
@@ -1701,19 +1697,6 @@ int main(int argc, char** argv) {
             if (kv_cache_dtype != "bf16" && kv_cache_dtype != "fp8_e4m3" &&
                 kv_cache_dtype != "psq4" && kv_cache_dtype != "psq8") {
                 fprintf(stderr, "bad --kv-cache-dtype: %s (expected bf16 | fp8_e4m3 | psq4 | psq8)\n", kv_cache_dtype.c_str());
-                return 2;
-            }
-        } else if (std::strcmp(argv[i], "--decode-backend") == 0 && i + 1 < argc) {
-            if (!ps::qwen35::runtime::parse_decode_backend(argv[++i], &decode_backend)) {
-                fprintf(stderr, "bad --decode-backend: %s (expected host)\n", argv[i]);
-                return 2;
-            }
-            const ps::Status decode_backend_status =
-                ps::qwen35::runtime::validate_decode_backend(decode_backend);
-            if (!decode_backend_status.ok()) {
-                fprintf(stderr, "%s (requested: %s)\n",
-                        decode_backend_status.message().c_str(),
-                        ps::qwen35::runtime::decode_backend_name(decode_backend));
                 return 2;
             }
         } else if (std::strcmp(argv[i], "--verify-weights") == 0 && i + 1 < argc) {

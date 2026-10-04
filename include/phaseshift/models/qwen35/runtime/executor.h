@@ -30,6 +30,7 @@ namespace qwen35 {
 
 namespace runtime {
 struct ValueTraceSink;
+struct McuDecodeState;
 }
 
 constexpr uint32_t kMaxTargetHiddenTaps = 8;
@@ -120,11 +121,22 @@ struct Executor {
     void* host_status_staging = nullptr;
     uint64_t next_submission_id = 0;
     uint64_t active_submission_id = 0;
+    uint32_t active_submission_mcu_epoch = 0;
+
+    struct ProgramMcuRange {
+        uint32_t body_begin = 0;
+        uint32_t region_begin = 0;
+        uint32_t body_end = 0;
+        bool valid = false;
+    };
+
     ::ps::runtime::ProgramSet program_set;
     bool program_set_ready = false;
     std::vector<::ps::runtime::TpExecutionSchedule> tp_schedules;
     ::ps::runtime::TpBarrierHook* tp_barrier = nullptr;
     int tp_rank = 0;
+    std::array<ProgramMcuRange, ::ps::runtime::ProgramSet::kRowBucketCount>
+        mcu_body_range{};
     gpu::Tensor execution_status;
     gpu::Tensor execution_workspace;
     ::ps::runtime::WeightSlot* host_weight_table = nullptr;
@@ -163,6 +175,7 @@ struct Executor {
 
     void* keepalive = nullptr;
 
+    std::unique_ptr<runtime::McuDecodeState> mcu_state;
     ::ps::runtime::StreamSignal completion_signal{};
 };
 

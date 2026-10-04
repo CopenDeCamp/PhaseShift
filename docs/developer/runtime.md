@@ -32,6 +32,33 @@ model_dispatch_correctness (ps::kernel, single launcher)
 - sync semantics: opごとにstaging H2D（async）→ launch →
   `hipStreamSynchronize`（pool経由でnon-synchronous opはskip）。
 
+## Decode backend
+
+1つの `Executor` は Host 経路と GPU-MCU 経路を持ち、step ごとに選ぶ。
+ownership は phase や backend で分けない。
+
+```cpp
+enum class DecodeBackend { Host = 0, GpuMcu = 1 };
+```
+
+- `Executor::config.backend` の既定は `DecodeBackend::Host`。
+- `DecodeBackend` は要求を表す。`GpuMcu` は「GPU-MCU で実行する」要求であり、
+  eligibility 判定で書き換えられない。
+- `decide_decode_backend(DecodeBackendInputs)` が eligibility と
+  `DecodeBackendReason` を返す。requested が `Host` なら reason は `BackendIsHost`。
+- GPU-MCU が実行できない主な理由:
+  `NotDecode` / `MultipleRequests` / `NotSingleToken` / `NotSingleRow` /
+  `SpeculativeVerify` / `PrefillPresent` / `KvDtypeNotBf16` /
+  `ImatrixCollector` / `ValueTrace` / `TargetHiddenTaps` /
+  `StreamWaitUnsupported` / `McuBodyRangeUnavailable`。
+  `GpuMcu` 要求で成立しない場合は `decode_backend_execution_error()` が
+  `Status::unsupported` を返し、Host 経路へは落ちない。
+- `Executor::mcu_state`（`McuDecodeState`）は最初に `GpuMcu` が選ばれた時点で
+  `ensure_mcu_state()` が作る。以降の step で再利用する。初期化・plan・実行が
+  失敗した場合も Host へ fallback せず error を返す。
+- GPU-MCU 経路の全体（plan compilation、persistent controller、slot / output）は
+  [gpu_mcu/architecture.md](gpu_mcu/architecture.md) が正本。
+
 ## Public API
 
 ```cpp

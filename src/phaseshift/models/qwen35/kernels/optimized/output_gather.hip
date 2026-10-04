@@ -66,4 +66,45 @@ hipError_t launch_output_gather(
     return hipGetLastError();
 }
 
+extern "C" __global__ __launch_bounds__(kOutputGatherMcuThreads)
+void phaseshift_gpu_mcu_output_gather_bf16(OutputGatherBf16McuArgs args) {
+    const uint32_t i = blockIdx.y;
+    if (i >= args.num_outputs) return;
+    const uint32_t src = args.output_rows[i];
+    const bf16_t* in = args.input +
+                       static_cast<std::size_t>(src) * args.input_row_stride;
+    bf16_t* out = args.output +
+                  static_cast<std::size_t>(i) * args.output_row_stride;
+    for (uint32_t c = blockIdx.x * blockDim.x + threadIdx.x; c < args.features;
+         c += blockDim.x * gridDim.x) {
+        out[c] = in[c];
+    }
+}
+
+hipError_t launch_output_gather_bf16_mcu(
+    const bf16_t* input, bf16_t* output, const uint32_t* output_rows,
+    uint32_t input_row_stride, uint32_t output_row_stride, uint32_t num_outputs,
+    uint32_t features, hipStream_t stream) {
+    if (input == nullptr || output == nullptr || output_rows == nullptr) {
+        return hipErrorInvalidValue;
+    }
+    if (num_outputs == 0u || features == 0u) {
+        return hipErrorInvalidValue;
+    }
+    const uint32_t blocks_x =
+        (features + kOutputGatherMcuThreads - 1u) / kOutputGatherMcuThreads;
+    dim3 grid(blocks_x, num_outputs);
+    OutputGatherBf16McuArgs args{};
+    args.input = input;
+    args.output = output;
+    args.output_rows = output_rows;
+    args.input_row_stride = input_row_stride;
+    args.output_row_stride = output_row_stride;
+    args.num_outputs = num_outputs;
+    args.features = features;
+    phaseshift_gpu_mcu_output_gather_bf16<<<grid, kOutputGatherMcuThreads, 0,
+                                            stream>>>(args);
+    return hipGetLastError();
+}
+
 }  // namespace ps::kernel

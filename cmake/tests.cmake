@@ -134,7 +134,6 @@ phaseshift_add_test(NAME test_constraint_candidates SOURCE unit/test_constraint_
 phaseshift_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_decode_backend_contract SOURCE unit/test_decode_backend_contract.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES phaseshift_qwen35_state)
 phaseshift_add_test(NAME test_constraint_mask SOURCE unit/test_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_dflash2_constraint_mask SOURCE unit/test_dflash2_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
@@ -217,6 +216,7 @@ phaseshift_add_test(NAME test_qwen35_sampling_rng SOURCE unit/test_qwen35_sampli
 phaseshift_add_test(NAME test_stochastic_sampling SOURCE kernels/optimized/test_stochastic_sampling.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_stochastic_topk SOURCE kernels/optimized/test_stochastic_topk.hip LABELS "gpu1;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 
+include("${CMAKE_SOURCE_DIR}/cmake/gpu_mcu/tests.cmake")
 
 # Default required build unit. Required acceptance builds only this target.
 add_custom_target(
@@ -308,7 +308,6 @@ add_custom_target(
         test_qwen35_mtp_lowering
         test_qwen35_lowering_contract
         test_qwen35_spec_verify
-        test_decode_backend_contract
         test_architecture_boundaries
         test_qwen35_prefix_cache
         test_qwen35_psq_kv_pool
@@ -325,7 +324,7 @@ add_custom_target(
         test_structural_tool_constraint
         test_composite_structural_constraint
         test_xgrammar_cxx20
-        phaseshift-compute
+        ${PS_GPU_MCU_REQUIRED_TESTS}
 )
 
 # ---------------------------------------------------------------------------
@@ -352,7 +351,10 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
             embedding
             sampling
             tp-reduce
-            gpu-memory)
+            gpu-memory
+            gpu-dispatch
+            gpu-sync
+            gpu-ext-dispatch)
         string(REPLACE "-" "_" _bench_name ${_cmd})
         add_test(NAME test_bench_help_${_bench_name}
                  COMMAND $<TARGET_FILE:phaseshift-bench> ${_cmd} --help)
@@ -366,17 +368,6 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
                              LABELS "cpu;required" WILL_FAIL TRUE)
     endforeach()
 endif()
-
-# ---------------------------------------------------------------------------
-# phaseshift-compute decode backend contract (CPU-only: no GPU, no model).
-# --decode-backend must be decided before any model load: host keeps reaching
-# the ordinary startup path.
-# ---------------------------------------------------------------------------
-add_test(NAME test_compute_decode_backend_host
-         COMMAND $<TARGET_FILE:phaseshift-compute> --decode-backend host)
-set_tests_properties(test_compute_decode_backend_host PROPERTIES
-                     LABELS "cpu;required"
-                     PASS_REGULAR_EXPRESSION "model-dir required")
 
 # ---------------------------------------------------------------------------
 # Qwen3.5-4B full application E2E.

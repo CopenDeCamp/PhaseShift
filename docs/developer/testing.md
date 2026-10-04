@@ -27,10 +27,38 @@ test binary が exit 77 を返した場合も required acceptance では失敗�
 
 required は CPU contract test（safetensors writer、FPX layout、量子化 payload /
 codec、selector、architecture boundary 等）と、gfx1201 限定の GPU kernel /
-runtime test、bench `--help` smoke からなる。
+runtime test、GPU-MCU substrate test、bench `--help` smoke からなる。
 arch 非適合の kernel test は非適合 arch では CTest レベルで DISABLED にし、
 plain `ctest` が誤った FAIL を出さないようにしている（test binary 側は exit 77 を
 返すが、CTest に skip 機構を置かない）。
+
+## GPU-MCU テスト
+
+GPU-MCU テストは `tests/unit/gpu_mcu/` の下に、**何を保証しているか**で分類する。
+テストの統合・削除・rename はしない。
+
+| ディレクトリ | 保証する内容 |
+|---|---|
+| `tests/unit/gpu_mcu/substrate/` | AQL packet / queue / stage-commit、control・output ring、slot、request ingress、completion、KV page allocator、sequence resource、batch binding・planner・dispatch・commit、worker code object、CU partition、kernarg region、LDS template |
+| `tests/unit/gpu_mcu/controller/` | persistent MCU、micro FSM、continuous refill / ring wrap / turnover、append while running、autonomous loop、prepared dispatch、dynamic plan binding、external persistent driver、runtime lifecycle |
+| `tests/unit/gpu_mcu/qwen35/` | Qwen3.5 単体 primitive の AQL 実行（`real_*`）、kernel registry、plan compiler / cache、attention / GDN / verify の統合、decode backend policy、layer dispatch range |
+| `tests/unit/gpu_mcu/acceptance/` | production decode、mixed batch 実行、plan binder、multirow / gdn / linear-attention の chain bridge、one layer および full body plan |
+
+- 共有 fixture（`gpu_mcu_fsm_test_util.h`、`gpu_mcu_*_fixture.h`）は
+  `tests/unit/gpu_mcu/` 直下に置く。4 分類すべてから参照されるため、
+  いずれかのカテゴリへは入れない。
+- 登録の正本は `cmake/gpu_mcu/tests.cmake`。`phaseshift-required-tests` の
+  GPU-MCU 分は同ファイルの `PS_GPU_MCU_REQUIRED_TESTS` が正本。
+- 一覧:
+
+```bash
+ctest --test-dir build -L gpu_mcu -N
+```
+
+- 件数は build 構成（optional / external の有無）で変わるため、ここには固定しない。
+- `optional;external_files` label の GPU-MCU テストは外部 model が必要である。
+  model が無い環境では exit で返るが、required acceptance の対象外である。
+  required acceptance では skip を失敗として扱う。
 
 ## optional E2E
 

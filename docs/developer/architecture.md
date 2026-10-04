@@ -60,6 +60,34 @@ weight の canonical → partition → preshuffle → upload の順序 contract 
 
 CMake targetの一覧は `cmake/targets.cmake` を参照。
 
+## GPU-MCU
+
+GPU-MCU は 3 つの target に分かれる。production architecture の正本は
+[gpu_mcu/architecture.md](gpu_mcu/architecture.md) を参照。
+
+```text
+phaseshift_gpu_mcu         substrate（Qwen3.5 非依存）
+    -> phaseshift_core / phaseshift_gpu / hip::host / hsa-runtime64
+phaseshift_qwen35_gpu_mcu  Qwen3.5 kernel HSACO blob の所有者
+    -> phaseshift_gpu_mcu
+phaseshift_qwen35_runtime  Qwen3.5 runtime
+    -> phaseshift_gpu_mcu, phaseshift_qwen35_gpu_mcu
+```
+
+- `include/phaseshift/runtime/gpu_mcu/**` と
+  `src/phaseshift/runtime/gpu_mcu/**` は Qwen3.5 を一切参照しない
+  （`test_architecture_boundaries` が runtime core に適用する規則と同じ）。
+- `phaseshift` aggregate の明示リストには `phaseshift_gpu_mcu` を追加しない。
+  しかし `phaseshift_qwen35_runtime` が PUBLIC で link するため、
+  production binary は substrate と `hsa-runtime64` を実 link する。
+  production decode が HSA に依存するのはこのためである。
+- Qwen3.5 固有の kernel HSACO blob は substrate に置かず、
+  `phaseshift_qwen35_gpu_mcu` が所有する。blob の消費者は
+  `mcu_kernel_registry.hip` のみ。
+- substrate の low-level 契約と実測は `docs/developer/gpu_mcu/low_level.md`。
+- 現行 Program / DispatchBinding / KernelConfig / Host Backend は substrate が
+  消費しない。plan への変換は Qwen3.5 backend 側で行う。
+
 
 ## 依存ルール（enforced by `test_architecture_boundaries`）
 

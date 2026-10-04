@@ -15,6 +15,7 @@ AMD RDNA4 GPU向けの単一ハードウェア推論ランタイムの研究プ�
 - 主要 performance target: **Qwen3.8-27B-PSQ**
 - Speculative decode: **DFlash2** drafter（Qwen3.8-27B target + DFlash2）
 - KVキャッシュ: paged KV、BF16 / FP8_E4M3
+- GPU-MCU: Qwen model 非依存の low-level substrate（`src/phaseshift/runtime/gpu_mcu/`）
 
 runtime の namespace は `qwen35` のままである。Qwen3.8-27B を「別 family へ rename
 済み」ではない。コード上の Qwen3.5 runtime family を基盤として、現在の主要
@@ -28,6 +29,7 @@ performance target に Qwen3.8-27B-PSQ を使っている。
 - `PrimitiveGraph` → `ProgramSet` → Qwen35 Executor
 - continuous batching（prefill / decode mixed）
 - DFlash2 speculative decode
+- GPU-MCU low-level substrate（tests / bench 付き）
 - offline quantization（FPX / self-contained quantized safetensors / KLD）
 
 ## Server

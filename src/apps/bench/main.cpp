@@ -18,7 +18,10 @@ int run_gdn_conv1d(int argc, char** argv);
 int run_elementwise(int argc, char** argv);
 int run_embedding(int argc, char** argv);
 int run_sampling(int argc, char** argv);
+int run_gpu_dispatch(int argc, char** argv);
+int run_gpu_sync(int argc, char** argv);
 int run_gpu_memory(int argc, char** argv);
+int run_gpu_ext_dispatch(int argc, char** argv);
 
 namespace {
 
@@ -57,6 +60,11 @@ void usage() {
     std::printf("  tp-reduce            tp sum_hidden transport microbenchmark\n");
     std::printf("  gpu-memory         global / LDS crossover sweep\n");
     std::printf("\n");
+    std::printf("GPU-MCU research:\n");
+    std::printf("  gpu-dispatch       kernel / graph / AQL dispatch latency\n");
+    std::printf("  gpu-sync           barrier / fence / sync cost\n");
+    std::printf("  gpu-ext-dispatch   EXT_KERNEL_DISPATCH Gate 0 probe\n");
+    std::printf("\n");
     std::printf("run 'phaseshift-bench <subcommand> --help' for options\n");
 }
 
@@ -89,6 +97,9 @@ int main(int argc, char** argv) {
     if (sub == "sampling") return run_sampling(argc - 1, argv + 1);
     if (sub == "gpu-memory") return run_gpu_memory(argc - 1, argv + 1);
     if (sub == "tp-reduce") return run_tp_reduce(argc - 1, argv + 1);
+    if (sub == "gpu-dispatch") return run_gpu_dispatch(argc - 1, argv + 1);
+    if (sub == "gpu-sync") return run_gpu_sync(argc - 1, argv + 1);
+    if (sub == "gpu-ext-dispatch") return run_gpu_ext_dispatch(argc - 1, argv + 1);
     std::fprintf(stderr, "unknown subcommand: %s\n", sub.c_str());
     usage();
     return 2;

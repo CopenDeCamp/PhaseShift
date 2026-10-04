@@ -31,6 +31,10 @@ target_link_libraries(phaseshift_gpu PUBLIC phaseshift_core hip::host)
 target_compile_options(phaseshift_gpu PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 phaseshift_set_hip_archs(phaseshift_gpu)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/gpu_mcu/hsaco.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/gpu_mcu/substrate.cmake")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/gpu_mcu/qwen35_backend.cmake")
+
 # File I/O.
 add_library(phaseshift_io STATIC
     src/phaseshift/io/safetensors_reader.cpp
@@ -100,6 +104,7 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/optimized/rmsnorm.hip
     src/phaseshift/models/qwen35/kernels/optimized/l2_normalize.hip
     src/phaseshift/models/qwen35/kernels/optimized/output_gather.hip
+    src/phaseshift/models/qwen35/kernels/optimized/verify_accept.hip
     src/phaseshift/models/qwen35/kernels/optimized/activation_quantize.hip
     src/phaseshift/models/qwen35/kernels/optimized/kv_append.hip
     src/phaseshift/models/qwen35/kernels/optimized/gdn/recurrence.hip
@@ -201,9 +206,13 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/kv_calib_dump.cpp
     src/phaseshift/models/qwen35/runtime/paged_attention_dispatch.hip
     src/phaseshift/models/qwen35/runtime/scheduled_batch.cpp
-    src/phaseshift/models/qwen35/runtime/decode_backend.cpp
     src/phaseshift/models/qwen35/runtime/linear_selector.cpp
     src/phaseshift/models/qwen35/runtime/physical_launch.hip
+    src/phaseshift/models/qwen35/runtime/mcu_plan_compiler.hip
+    src/phaseshift/models/qwen35/runtime/decode_backend.cpp
+    src/phaseshift/models/qwen35/runtime/mcu_kernel_registry.hip
+    src/phaseshift/models/qwen35/runtime/mcu_decode_runtime.hip
+    src/phaseshift/models/qwen35/runtime/mcu_plan_cache.hip
     src/phaseshift/models/qwen35/runtime/rmsnorm_selector.cpp
     src/phaseshift/models/qwen35/runtime/l2_normalize_selector.cpp
     src/phaseshift/models/qwen35/runtime/l2_normalize_dispatch.hip
@@ -228,7 +237,7 @@ add_library(phaseshift_qwen35_runtime STATIC
 target_compile_features(phaseshift_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(phaseshift_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(phaseshift_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_xgrammar)
+target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_gpu_mcu phaseshift_qwen35_gpu_mcu phaseshift_xgrammar)
 target_compile_options(phaseshift_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 phaseshift_set_hip_archs(phaseshift_qwen35_runtime)
 if(PHASESHIFT_HIP_GRAPH)
@@ -349,3 +358,4 @@ set_source_files_properties(src/phaseshift/quantization/offline/gpu_quantizer.hi
 
 find_package(OpenSSL REQUIRED)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/gpu_mcu/sync_check.cmake")

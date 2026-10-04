@@ -1,4 +1,7 @@
 #include <phaseshift/models/qwen35/runtime/executor.h>
+#include <phaseshift/models/qwen35/runtime/mcu_decode_state.h>
+#include <phaseshift/models/qwen35/runtime/mcu_plan_cache.h>
+#include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
 #include <phaseshift/runtime/stream_bridge.h>
 #include <phaseshift/models/qwen35/state/kv_cache_types.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
@@ -26,6 +29,7 @@
 #include <thread>
 #include <atomic>
 #include <new>
+#include <phaseshift/models/qwen35/runtime/mcu_layer_range.h>
 #include <phaseshift/models/qwen35/runtime/embedding_selector.h>
 #include <phaseshift/models/qwen35/kernels/dflash2/radix_topn.h>
 #include <phaseshift/models/qwen35/kernels/optimized/sampling_common.h>
@@ -378,6 +382,338 @@ Status launch_host_backend_range(
     }
     return runtime::execute_program_range(program, ctx, stream, begin, end);
 }
+
+Status ensure_mcu_state(Executor& executor) {
+    if (executor.mcu_state != nullptr) return Status::make_ok();
+    int device = 0;
+    const hipError_t derr = hipGetDevice(&device);
+    if (derr != hipSuccess) {
+        return Status::hip_error("hipGetDevice", hipGetErrorString(derr),
+                                 __FILE__, __LINE__);
+    }
+    const auto supported =
+        ::ps::runtime::stream_wait_value_supported(device);
+    if (!supported.ok()) return supported.status();
+    if (supported.value() == 0) {
+        return Status::unsupported("hipStreamWaitValue32 is not supported",
+                                   __FILE__, __LINE__);
+    }
+    runtime::McuDecodeRuntimeOptions options{};
+    options.device = device;
+    options.driver_mode = runtime::McuPlanDriverMode::ExternalPersistentMcu;
+    auto created = runtime::McuDecodeRuntime::create(options);
+    if (!created.ok()) return created.status();
+    auto state = std::make_unique<runtime::McuDecodeState>();
+    state->runtime = created.release();
+
+    const uint32_t max_slots =
+        executor.sequence_pool != nullptr
+            ? executor.sequence_pool->max_sequences()
+            : executor.config.max_scheduled_requests;
+    const uint32_t max_requests = executor.config.max_scheduled_requests;
+    if (max_slots == 0u || max_requests == 0u) {
+        return Status::invalid_state("mcu commit capacity is zero", __FILE__,
+                                     __LINE__);
+    }
+    hipStream_t control = nullptr;
+    const hipError_t cerr =
+        hipStreamCreateWithFlags(&control, hipStreamNonBlocking);
+    if (cerr != hipSuccess) {
+        return Status::hip_error("mcu control stream", hipGetErrorString(cerr),
+                                 __FILE__, __LINE__);
+    }
+    auto persistent =
+        ::ps::runtime::gpu_mcu::GpuMcuPersistentMcu::create(device, control);
+    if (!persistent.ok()) {
+        (void)hipStreamDestroy(control);
+        return persistent.status();
+    }
+    state->persistent = persistent.release();
+    state->control_stream = control;
+
+    void* slots = nullptr;
+    void* bindings = nullptr;
+    void* plan_epoch = nullptr;
+    void* ready_epoch = nullptr;
+    void* verify = nullptr;
+    const bool alloc_ok =
+        hipMallocManaged(&slots,
+                         static_cast<size_t>(max_slots) *
+                             sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotState)) ==
+            hipSuccess &&
+        hipMallocManaged(
+            &bindings,
+            static_cast<size_t>(max_slots) *
+                sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotBinding)) ==
+            hipSuccess &&
+        hipMallocManaged(&plan_epoch, sizeof(uint64_t)) == hipSuccess &&
+        hipMallocManaged(&ready_epoch, sizeof(uint64_t)) == hipSuccess &&
+        hipMallocManaged(&verify,
+                         static_cast<size_t>(max_requests) * sizeof(uint32_t)) ==
+            hipSuccess;
+    if (!alloc_ok) {
+        if (slots != nullptr) (void)hipFree(slots);
+        if (bindings != nullptr) (void)hipFree(bindings);
+        if (plan_epoch != nullptr) (void)hipFree(plan_epoch);
+        if (ready_epoch != nullptr) (void)hipFree(ready_epoch);
+        if (verify != nullptr) (void)hipFree(verify);
+        return Status::hip_error("mcu commit table allocation",
+                                 hipGetErrorString(hipGetLastError()), __FILE__,
+                                 __LINE__);
+    }
+    state->commit_slots =
+        static_cast<::ps::runtime::gpu_mcu::GpuMcuSlotState*>(slots);
+    state->commit_bindings =
+        static_cast<::ps::runtime::gpu_mcu::GpuMcuSlotBinding*>(bindings);
+    state->plan_epoch = static_cast<uint64_t*>(plan_epoch);
+    state->ready_epoch = static_cast<uint64_t*>(ready_epoch);
+    state->verify_counts = static_cast<uint32_t*>(verify);
+    state->commit_max_slots = max_slots;
+    state->commit_max_requests = max_requests;
+    std::memset(slots, 0,
+                static_cast<size_t>(max_slots) *
+                    sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotState));
+    std::memset(bindings, 0,
+                static_cast<size_t>(max_slots) *
+                    sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotBinding));
+    *state->plan_epoch = 0u;
+    *state->ready_epoch = 0u;
+    std::memset(verify, 0,
+                static_cast<size_t>(max_requests) * sizeof(uint32_t));
+
+    executor.mcu_state = std::move(state);
+    return Status::make_ok();
+}
+
+Status stage_mcu_commit_slots(
+    runtime::McuDecodeState& state,
+    const ::ps::runtime::DeviceRequestDescriptor* staging,
+    uint32_t request_count) {
+    namespace mcu = ::ps::runtime::gpu_mcu;
+    if (state.commit_slots == nullptr || state.commit_bindings == nullptr) {
+        return Status::invalid_state("mcu commit table is not allocated",
+                                     __FILE__, __LINE__);
+    }
+    if (request_count > state.commit_max_requests) {
+        return Status::invalid_argument("mcu commit request count exceeds capacity",
+                                        __FILE__, __LINE__);
+    }
+    for (uint32_t i = 0u; i < request_count; ++i) {
+        const ::ps::runtime::DeviceRequestDescriptor& d = staging[i];
+        const uint32_t slot = d.request_handle.slot;
+        if (slot >= state.commit_max_slots) continue;
+        mcu::GpuMcuSlotState fresh{};
+        fresh.handle = d.request_handle;
+        fresh.request_id = static_cast<uint64_t>(i) + 1u;
+        if (d.execution_class == ::ps::runtime::ExecutionClass::SPEC_VERIFY) {
+            fresh.phase = mcu::gpu_mcu_slot_phase_value(mcu::GpuMcuSlotPhase::verify);
+            fresh.verify_candidate_count = d.row_count;
+            fresh.committed_position = d.prefix_length;
+            fresh.sequence_length = d.prefix_length + d.row_count;
+        } else if (d.execution_class ==
+                   ::ps::runtime::ExecutionClass::PREFILL) {
+            fresh.phase = mcu::gpu_mcu_slot_phase_value(mcu::GpuMcuSlotPhase::prefill);
+            fresh.prompt_length = d.sequence_length;
+            fresh.prefill_position = d.prefix_length;
+            fresh.committed_position = d.prefix_length;
+            fresh.sequence_length = d.sequence_length;
+        } else {
+            fresh.phase = mcu::gpu_mcu_slot_phase_value(mcu::GpuMcuSlotPhase::decode);
+            fresh.committed_position = d.prefix_length;
+            fresh.sequence_length = d.prefix_length + d.row_count;
+        }
+        state.commit_slots[slot] = fresh;
+        mcu::GpuMcuSlotBinding binding{};
+        binding.handle = d.request_handle;
+        state.commit_bindings[slot] = binding;
+    }
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    return Status::make_ok();
+}
+
+Status execute_mcu_hybrid(
+    Executor& executor,
+    const ::ps::runtime::Program& program,
+    runtime::HostExecutionContext& ctx,
+    hipStream_t stream,
+    uint32_t bucket,
+    uint32_t dispatch_count,
+    const ::ps::runtime::DeviceRequestDescriptor* staging,
+    uint32_t request_count,
+    const runtime::GdnSpecHistoryDeviceView& gdn_history) {
+    namespace mcu = ::ps::runtime::gpu_mcu;
+    if (executor.mcu_state == nullptr) {
+        return Status::invalid_state("mcu state not created", __FILE__, __LINE__);
+    }
+    const Executor::ProgramMcuRange range = executor.mcu_body_range[bucket];
+    if (!range.valid || range.region_begin >= range.body_end ||
+        range.body_end >= dispatch_count) {
+        return Status::unsupported("mcu body range is not available", __FILE__,
+                                   __LINE__);
+    }
+
+    runtime::McuDecodeState& state = *executor.mcu_state;
+    runtime::McuPlanCompileOptions compile_options{};
+    compile_options.dispatch_begin = 0u;
+    compile_options.dispatch_end = dispatch_count;
+    compile_options.marker_grid = 1u;
+    compile_options.marker_workgroup = 64u;
+    compile_options.verify_sampled_tokens =
+        executor.sampled_tokens.data<int32_t>();
+    compile_options.verify_committed_counts = state.verify_counts;
+    compile_options.verify_max_candidates = 32u;
+    compile_options.verify_conv_history = gdn_history.conv_history;
+    compile_options.verify_recurrent_history = gdn_history.recurrent_history;
+    compile_options.verify_conv_history_stride = gdn_history.conv_row_stride;
+    compile_options.verify_recurrent_history_stride =
+        gdn_history.recurrent_row_stride;
+    runtime::McuCompiledPlan plan{};
+    Status st = runtime::compile_mcu_plan(program, ctx, compile_options, plan);
+    uint32_t plan_begin = 0u;
+    uint32_t plan_end = dispatch_count;
+    if (!st.ok()) {
+        compile_options.dispatch_begin = range.region_begin;
+        compile_options.dispatch_end = range.body_end;
+        plan = runtime::McuCompiledPlan{};
+        st = runtime::compile_mcu_plan(program, ctx, compile_options, plan);
+        plan_begin = range.region_begin;
+        plan_end = range.body_end;
+    }
+    if (!st.ok()) return st;
+
+    state.full_plan = plan_begin == 0u && plan_end == dispatch_count;
+    const runtime::McuPlanShape shape =
+        plan.attention_paged_split.empty() ? runtime::McuPlanShape::Direct
+                                           : runtime::McuPlanShape::Split;
+    const runtime::McuPlanFingerprint fingerprint =
+        runtime::mcu_plan_fingerprint(plan);
+    const runtime::McuPlanCacheStep step =
+        state.cache.observe(shape, fingerprint);
+    if (step.needs_switch) {
+        st = state.runtime.prepare_plan(plan);
+        if (!st.ok()) return st;
+        state.persistent_configured = false;
+    }
+
+    st = stage_mcu_commit_slots(state, staging, request_count);
+    if (!st.ok()) return st;
+
+    ::ps::runtime::DeviceBatchContext* context = executor.batch_context;
+    if (context == nullptr) {
+        return Status::invalid_state("mcu batch context is not bound", __FILE__,
+                                     __LINE__);
+    }
+    auto* requests =
+        executor.batch_context_storage.requests
+            .data<::ps::runtime::DeviceRequestDescriptor>();
+    uint32_t* row_slots =
+        executor.batch_context_storage.row_sequence_slots.data<uint32_t>();
+    uint32_t* row_positions =
+        executor.batch_context_storage.row_positions.data<uint32_t>();
+    if (requests == nullptr || row_slots == nullptr || row_positions == nullptr) {
+        return Status::invalid_state("mcu batch buffers are not bound", __FILE__,
+                                     __LINE__);
+    }
+    const int32_t* sampled = executor.sampled_tokens.data<int32_t>();
+    if (sampled == nullptr) {
+        return Status::invalid_state("mcu sampled tokens are not bound", __FILE__,
+                                     __LINE__);
+    }
+    const uint32_t max_requests = executor.config.max_scheduled_requests;
+    const uint32_t max_rows = executor.config.max_scheduled_tokens;
+    const uint32_t max_outputs = executor.config.max_scheduled_output_rows;
+
+    *state.ready_epoch += 1u;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    if (plan_begin != 0u) {
+        st = launch_host_backend_range(executor, program, ctx, stream, 0u,
+                                       plan_begin);
+        if (!st.ok()) return st;
+        const hipError_t prefix_sync = hipStreamSynchronize(stream);
+        if (prefix_sync != hipSuccess) {
+            return Status::hip_error("mcu prefix synchronize",
+                                     hipGetErrorString(prefix_sync), __FILE__,
+                                     __LINE__);
+        }
+    }
+
+    st = state.persistent.configure_batch_plan(
+        context, requests, row_slots, row_positions, max_requests, max_rows,
+        max_rows, state.plan_epoch);
+    if (!st.ok()) return st;
+    st = state.persistent.configure_execution(
+        state.runtime.execution_state(), state.runtime.plan_variant_count(),
+        state.ready_epoch, sampled, max_outputs, state.verify_counts,
+        state.commit_max_requests);
+    if (!st.ok()) return st;
+    st = state.persistent.configure_execution_patches(
+        state.runtime.row_global_patches(),
+        state.runtime.row_global_patch_count());
+    if (!st.ok()) return st;
+    st = state.persistent.configure_commit_slots(
+        state.commit_slots, state.commit_max_slots, state.commit_bindings,
+        state.commit_max_slots);
+    if (!st.ok()) return st;
+
+    st = state.persistent.start();
+    if (!st.ok()) return st;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(30000);
+    while (state.persistent.batches_committed() == 0u &&
+           state.persistent.batches_failed() == 0u) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            (void)state.persistent.request_stop();
+            (void)state.persistent.wait_stopped(5000u);
+            return Status::invalid_state("mcu batch did not commit", __FILE__,
+                                         __LINE__);
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    const uint64_t committed = state.persistent.batches_committed();
+    const uint64_t failed = state.persistent.batches_failed();
+    st = state.persistent.request_stop();
+    if (!st.ok()) return st;
+    st = state.persistent.wait_stopped(5000u);
+    if (!st.ok()) return st;
+    state.persistent_configured = true;
+
+    if (failed != 0u || committed == 0u) {
+        const uint32_t fault =
+            state.runtime.execution_state() != nullptr
+                ? state.runtime.execution_state()->fault_code
+                : 0u;
+        const uint32_t fault_pc =
+            state.runtime.execution_state() != nullptr
+                ? state.runtime.execution_state()->fault_pc
+                : 0u;
+        const uint32_t fault_variant =
+            state.runtime.execution_state() != nullptr
+                ? state.runtime.execution_state()->fault_variant
+                : 0u;
+        state.fault_code = fault;
+        state.fault_epoch = state.epoch;
+        std::string message = "mcu persistent batch failed: fault=";
+        message += std::to_string(fault);
+        message += " pc=";
+        message += std::to_string(fault_pc);
+        message += " variant=";
+        message += std::to_string(fault_variant);
+        return Status::invalid_state(message.c_str(), __FILE__, __LINE__);
+    }
+
+    if (plan_end < dispatch_count) {
+        st = launch_host_backend_range(executor, program, ctx, stream, plan_end,
+                                       dispatch_count);
+        if (!st.ok()) return st;
+    }
+
+    ++state.epoch;
+    if (state.epoch == 0u) ++state.epoch;
+    state.cache.note_mcu_run();
+    return Status::make_ok();
+}
+
 
 template <typename T>
 Status allocate_contiguous_tensor(
@@ -823,6 +1159,46 @@ Result<PendingBatch> submit_co_batch(
             "execution status buffer not allocated", __FILE__, __LINE__));
     }
 
+    if (executor.config.backend == runtime::DecodeBackend::GpuMcu &&
+        executor.mcu_state == nullptr) {
+        const Status mcu_st = ensure_mcu_state(executor);
+        if (!mcu_st.ok()) {
+            return on_error(mcu_st);
+        }
+    }
+    runtime::DecodeBackendInputs backend_inputs{};
+    backend_inputs.requested = executor.config.backend;
+    backend_inputs.role_is_decode =
+        exec_role == ::ps::runtime::ExecutionRole::Decode;
+    backend_inputs.num_requests = R;
+    backend_inputs.num_tokens = N;
+    backend_inputs.actual_rows = N;
+    backend_inputs.speculative_verify = batch.speculative_verify;
+    backend_inputs.prefill_present = num_prefill != 0u;
+    backend_inputs.kv_dtype_is_bf16 =
+        executor.kv_pool != nullptr &&
+        executor.kv_pool->dtype() == ::ps::qwen35::KVCacheDType::BF16;
+    backend_inputs.imatrix_collector_present = executor.imatrix_collector != nullptr;
+    backend_inputs.value_trace_present = executor.value_trace != nullptr;
+    backend_inputs.target_hidden_tap_count = executor.config.target_hidden_tap_count;
+    backend_inputs.stream_wait_value_supported = executor.mcu_state != nullptr;
+    backend_inputs.persistent_ready = executor.mcu_state != nullptr;
+    const std::size_t program_slot =
+        static_cast<std::size_t>(program - &executor.program_set.programs[0]);
+    const bool program_slot_valid =
+        program_slot < executor.program_set.programs.size();
+    backend_inputs.mcu_body_range_valid =
+        N != 0u && program_slot_valid &&
+        executor.mcu_body_range[program_slot].valid;
+    const runtime::DecodeBackendDecision backend_decision =
+        runtime::decide_decode_backend(backend_inputs);
+    const Status backend_error =
+        runtime::decode_backend_execution_error(backend_decision);
+    if (!backend_error.ok()) {
+        return on_error(backend_error);
+    }
+    const bool mcu_selected = backend_decision.eligible;
+
     BatchExecutionOutput output;
     output.num_outputs = prep.num_outputs;
     output.num_token_rows = N;
@@ -886,7 +1262,7 @@ Result<PendingBatch> submit_co_batch(
         ctx_src = executor.host_ctx_graph_staging;
     };
     uint32_t attention_plan_key = 0u;
-    bool graph_active = graph_eligible;
+    bool graph_active = graph_eligible && !mcu_selected;
     if (graph_active) {
         const bool attn_use_prefill =
             exec_role == ::ps::runtime::ExecutionRole::Prefill && R == 1u &&
@@ -954,6 +1330,7 @@ Result<PendingBatch> submit_co_batch(
         const size_t program_index = static_cast<size_t>(
             program - executor.program_set.programs.data());
         const bool tp_configured = !executor.tp_schedules.empty();
+        executor.active_submission_mcu_epoch = 0u;
         if (tp_configured) {
             if (program_index >= executor.tp_schedules.size() ||
                 !executor.tp_schedules[program_index].active() ||
@@ -965,9 +1342,17 @@ Result<PendingBatch> submit_co_batch(
             stq = runtime::execute_program_tp_ranges(
                 *program, ctx, stream, executor.tp_schedules[program_index],
                 executor.tp_barrier, executor.tp_rank);
-        } else {
+        } else if (!mcu_selected) {
             stq = launch_host_backend_range(executor, *program, ctx, stream, 0u,
                                             dispatch_count);
+        } else {
+            stq = execute_mcu_hybrid(executor, *program, ctx, stream,
+                                     static_cast<uint32_t>(program_slot),
+                                     dispatch_count, staging, R,
+                                     options.gdn_spec_history);
+            if (stq.ok()) {
+                executor.active_submission_mcu_epoch = executor.mcu_state->epoch;
+            }
         }
         if (!stq.ok()) return stq;
         auto* host_status = static_cast<uint32_t*>(executor.host_status_staging);
@@ -1223,6 +1608,7 @@ Executor::Executor(Executor&& other) noexcept
       completion_signal(other.completion_signal),
       next_submission_id(other.next_submission_id),
       active_submission_id(other.active_submission_id),
+      active_submission_mcu_epoch(other.active_submission_mcu_epoch),
       program_set(std::move(other.program_set)),
       program_set_ready(other.program_set_ready),
       tp_schedules(std::move(other.tp_schedules)),
@@ -1239,7 +1625,9 @@ Executor::Executor(Executor&& other) noexcept
       host_dispatch_staging(other.host_dispatch_staging),
       staging_pool(std::move(other.staging_pool)),
       program_staging_meta(std::move(other.program_staging_meta)),
+      mcu_body_range(other.mcu_body_range),
       graph_cache(other.graph_cache),
+      mcu_state(std::move(other.mcu_state)),
       host_token_graph_staging(other.host_token_graph_staging),
       host_token_graph_staging_bytes(other.host_token_graph_staging_bytes),
       host_ctx_graph_staging(other.host_ctx_graph_staging),
@@ -1351,6 +1739,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.completion_signal = ::ps::runtime::StreamSignal{};
         next_submission_id = other.next_submission_id;
         active_submission_id = other.active_submission_id;
+        active_submission_mcu_epoch = other.active_submission_mcu_epoch;
         program_set = std::move(other.program_set);
         program_set_ready = other.program_set_ready;
         tp_schedules = std::move(other.tp_schedules);
@@ -1376,7 +1765,9 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.staging_pool = DispatchStagingPool{};
         program_staging_meta = std::move(other.program_staging_meta);
         other.program_staging_meta.clear();
+        mcu_body_range = other.mcu_body_range;
         graph_cache = other.graph_cache;
+        mcu_state = std::move(other.mcu_state);
         host_token_graph_staging = other.host_token_graph_staging;
         host_token_graph_staging_bytes = other.host_token_graph_staging_bytes;
         host_ctx_graph_staging = other.host_ctx_graph_staging;
@@ -1450,7 +1841,7 @@ Executor& Executor::operator=(Executor&& other) noexcept {
 
 bool Executor::is_shutdown() const noexcept {
     return host_request_staging == nullptr && host_pending_staging == nullptr &&
-           batch_context == nullptr &&
+           batch_context == nullptr && mcu_state == nullptr &&
            batch_context_storage.device_struct.allocation_base() == nullptr;
 }
 
@@ -1611,6 +2002,68 @@ Status executor_shutdown(Executor& ex) noexcept {
     for (auto& tap : ex.dflash_target_hidden) tap = gpu::Tensor{};
     ex.input_ids = gpu::Tensor{};
     ex.rope_inv_freq = gpu::Tensor{};
+    if (ex.mcu_state != nullptr) {
+        Status mcu_st = ex.mcu_state->persistent.shutdown();
+        if (first_error.ok() && !mcu_st.ok()) first_error = mcu_st;
+        if (ex.mcu_state->control_stream != nullptr) {
+            const hipError_t serr =
+                hipStreamDestroy(ex.mcu_state->control_stream);
+            if (serr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipStreamDestroy mcu control",
+                                                hipGetErrorString(serr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->control_stream = nullptr;
+        }
+        if (ex.mcu_state->commit_slots != nullptr) {
+            const hipError_t ferr = hipFree(ex.mcu_state->commit_slots);
+            if (ferr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipFree mcu commit slots",
+                                                hipGetErrorString(ferr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->commit_slots = nullptr;
+        }
+        if (ex.mcu_state->commit_bindings != nullptr) {
+            const hipError_t ferr = hipFree(ex.mcu_state->commit_bindings);
+            if (ferr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipFree mcu commit bindings",
+                                                hipGetErrorString(ferr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->commit_bindings = nullptr;
+        }
+        if (ex.mcu_state->plan_epoch != nullptr) {
+            const hipError_t ferr = hipFree(ex.mcu_state->plan_epoch);
+            if (ferr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipFree mcu plan epoch",
+                                                hipGetErrorString(ferr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->plan_epoch = nullptr;
+        }
+        if (ex.mcu_state->ready_epoch != nullptr) {
+            const hipError_t ferr = hipFree(ex.mcu_state->ready_epoch);
+            if (ferr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipFree mcu ready epoch",
+                                                hipGetErrorString(ferr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->ready_epoch = nullptr;
+        }
+        if (ex.mcu_state->verify_counts != nullptr) {
+            const hipError_t ferr = hipFree(ex.mcu_state->verify_counts);
+            if (ferr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipFree mcu verify counts",
+                                                hipGetErrorString(ferr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->verify_counts = nullptr;
+        }
+        mcu_st = ex.mcu_state->runtime.shutdown();
+        if (first_error.ok() && !mcu_st.ok()) first_error = mcu_st;
+        ex.mcu_state.reset();
+    }
     ex.model = nullptr;
     ex.sequence_pool = nullptr;
     ex.gdn_state_pool = nullptr;
@@ -1680,11 +2133,6 @@ Result<Executor> create_model_executor(
     PagedKVPool& kv_pool,
     gpu::GpuArena& arena,
     const ExecutorConfig& config) {
-
-    if (const Status backend_status = runtime::validate_decode_backend(config.backend);
-        !backend_status.ok()) {
-        return backend_status;
-    }
 
     if (config.max_scheduled_tokens == 0 || config.max_scheduled_requests == 0) {
         return Status::invalid_argument(
@@ -2319,6 +2767,42 @@ Result<Executor> create_model_executor(
 
         ex.program_set = std::move(built_set);
         ex.program_set_ready = true;
+        for (uint32_t b = 0; b < ::ps::runtime::ProgramSet::kRowBucketCount; ++b) {
+            const ::ps::runtime::Program& prog = ex.program_set.programs[b];
+            uint32_t body_begin = 0u;
+            uint32_t body_end = 0u;
+            const ps::Status range_status =
+                runtime::find_dispatch_range_for_graph_prefix(
+                    lowered_graph, prog, "L", &body_begin, &body_end);
+            if (!range_status.ok()) continue;
+            if (body_begin >= body_end ||
+                body_end > prog.dispatches.size()) {
+                continue;
+            }
+            ex.mcu_body_range[b].body_begin = body_begin;
+            ex.mcu_body_range[b].body_end = body_end;
+            uint32_t region_begin = body_begin;
+            if (body_begin >= 1u) {
+                const auto& prev = prog.dispatches[body_begin - 1u];
+                if (prev.kernel_id == ::ps::runtime::KernelId::EMBEDDING_LOOKUP &&
+                    prev.weight_index < weight_slots.size()) {
+                    const auto& w = weight_slots[prev.weight_index];
+                    if (w.encoding == 0u) {
+                        runtime::EmbeddingSelectorInput si;
+                        si.storage = runtime::EmbeddingStorage::Bf16;
+                        si.rows = ::ps::runtime::row_bucket_limit(prog.row_bucket);
+                        si.hidden_size = w.cols;
+                        if (runtime::select_embedding_implementation(si) ==
+                            runtime::EmbeddingImplementation::Optimized) {
+                            region_begin = body_begin - 1u;
+                        }
+                    }
+                }
+            }
+            ex.mcu_body_range[b].region_begin = region_begin;
+            ex.mcu_body_range[b].valid = true;
+        }
+
         hipError_t serr = hipStreamSynchronize(upload_stream);
         if (serr != hipSuccess) {
             ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
@@ -2369,6 +2853,21 @@ Result<BatchExecutionOutput> complete_batch(
         poison_pending();
         executor.active_submission_id = 0u;
         return Status::hip_error("hipEventDestroy", hipGetErrorString(de), __FILE__, __LINE__);
+    }
+
+    const uint32_t mcu_epoch = executor.active_submission_mcu_epoch;
+    executor.active_submission_mcu_epoch = 0u;
+    if (mcu_epoch != 0u && executor.mcu_state != nullptr) {
+        const uint32_t mcu_code = executor.mcu_state->runtime.result_code();
+        if (mcu_code != 0u) {
+            executor.mcu_state->fault_code = mcu_code;
+            executor.mcu_state->fault_epoch = mcu_epoch;
+            poison_pending();
+            executor.active_submission_id = 0u;
+            std::string message = "mcu transformer body failed: result_code=";
+            message += std::to_string(mcu_code);
+            return Status::invalid_state(message.c_str(), __FILE__, __LINE__);
+        }
     }
 
     auto* host_status = static_cast<uint32_t*>(executor.host_status_staging);
@@ -2463,6 +2962,10 @@ DecodeStatus poll_decode(const Executor& executor, uint64_t generation) noexcept
         executor.completion_signal);
     if (published != static_cast<uint32_t>(generation)) {
         return DecodeStatus::Pending;
+    }
+    if (executor.mcu_state != nullptr &&
+        executor.mcu_state->runtime.result_code() != 0u) {
+        return DecodeStatus::Error;
     }
     const auto* host_status =
         static_cast<const uint32_t*>(executor.host_status_staging);

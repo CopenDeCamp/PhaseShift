@@ -102,10 +102,13 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
         src/apps/bench/sampling.hip
         src/apps/bench/gpu_memory.hip
         src/apps/bench/tp_reduce.cpp
+        src/apps/bench/gpu_dispatch.hip
+        src/apps/bench/gpu_sync.hip
+        src/apps/bench/gpu_ext_dispatch.hip
     )
     phaseshift_set_rocm_rpath(phaseshift-bench)
     target_compile_features(phaseshift-bench PRIVATE cxx_std_20)
-    target_link_libraries(phaseshift-bench PRIVATE phaseshift)
+    target_link_libraries(phaseshift-bench PRIVATE phaseshift phaseshift_gpu_mcu)
     phaseshift_set_hip_archs(phaseshift-bench)
     target_include_directories(phaseshift-bench PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     execute_process(

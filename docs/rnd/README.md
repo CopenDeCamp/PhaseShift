@@ -85,6 +85,13 @@
 - [server/server_history.md](server/server_history.md) — Server の Gate 系譜と Closure / compatibility 判断
 - [server/reasoning.md](server/reasoning.md) — reasoning の測定・検証記録
 
+## gpu_mcu
+
+- [gpu_mcu/RnD_MCU.md](gpu_mcu/RnD_MCU.md) — GPU-MCU low-level substrate の研究・移植史
+- [gpu_mcu/micro_fsm_retained_aql.md](gpu_mcu/micro_fsm_retained_aql.md) — Micro-FSM / Retained AQL PoC の Gate 結果と finding
+- [gpu_mcu/continuous_aql_feed.md](gpu_mcu/continuous_aql_feed.md) — Continuous AQL Queue Feeder PoC の Gate 結果と finding
+- [gpu_mcu/real_primitive_chain.md](gpu_mcu/real_primitive_chain.md) — Real Primitive Chain（RMSNorm / Quantize / PSQ4）の Gate 結果と finding
+
 ## fusion
 
 - [fusion/gate11j-series-progress.md](fusion/gate11j-series-progress.md) — Fusion / DeepFusion Gate 11J-11K の進捗

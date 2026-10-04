@@ -8,6 +8,7 @@
 
 namespace ps::kernel {
 
+inline constexpr const char* kArgmaxF32Symbol = "phaseshift_gpu_mcu_argmax_f32";
 inline constexpr uint32_t kArgmaxF32Threads = 256u;
 
 struct ArgMaxPair {

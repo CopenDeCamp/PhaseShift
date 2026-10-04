@@ -40,6 +40,12 @@ PoC・Gate・採否判断は `docs/rnd/`、現在の性能値は `docs/perf/`、
 
 - [kernels.md](kernels.md) — active kernel 一覧と variant ルール
 
+## GPU-MCU
+
+- [gpu_mcu/architecture.md](gpu_mcu/architecture.md) — production architecture の正本
+  （substrate / Qwen35 backend / Host との境界、データフロー、test 分類）
+- [gpu_mcu/low_level.md](gpu_mcu/low_level.md) — substrate の low-level contract と実測
+
 ## testing
 
 - [testing.md](testing.md) — required acceptance / optional E2E / server regression group

@@ -111,6 +111,14 @@ __global__ void argmax_single_impl(const float* __restrict__ logits,
                        nullptr);
 }
 
+extern "C" __global__ __launch_bounds__(kThreads)
+void phaseshift_gpu_mcu_argmax_f32(ArgmaxF32Args args) {
+    argmax_single_body(args.logits, args.sampling, args.sampled_tokens,
+                       args.vocab_size, args.logits_row_stride,
+                       args.constraint_masks, args.constraint_mask_words,
+                       args.output_rows);
+}
+
 __global__ void argmax_stage1_impl(const float* __restrict__ logits,
                                    const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
                                    ArgMaxPair* __restrict__ partials,
