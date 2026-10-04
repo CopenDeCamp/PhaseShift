@@ -240,7 +240,9 @@ hipError_t launch_activation_quantize_e4m3(
     uint32_t input_row_stride,
     uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes,
-    hipStream_t stream) {
+    hipStream_t stream,
+    bool* specialized) {
+    if (specialized != nullptr) *specialized = false;
     if (rows == 0 || k_padded == 0)
         return hipSuccess;
     if (activation_quantize_e4m3_vec_supported(input, codes, k, k_padded, input_row_stride)) {
@@ -255,6 +257,7 @@ hipError_t launch_activation_quantize_e4m3(
                 k5120.scale_row_stride = scale_row_stride_bytes;
                 phaseshift_qwen35_activation_quantize_e4m3_k5120
                     <<<rows, 256, 0, stream>>>(k5120);
+                if (specialized != nullptr) *specialized = true;
                 return hipGetLastError();
             }
             case 6144u:
@@ -262,12 +265,14 @@ hipError_t launch_activation_quantize_e4m3(
                     <<<rows, kThreadsPerRow, 0, stream>>>(
                         input, codes, scales, input_row_stride,
                         code_row_stride_bytes, scale_row_stride_bytes);
+                if (specialized != nullptr) *specialized = true;
                 return hipGetLastError();
             case 17408u:
                 activation_quantize_e4m3_vec_kernel<17408u, 17408u>
                     <<<rows, kThreadsPerRow, 0, stream>>>(
                         input, codes, scales, input_row_stride,
                         code_row_stride_bytes, scale_row_stride_bytes);
+                if (specialized != nullptr) *specialized = true;
                 return hipGetLastError();
             default:
                 break;

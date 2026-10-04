@@ -397,4 +397,56 @@ docs/rnd/quantization/tp2_resource_regime.md（本ドキュメント）
 - psq8 Decode1 は u8 (VGPR 94, occ 16) と u16 (VGPR 103, occ 12) で occupancy が
   違うのに等速 → decode1 は VGPR では律速していない。
 
+## step7: `activation_quantize` の fallback counter 漏れを修正
 
+### 背景
+
+TP1 / TP2 の decode compute を `rocprofv3 --kernel-trace` で分解したところ、
+TP1 = 33.411 ms/token、TP2 = 21.65 ms/token/GPU（transport 0.43 ms 含む、比率 0.64）で、
+partitioned な linear は期待どおり半分（psq4 decode1 ×0.51、psq8 decode1 ×0.51、
+gdn recurrence ×0.56）だった一方、**`activation_quantize` だけが 0.235 → 1.418 ms と
+逆に悪化**していた。
+
+### 原因
+
+`launch_activation_quantize_e4m3` は
+
+```cpp
+switch (k) { case 5120u: ...; case 6144u: ...; case 17408u: ...; default: → generic }
+```
+
+と k をハードコードしており、TP2 の local dim（`8704` / `3072`）は default へ落ちる。
+ところが `resolve_activation_quantize_physical` はほぼ常に `Applicable` を返すため、
+この退避は **`KERNEL_TRACE` の optimized カウンタにも `KERNEL_TRACE_FALLBACK` にも
+現れていなかった**（`KERNEL_TRACE_FALLBACK` は executor が
+`try_launch_optimized` が `NotApplicable` を返した時だけ記録する）。
+
+前回報告した「TP2 の fallback = 0」は `KERNEL_TRACE` の欄に
+`activation_quantize` が存在しなかったため**この op を含んでいなかった**。
+
+### 変更
+
+- `activation_quantize.h` / `.hip`: `launch_activation_quantize_e4m3` に
+  `bool* specialized = nullptr` を追加。`switch(k)` が単一の真実源のまま、
+  どの path を取ったかを呼び出し側に返す。既存 caller 5 箇所は default arg のまま。
+- `optimized_dispatch.hip`:
+  - `g_activation_quantize_optimized_count` を追加し `KERNEL_TRACE activation_quantize=%u` を出力
+  - `E4M3` かつ specialized → optimized counter、**generic へ退避 → `record_correctness_fallback(b.kernel_id)`**
+  （`resolve` が `NotApplicable` の場合は従来どおり executor 側が記録するため二重計上しない）
+  - `I8Row`（`ACTIVATION_QUANTIZE_FP8`）は専用 kernel が存在しないため計上対象外
+
+### 結果
+
+```text
+TP1: activation_quantize=2056   KERNEL_TRACE_FALLBACK ACTIVATION_QUANTIZE_W4A8 なし
+TP2: activation_quantize=2064   KERNEL_TRACE_FALLBACK ACTIVATION_QUANTIZE_W4A8 2048
+```
+
+TP1 では k ∈ {5120, 6144, 17408} が揃い全部 specialized、
+**TP2 では 2048 dispatch が generic に落ちている**ことが可視化された。
+
+### gate
+
+- targeted ctest: `test_activation_quantize_a8` / `test_activation_quantize_e4m3` /
+  `test_bench_help_activation_quantize` **3/3 PASS**
+- required acceptance: **124/124 PASS**

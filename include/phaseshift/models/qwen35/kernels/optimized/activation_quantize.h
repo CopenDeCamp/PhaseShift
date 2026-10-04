@@ -100,7 +100,8 @@ hipError_t launch_activation_quantize_e4m3(
     uint32_t input_row_stride,
     uint32_t code_row_stride_bytes,
     uint32_t scale_row_stride_bytes,
-    hipStream_t stream);
+    hipStream_t stream,
+    bool* specialized = nullptr);
 
 hipError_t launch_activation_quantize_e4m3_generic(
     const ::ps::bf16_t* input,

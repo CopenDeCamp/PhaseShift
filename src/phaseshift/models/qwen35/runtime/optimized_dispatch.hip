@@ -49,6 +49,7 @@ namespace {
  std::atomic<uint32_t> g_gdn_conv_optimized_count{0};
  std::atomic<uint32_t> g_rope_optimized_count{0};
  std::atomic<uint32_t> g_output_gather_optimized_count{0};
+ std::atomic<uint32_t> g_activation_quantize_optimized_count{0};
  std::atomic<uint32_t> g_fallback_counts[::ps::runtime::kernel_id_count()];
 
  bool kernel_trace_enabled() {
@@ -60,7 +61,7 @@ namespace {
         static bool registered = false;
         if (!registered) {
             std::atexit([]() {
-                    std::printf("KERNEL_TRACE rmsnorm_optimized=%u kv_append=%u paged_attention=%u gdn_recurrence=%u elementwise=%u embedding=%u sampling=%u l2_normalize=%u gdn_conv=%u rope=%u output_gather=%u\n",
+                    std::printf("KERNEL_TRACE rmsnorm_optimized=%u kv_append=%u paged_attention=%u gdn_recurrence=%u elementwise=%u embedding=%u sampling=%u l2_normalize=%u gdn_conv=%u rope=%u output_gather=%u activation_quantize=%u\n",
                      g_rmsnorm_optimized_count.load(std::memory_order_relaxed),
                      g_kv_append_optimized_count.load(std::memory_order_relaxed),
                      g_paged_attention_optimized_count.load(std::memory_order_relaxed),
@@ -71,7 +72,8 @@ namespace {
                      g_l2_normalize_optimized_count.load(std::memory_order_relaxed),
                      g_gdn_conv_optimized_count.load(std::memory_order_relaxed),
                      g_rope_optimized_count.load(std::memory_order_relaxed),
-                     g_output_gather_optimized_count.load(std::memory_order_relaxed));
+                     g_output_gather_optimized_count.load(std::memory_order_relaxed),
+                     g_activation_quantize_optimized_count.load(std::memory_order_relaxed));
                 for (uint32_t k = 0u; k < ::ps::runtime::kernel_id_count(); ++k) {
                     const uint32_t c = g_fallback_counts[k].load(std::memory_order_relaxed);
                     if (c != 0u)
@@ -106,13 +108,14 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize_a8(
     if (resolved.value() != PhysicalResolveStatus::Applicable)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
     hipError_t herr = hipSuccess;
+    bool specialized = false;
     if (launch.kind == PhysicalActivationQuantizeKind::E4M3)
         herr = ::ps::kernel::launch_activation_quantize_e4m3(
             reinterpret_cast<const ::ps::bf16_t*>(launch.input),
             reinterpret_cast<uint8_t*>(launch.codes),
             reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
             launch.k_padded, launch.input_row_stride, launch.code_row_stride,
-            launch.scale_row_stride, stream);
+            launch.scale_row_stride, stream, &specialized);
     else
         herr = ::ps::kernel::launch_activation_quantize_i8_row(
             reinterpret_cast<const ::ps::bf16_t*>(launch.input),
@@ -123,6 +126,10 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize_a8(
     if (herr != hipSuccess)
         return Status::hip_error("act-quant optimized launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
+    if (launch.kind == PhysicalActivationQuantizeKind::E4M3 && !specialized)
+        record_correctness_fallback(b.kernel_id);
+    else if (launch.kind == PhysicalActivationQuantizeKind::E4M3)
+        g_activation_quantize_optimized_count.fetch_add(1u, std::memory_order_relaxed);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
