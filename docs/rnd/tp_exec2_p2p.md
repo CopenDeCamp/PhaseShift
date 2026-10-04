@@ -543,6 +543,7 @@ GPU busy ≈ 20.6 ms との差（≈ 4.8 ms）の**約90%を占める**最大項
 | [6] | **ExtSignal（`hipMallocSignalMemory`）+ 同一 device の遅延 writer（2 stream）** | writer **5.93 ms** / waiter **0.01 ms** / GPU elapsed **6 µs** → **不ブロック** ← 決定的 |
 | [7] | ExtSignal + peer stream write | 4 µs → 不観測 |
 | [8] | [6] 同一構成で `hipStreamBatchMemOp`(`hipStreamMemOpWaitValue32`) に置換 | writer 5.86 ms / waiter 0.00 ms → **不ブロック**（enqueue は成功） |
+| [9] | host-coherent signal + **同一 device の kernel 書き込み**（= MCU `McuDecodeRuntime::enqueue_wait` と同型） | writer **5.93 ms** / waiter 0.01 ms / GPU elapsed **6 µs** → **不観測** |
 
 - `hipDeviceAttributeCanUseStreamWaitValue` は **両 device とも 1**（= supported と答える）
 - ExtSignal の確保は `hipExtMallocWithFlags(..., hipMallocSignalMemory)` で**成功**
@@ -557,6 +558,12 @@ GPU busy ≈ 20.6 ms との差（≈ 4.8 ms）の**約90%を占める**最大項
    （属性は supported を返すが実体は no-op）。→ **device-side wait による barrier 除去は REJECT。**
 2. `stream_wait_value32` は現行コードで**宣言のみ・呼び出しが無い**（completion は
    `stream_write_value32` + host 側 `stream_signal_load` の polling）。**未検証の素だった。**
+2.5. **MCU の device 側完了ゲートも同じ穴**: `mcu_decode_runtime.hip` の
+   `enqueue_wait(stream, done_signal_, epoch)` はこの `stream_wait_value32` を呼ぶが、
+   fail-closed は `stream_wait_value_supported` の**属性チェックのみ**（本 hw は 1 を返す）。
+   その呼び出しと同型の構成が **[9] で不観測** → **MCU を移植しても、この gate は
+   「成功を返して待たない」**。host polling（`stream_signal_load`）で覆っているか、
+   FSM 内 polling に置換するかを、移植評価の最初に確認する。
 3. step12 と合わせると、TP2 の host 時間（≈4.33 ms/token = wall の17%）は
    - 構造の再配分（step12）→ **効かず**
    - HIP の device-side wait（本 step）→ **手段が存在しない**
@@ -574,7 +581,7 @@ MCU の移植評価では、**この素が機能しない前提でその設計�
 
 ### gate
 
-- `test_tp_wait_value` は**情報出力（FINDING）型**。blocking 挙動を assert せず、
-  enqueue / sync / value がエラーなく完走することのみを確認する。
-  ROCm 側で機構が直った場合、FINDING の文言が変わるため気づける。
-- 本 step で production code は変更していない（test + cmake のみ）。
+- 計測用 probe `tests/unit/test_tp_wait_value.hip`（9ケース、FINDING 出力型）は
+  **REJECT 決定後に削除した**。衛生ルール（R&D 記録からしか参照されない script は削除）に従う。
+  数値は上表に記録済みで再実行不要、実装は Git history にある。
+- 本 step で production code は変更していない（probe は同一 step で追加・除去）。
