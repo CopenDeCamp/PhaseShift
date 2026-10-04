@@ -630,3 +630,71 @@ generic 16384 が vec<8704> 8192 + vec<3072> 8192 に**ちょうど置換**さ�
 - (B) 現状のまま記録のみ。発火していないものを instrumentation しない。
 - (C) ROCprof の kernel name inventory を qualification に組み込み、
   「想定外の kernel 名が出た時」を検出する。code を増やさないが実行が重い。
+
+## step10: 第3層 counter を残り op に追加（psq8 発見を含め 4 件）
+
+### step9 の表の訂正
+
+step9 では `linear psq8` を「kernel 層の `_auto` が判断、未対応は
+`hipErrorNotSupported` → 層2 に落ちる」と記載したが、**これは誤りだった**。
+`launch_gemm_psq8_w8a8_wmma_auto`（`psq8.hip`）は
+
+```cpp
+if (config.id == RowBlock1 && psq8_decode1_supported(...))
+    → launch_gemm_psq8_w8a8_wmma_decode1
+else
+    → launch_gemm_psq8_w8a8_wmma        // RowBlock1Bf16 = 遅い
+```
+
+と、**到達不能な `hipErrorNotSupported` を返さずに静かに退避する**。
+つまり `psq4` と同一の第3層の穴だった。よって第3層の穴は **4 件**。
+
+### 変更
+
+| op | 判定 | counter |
+| --- | --- | --- |
+| `rope` | `launch.variant == F32Bf16Generic` | 専用 → `rope=N`、退避 → `FALLBACK ROPE` |
+| `gdn_recurrence` | `ran_f32`（variant が `F32` / `switch` default / `hipErrorNotSupported` リトライの 3 経路を追跡） | 専用 → `gdn_recurrence=N`、退避 → `FALLBACK GDN_RECURRENCE` |
+| `linear psq4` | `launch.rows == 1 && !launch.use_decode1` | `FALLBACK LINEAR_PSQ4`（既存の selector 拒否と同桶） |
+| `linear psq8` | `rows == 1 && !decode1_used` | `FALLBACK LINEAR_PSQ8`（同上） |
+
+- `rope` / `gdn_recurrence` は **exclusive**（専用と退避で合計 = dispatch 数）にするため、
+  `try_launch_optimized` にあった increment を各 `try_launch_*` へ移し、
+  `rope_optimized_hit()` / `gdn_recurrence_optimized_hit()` を `optimized_dispatch.h` に公開した
+  （counter は anonymous namespace にあるため accessor が必須）。
+- `psq8` は resolve を経由せず kernel 層が判断するため、
+  **`launch_gemm_psq8_w8a8_wmma_auto(..., bool* decode1_used = nullptr)` を追加**。
+  step8 で踏んだ教訓（**同一の allowlist が 2 箇所にあり、片方だけ更新は無効**）を避けるため、
+  判定は kernel 層に単一で置き、呼び出し側は結果を受け取る方式にした。
+  既存 caller（`dflash2/executor.hip`）は default arg で不変。
+- `psq4` の `use_decode1` は resolve が同じ `rows` から計算しているため複製しない。
+
+### counter の結果
+
+```text
+TP1: gdn_recurrence=768   rope=256   activation_quantize=2056   FALLBACK 0 件
+TP2: gdn_recurrence=1536  rope=512   activation_quantize=4112   FALLBACK 0 件
+                                 (= TP1 の 2.000 倍 = 各 GPU が同一判断)
+```
+
+`KERNEL_TRACE_FALLBACK` 行が**全 op で 0 件**。step9 の実測（kernel name inventory の
+TP2/TP1 = 2.000）と一致する。
+
+### A/B（baseline = step8 / candidate = 4 counter 追加、5反復 interleaved）
+
+| config | pre p50 | post p50 | delta | spread | paired |
+| --- | ---: | ---: | ---: | --- | --- |
+| ctx64 decode | 24.765 ms/token | 24.768 | +0.01% | 0.1% / 0.3% | 3/5 |
+| ctx2048 decode | 25.400 ms/token | 25.429 | +0.11% | 0.2% / 0.2% | 1/5 |
+
+delta は spread の範囲内 = **ノイズ帯**（ctx2048 は paired の向きが揃っているが
+実効 0.029 ms/token で、perf 目標に対して無視できる規模）。
+追加分は fast path で (a) 既存 increment の移設、(b) 取りこぼし条件の比較 1本、
+(c) `bool*` 1本のみ。
+
+### gate
+
+- targeted ctest: `test_rope` / `test_gdn_recurrence` / `test_gdn_recurrence_decode1` /
+  `test_gdn_recurrence_exact_history` / `test_gemm_psq4_*` / `test_gemm_psq8_*` /
+  `test_activation_quantize_*` / `test_tp_*` / `test_qwen35_tp_*` **16/16 PASS**
+- required acceptance: **124/124 PASS**（failure 0 / skip 0 / error 0）

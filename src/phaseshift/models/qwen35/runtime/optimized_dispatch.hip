@@ -250,6 +250,8 @@ Result<OptimizedLaunchResult> try_launch_linear_psq4(
     if (herr != hipSuccess)
         return Status::hip_error("psq4 gemm launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
+    if (launch.rows == 1u && !launch.use_decode1)
+        record_correctness_fallback(b.kernel_id);
     linear_record_hit(LinearFamilyRef::Fp4, launch.rows);
     record_physical_launch(1);
     record_optimized_op();
@@ -338,6 +340,7 @@ Result<OptimizedLaunchResult> try_launch_linear_psq8(
         out_bf16 ? ::ps::kernel::Psq8GemmOutputDType::BF16
                  : ::ps::kernel::Psq8GemmOutputDType::F32;
     hipError_t herr;
+    bool decode1_used = false;
     herr = ::ps::kernel::launch_gemm_psq8_w8a8_wmma_auto(
             *config,
             static_cast<const uint8_t*>(e.codes),
@@ -346,12 +349,14 @@ Result<OptimizedLaunchResult> try_launch_linear_psq8(
             out.ptr, odt,
             rows, e.rows, wkp,
             sstride, b.activation_code_stride, b.activation_scale_stride,
-            out.row_stride, stream);
+            out.row_stride, stream, &decode1_used);
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
     if (herr != hipSuccess)
         return Status::hip_error("psq8 gemm launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
+    if (rows == 1u && !decode1_used)
+        record_correctness_fallback(b.kernel_id);
     linear_record_hit(LinearFamilyRef::Fp8, rows);
     record_physical_launch(1);
     record_optimized_op();
@@ -696,6 +701,14 @@ void record_correctness_fallback(::ps::runtime::KernelId id) {
         g_fallback_counts[k].fetch_add(1u, std::memory_order_relaxed);
 }
 
+void rope_optimized_hit() {
+    g_rope_optimized_count.fetch_add(1u, std::memory_order_relaxed);
+}
+
+void gdn_recurrence_optimized_hit() {
+    g_gdn_recurrence_optimized_count.fetch_add(1u, std::memory_order_relaxed);
+}
+
 uint32_t embedding_optimized_count() noexcept {
     return g_embedding_optimized_count.load(std::memory_order_relaxed);
 }
@@ -738,13 +751,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         return try_launch_linear_bf16(program, b, ctx, stream);
     if (b.kernel_id == KernelId::RMS_NORM)
         return try_launch_rmsnorm(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::ROPE) {
-        auto rp = try_launch_rope(program, dispatch_index, ctx, stream);
-        if (!rp.ok()) return rp.status();
-        if (rp.value().kind == OptimizedLaunchKind::Launched)
-            g_rope_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return rp;
-    }
+    if (b.kernel_id == KernelId::ROPE)
+        return try_launch_rope(program, dispatch_index, ctx, stream);
     if (b.kernel_id == KernelId::OUTPUT_GATHER) {
         auto og = try_launch_output_gather(program, b, ctx, stream);
         if (!og.ok()) return og.status();

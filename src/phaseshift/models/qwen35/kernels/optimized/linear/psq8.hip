@@ -780,9 +780,12 @@ hipError_t launch_gemm_psq8_w8a8_wmma_auto(
     uint32_t activation_code_stride_bytes,
     uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
-    hipStream_t stream) {
+    hipStream_t stream,
+    bool* decode1_used) {
+    if (decode1_used != nullptr) *decode1_used = false;
     if (config.id == Psq8GemmConfigId::RowBlock1 &&
         psq8_decode1_supported(rows, out_features, k_padded)) {
+        if (decode1_used != nullptr) *decode1_used = true;
         return launch_gemm_psq8_w8a8_wmma_decode1(
             weight_codes, weight_scales,
             reinterpret_cast<const uint8_t*>(activation_codes), activation_scales,

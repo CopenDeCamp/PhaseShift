@@ -65,6 +65,9 @@ Result<OptimizedLaunchResult> try_launch_constraint_lm_head_exact(
 
 void record_correctness_fallback(::ps::runtime::KernelId id);
 
+void rope_optimized_hit();
+void gdn_recurrence_optimized_hit();
+
 uint32_t embedding_optimized_count() noexcept;
 
 }
