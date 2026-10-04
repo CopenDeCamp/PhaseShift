@@ -393,6 +393,29 @@ Status TpCoordinator::on_sequence_released(const PagedSequenceState& source) {
     return first_error;
 }
 
+Status TpCoordinator::sync_mirror_state(const ScheduledBatch& batch) {
+    for (const ScheduledRequest& req : batch.requests) {
+        if (req.sequence == nullptr) continue;
+        const std::uint64_t key = ::ps::runtime::request_handle_key(req.handle);
+        auto it = mirrors_.find(key);
+        if (it == mirrors_.end()) continue;
+        const std::size_t want_blocks = req.sequence->block_table.size();
+        for (std::size_t i = 0; i < it->second.states.size(); ++i) {
+            PagedSequenceState& mirror = it->second.states[i];
+            TpRankRuntime& rank = *ranks_[i + 1];
+            if (mirror.block_table.size() > want_blocks) {
+                auto scope = ps::gpu::ScopedDevice::create(rank.device_id());
+                if (!scope.ok()) return scope.status();
+                Status st = rollback_sequence_append(
+                    mirror, static_cast<std::uint32_t>(want_blocks), rank.stream());
+                if (!st.ok()) return st;
+            }
+            mirror.position = req.sequence->position;
+        }
+    }
+    return Status::make_ok();
+}
+
 Result<BatchExecutionOutput> TpCoordinator::on_execute(const ScheduledBatch& batch) {
     return on_execute(batch, nullptr);
 }
@@ -413,6 +436,8 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(
     if (barrier_group_->aborted()) {
         return Status::invalid_state("tp barrier group is aborted", __FILE__, __LINE__);
     }
+    const Status sync_st = sync_mirror_state(batch);
+    if (!sync_st.ok()) return sync_st;
 
     const std::size_t rank_count = ranks_.size();
     std::vector<std::vector<ScheduledRequest>> request_storage(rank_count);

@@ -1328,7 +1328,7 @@ hipError_t launch_gdn_recurrence_f32_wmma_decode_rows_exact(
 
 bool gdn_recurrence_commit_supported(const GdnRecurrenceArgs& args) {
     return args.head_k == gdngfx12::kWk && args.head_v == 128u &&
-           args.key_heads == 16u && args.num_v_heads == 48u;
+           args.num_v_heads != 0u;
 }
 
 hipError_t launch_gdn_recurrence_f32_wmma_commit(

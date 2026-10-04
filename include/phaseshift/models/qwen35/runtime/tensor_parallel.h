@@ -147,6 +147,7 @@ private:
 
     Status initialize(const TpCoordinatorConfig& config);
     void worker_loop(std::size_t rank);
+    Status sync_mirror_state(const ScheduledBatch& batch);
     Status run_rank_step(std::size_t rank, const ScheduledBatch& batch,
                          BatchExecutionOutput& output,
                          const ExecuteBatchOptions* options);
