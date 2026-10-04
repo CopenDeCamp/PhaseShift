@@ -419,3 +419,80 @@ step6-B は「`hipEventRecord` が支配的、host 側の削減は限界に近�
 barrier 全体（`wait` 22.5 µs を含む）で見ると、**支配的なのは peer の
 `sum_hidden` を待つ側の時間**であり、構造を変える（各 rank が自分で enqueue）ことで
 約 9 µs/barrier が取れる。すなわち「限界」は現構造に対してのみ成り立つ。
+
+## step12: `sum_hidden` を prepare / finalize に分割（**REJECT**）
+
+step7 の分解結果（`wait` 22.50 µs の 51% が「peer の `sum_hidden` を待つ時間」）に基づき、
+collective の host 作業を各 rank に配る分割を 2 案実装して A/B した。**どちらも効果ゼロだった。**
+
+### 実装した 2 案
+
+`TpTransport` に `sum_prepare(invocation, rank)` / `sum_finalize(invocation, rank)` を追加し、
+`TpBarrierGroup::arrive` を「prepare → barrier → finalize」に組み替える。
+parity は transport 内部カウンタから `TpSumInvocation::barrier_index`（`open_barrier_`）へ移設した。
+
+- **案 A**: prepare / finalize 両方を barrier のロック内で実行
+- **案 B**: prepare のみロック内、**finalize をロック外へ**
+
+`sum_hidden` は base class の非仮想関数（prepare 全 → finalize 全）として残し、
+bench / test からは従来どおり呼べる。`HostMediatedTpTransport` も同じ分割で実装した。
+
+### 計測（案 B、TP2 / ctx2048 / decode）
+
+```text
+旧 : sum_hidden=11.36 µs  wait=22.50 µs  skew=7.82 µs   → A span 22.50 µs
+新 : prepare=2.85 wait=14.09 finalize=2.98 skew=11.01   → A span 19.92 µs
+                （prepare・finalize は各 16384 call、wait は 8192 call）
+```
+
+`A span` は 22.50 → 19.92 µs（−2.58 µs）に縮んだように見える。
+しかし **両 rank の own work 合計は 11.36 → 11.66 µs でむしろ微増**している。
+`wait` が縮んだ分だけ `skew`（7.82 → 11.01）が増え、**作業を減らさず再配分しただけ**だった。
+（案 B では `ensure_buffers` が barrier ごとに 2 回呼ばれる点も増加要因。）
+
+### A/B（baseline = step8 状態、5反復 interleaved）
+
+| 案 | ctx64 decode | ctx2048 decode | spread |
+| --- | ---: | ---: | --- |
+| A | +0.04%（2/5） | −0.18%（3/5） | 0.1〜0.5% |
+| B | −0.08%（4/5） | +0.06%（2/5） | 0.1〜2.1% |
+
+**いずれも run 間変動の範囲内 = ノイズ**。設計時の試算（−2.58 µs/barrier ≒ −1.3%）は出ない。
+
+### 摂動実験の再実行（案 B 上で）
+
+| perturb | decode_ms（64 tokens × 2 反復） |
+| ---: | --- |
+| 0 µs | 1596.3 / 1625.0 |
+| 5 µs | 1770.7 / 1772.1（+165 ms） |
+| 10 µs | 1843.0 / 1844.4（+235 ms） |
+
+感度は 1:1 のまま維持している。つまり **host 時間は wall に効くが、削減ではなく追加に対してだけ**。
+
+### コストモデルの訂正
+
+step7 で「`wait` の 51% が peer の `sum_hidden` 待ちなので分割すれば取れる」としたが、
+これは **待ち時間の構造**だけを見て、**barrier ごとの実作業量**を見ていない誤りだった。
+
+- 摂動実験が1:1に出るのは、`arrive` に **実作業を追加**しているから。
+- 分割は作業量を変えないので効かない。wall の律速は「何 µs 待つか」ではなく
+  **1 barrier あたりの HIP API 呼び出し数**（両 rank 合計 約 11.4 µs ≒ 12 呼び出し:
+  `launch_copy`×2 / `hipEventRecord`×2 / `hipStreamWaitEvent`×2 / `launch_add`×2 /
+  `ScopedDevice`×4 + `validate`/`ensure_buffers`）。
+- したがって overlap 構造の再編では取れず、**呼び出し数そのものを減らす**しかない。
+
+### 残っている削減候補（未着手）
+
+| 手法 | 削減/barrier | wall 比 | リスク |
+| --- | ---: | ---: | --- |
+| `hipEventRecord`×2 + `hipStreamWaitEvent`×2 を除去し、
+copy kernel の flag 書き込み + `hipStreamWaitValue32` に置換 | 約 2.6 µs | 約 1.3% | 低（`stream_write_value32` の使用実績あり） |
+| 同上を kernel 側 polling で完全に除去（host 呼び出し 0） | 約 5.2 µs | 約 2.6% | 中（spin 中の SM 占有、peer 停滞時の挙動） |
+| `ensure_buffers` を barrier 毎呼ばない | 約 0.97 µs | 約 0.5% | 低 |
+
+### gate と最終状態
+
+- 案 B 段階で `test_tp_reduction` / `test_tp_transport` / `test_qwen35_tp_execution` /
+  `test_qwen35_tp_e2e` **4/4 PASS**（E2E の TP1/TP2 token 一致含む）。
+  効果ゼロのため required acceptance は実施せず **revert**。
+- 最終状態は HEAD `a91dd715`（本 step の変更なし）。prototype は R&D 記録のみ残す。
