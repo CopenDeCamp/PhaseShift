@@ -290,6 +290,12 @@ prompt は `PHASESHIFT_TP_PROMPT` で差し替えられる。
   TP=2 で新たに必要になった shape は optimized kernel test で検証してから
   個別に追加し、未知 shape を自動許可しない。shape と rule の対応は
   [../rnd/tp_exec2_shape_coverage.md](../rnd/tp_exec2_shape_coverage.md) を参照。
+- DFlash2 は **drafter を非分割・target verify のみ TP2** で動作する。
+  `test_dflash2_tp_e2e` が backend ごとに「speculative ≡ target-only greedy」を
+  48 token 全域で assert し、TP2 では partial reject 大半（18 rounds）の
+  GDN capture / compact commit / restore を通る。
+  経路は `TpCoordinator` API 経由のみで、`phaseshift-compute` / server からは未露出。
+  契約と実装経緯は [../rnd/spec_decode/tp2_verify_only.md](../rnd/spec_decode/tp2_verify_only.md)。
 - device 不足は明示エラー（bench）または skip（test runner 77）。
 - 異種 GPU は未サポート（同一 RDNA4 を前提。異なる場合は unsupported 方針）。
 
@@ -299,7 +305,7 @@ Multi-GPU Executor の一般化、RCCL backend（AllReduce / AllGather / AllToAl
 通信と計算の本格的な overlap（各 barrier 内の send / add は並列だが、segment の
 計算との overlap は未対応）、
 graph capture との併用（`PHASESHIFT_HIP_GRAPH` は TP schedule と非併用）、
-DFlash2 + TP、MTP 分散実行、vocab parallel、distributed sampling、prefix cache、
+MTP 分散実行、vocab parallel、distributed sampling、prefix cache、
 structured generation / server 統合、Expert Parallel / MoE、
 PSQ3、pipeline parallel、TP=4 production support。
 

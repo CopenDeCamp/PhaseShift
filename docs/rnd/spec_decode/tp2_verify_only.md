@@ -285,6 +285,57 @@ return args.head_k == gdngfx12::kWk && args.head_v == 128u &&
 - 既存 gate: `test_qwen35_tp_e2e`（rank0 vs rank1 の hidden / logits 同値を既に検証）
 - required acceptance 124/124
 
+## 5.5 性能: TP2 で DFlash2 が +30.5%
+
+`tests/support/dflash2_tp_harness.h` の報告値
+（`dflash2_prefill_plus_decode_ms` / `dflash2_tok_per_s`、model load は含まない）。
+同一プロセス内で `tp1_spec → tp1_greedy → tp2_greedy → tp2_spec` の順に実行、
+5 反復。prompt は 5 token、`max_new_tokens=48`、`--dflash2-drafts 7` 相当。
+
+| mode | n | tok/s p50 | min | max | spread | rounds | accepted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| tp1 | 5 | **55.03** | 54.91 | 55.04 | **0.2%** | 17 | 30 |
+| tp2 | 5 | **71.83** | 71.81 | 71.96 | **0.2%** | 18 | 29 |
+
+**TP2 / TP1 = 1.305（+30.5%）**。`rounds` / `accepted` は 5 回とも完全に一致
+（決定的）で、run 間変動 0.2% は判定基準（30%）を大きく下回る。
+
+### round 単価への分解
+
+```text
+tp1: 874.2 ms / 17 rounds = 51.4 ms/round   (accepted 30 → 1.76/round)
+tp2: 668.3 ms / 18 rounds = 37.1 ms/round   (accepted 29 → 1.61/round)
+```
+
+- **各 DFlash2 round は 51.4 / 37.1 = 1.385× 速い**
+- 全体が 1.305× なのは **round が 1 つ多い**（18 vs 17）ためで、
+  `1.385 × 17/18 = 1.309` が実測 1.305 と一致する
+
+round 数の差は index19 以降の token 列分岐に伴う**生成内容の違い**であり、
+§9 の bf16 丸めが受け渡した結果である（`accepted` 30 vs 29、5 回とも一貫）。
+「TP2 で accept 率が系統的に下がる」とは言えない（n=1 の prompt、方向は一貫だが
+prompt 依存の可能性を排除できない）。
+
+### 事前推定との対照
+
+事前の分解（`DFLASH2_VERIFY_GPU_MS = 1525` / `DRAFT_GPU_MS = 189` = **verify が
+GPU 時間の 89%**）から、verify が半減すれば理想は 1.80×、
+barrier と replicated 部分を織り込んで **1.4〜1.6×** を推定していた。
+実測の **round 単価 1.385×** はその下限付近。差の主因は
+
+- verify の GPU 時間は計算が半分になっても **barrier（128 回/round）と replicated op が残る**
+- TP2 の wall は step8 で確認したとおり **GPU 時間 + host の barrier 時間が加算**される
+
+ことによる（`docs/rnd/tp_exec2_p2p.md` step7 の cost model と整合）。
+
+### 留意（比較の可否）
+
+- 本測定は**同一プロセス・同一 prompt・同一バイナリ内の TP1 vs TP2** のみ有効。
+- `docs/perf/current.md` の DFlash2 63.15 tok/s とは prompt が異なる
+  （同 doc の prose K7 / 84 rounds 対し本測定は 5 token / 17 rounds）ため**直接比較不可**。
+- run 順は常に tp1 → tp2 のため、tp2 は3回のモデルロード後に走る。
+  熱的に不利な側が +30.5% を示しているため**保守的な数値**。
+
 ## 6. 未検証・リスク
 
 - **tap の同値は既存 `test_qwen35_tp_e2e` が担保**する構造だが、DFlash2 の
