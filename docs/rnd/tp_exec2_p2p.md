@@ -350,3 +350,72 @@ device switch + condvar で、**cross-device 順序のための `hipEventRecord`
 - correctness: `test_tp_reduction` / `test_tp_transport` / `test_qwen35_tp_execution` /
   `test_qwen35_tp_e2e` 4/4 PASS
 - required acceptance: **124/124 PASS**（failure 0 / skip 0 / error 0）
+
+## step7: collective の host critical path を分解し、overlap 対象を特定する
+
+### 方法
+
+`sum_hidden` と `arrive` に一時 timestamp を入れて実測（計測後 revert 済み）。
+対象は TP2 / ctx2048 / decode。
+
+```text
+TPSUM     calls=8192   validate=0.02  ensure=0.92  phase1_copy=4.89
+                          phase2_waitadd=5.47   total=11.31 µs/call
+TPARRIVE  sum_calls=8192  sum=11.36 µs          wait_calls=8192  wait=22.50 µs
+TPARRIVE  skew=7.82 µs（最初と2番目の rank の arrive 入口の差）
+```
+
+### 分解
+
+1 barrier = 128 barrier/token（64 層 × 2）。`wait` 22.50 µs は
+
+```text
+skew（2 番目の rank が到着するまで）      7.82 µs  (35%)
+peer の sum_hidden（両 stream 分の enqueue）11.52 µs  (51%)
+condvar の wakeup / mutex 再獲得            3.78 µs  (16%)
+```
+
+に分解できる。`sum_hidden` 自体は HIP API 8 本（launch_copy×2 +
+hipEventRecord×2 + hipStreamWaitEvent×2 + launch_add×2）≒ 10.5 µs と
+`ensure_buffers` 0.97 µs で、**1 API ≒ 1.3 µs** の呼び出しコストが実体。
+`validate` は 0.02 µs で無視できる。
+
+### host 時間は wall に1:1で乗る（摂動実験）
+
+`arrive` の入口に sleep を入れて decode を測った（64 tokens / 2 反復）:
+
+| perturb | 実効 sleep | decode_ms |
+| ---: | ---: | ---: |
+| 0 µs | − | 1590.6 / 1591.6 |
+| 5 µs | 約 11 µs | 1770.5 / 1778.6（**+180 ms**） |
+| 10 µs | 約 16.6 µs | 1862.6 / 1863.4（**+272 ms**） |
+
+64 tokens × 128 barrier × 2 rank = 16384 個の `arrive` 呼び出しで
+`16384 × 1 µs = 16.4 ms` がそのまま増分に一致する。
+つまり **`arrive` 内の host 時間は wall に 1:1 で加算される**。
+
+`arrive` の host 時間は 1 barrier あたり 11.36 + 22.50 = 33.9 µs、
+1 token あたり約 4.3 ms（wall 25.4 ms の 17%）。
+**つまり collective の host 削減量はそのまま decode 改善量になる。**
+
+### 残っている削減対象と試算
+
+| 手法 | 削減/barrier | 1 token | wall 比 | 段階 |
+| --- | ---: | ---: | ---: | --- |
+| `sum_hidden` を prepare / finalize に分割し、
+barrier を prepare 後へ前倒し（各 rank が自分の stream だけ enqueue） | 約 9 µs | 約 1.2 ms | **約 4.7%** | 未着手 |
+| condvar → spin-then-block barrier（wakeup 3.78 µs を除去） | 約 3.3 µs | 約 0.4 ms | 約 1.7% | 未着手 |
+| `ensure_buffers` を barrier 毎に呼ばない | 約 1.0 µs | 約 0.1 ms | 約 0.5% | 未着手 |
+| skew 7.82 µs の原因解明（rank 間の enqueue 直列化） | 最大 7.8 µs | 最大 1.0 ms | 最大 3.9% | 未着手 |
+
+skew は「両 host スレッドが HIP enqueue で直列化している」可能性が高い
+（16 core / load 1.27 で affinity 設定なし、`sum_hidden` の HIP API 8 本が
+その直列化区間にあたる）。仮説の段階であり未検証。
+
+### 既存の結論との関係
+
+step6-B は「`hipEventRecord` が支配的、host 側の削減は限界に近い」としたが、
+これは **`sum_hidden` 内部**だけを見た结论だった。
+barrier 全体（`wait` 22.5 µs を含む）で見ると、**支配的なのは peer の
+`sum_hidden` を待つ側の時間**であり、構造を変える（各 rank が自分で enqueue）ことで
+約 9 µs/barrier が取れる。すなわち「限界」は現構造に対してのみ成り立つ。
