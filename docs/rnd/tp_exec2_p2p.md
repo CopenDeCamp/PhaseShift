@@ -290,27 +290,60 @@ device switch も不要になる。
 - **decode は両 config で +2.44%、paired 5/5 同方向、spread 0.3%** → 有意。
 - 削減量は **0.645〜0.661 ms/token = 5.0〜5.2 µs per collective**。
 
-### コストモデル（この 6 削除で確定）
+### 何が効いたか（step6-B での切り分け）
+
+`ON − bypass = sum_hidden` の値は **2.465 ms のまま**で、step6-A 前後で変化しない
+（`arrive` の作業は bypass 時にも残るため、この差分には入らない）。
+つまり step6-A が削ったのは `sum_hidden` ではなく **`arrive` 側の overhead 0.661 ms/token** であり、
+削減量は
 
 ```text
-6 HIP API 呼び出しで 5.0 µs  →  約 0.83 µs / HIP API 呼び出し
-collective 19.5 µs/回 → 削除後 約 14.4 µs/回
+0.661 ms/token ÷ 128 barrier ÷ 2 rank = 2.6 µs / rank / barrier
 ```
 
-collective の host コストは **HIP API 呼び出し数 × 約0.83 µs** でほぼ説明できる。
+（1 barrier × 2 rank × `hipEventRecord` 1本 + `ScopedDevice` の
+`hipGetDeviceCount` / `hipGetDeviceProperties` / `hipGetDevice`）。
 
-### 残っている host コスト（next target）
+step6-B（下記）で `hipGetDeviceCount` と `hipGetDeviceProperties` のみを
+`sum_hidden` の hot path から除いたところ **効果は 0%** だったため、切り分けは次のとおり:
 
-`HipPeerTpTransport::enqueue_sum` は 1 barrier あたり **`ScopedDevice::create` を 4 回**呼ぶ。
-`ScopedDevice::create` は
+| 削除対象 | 効果 |
+| --- | --- |
+| `hipEventRecord`（`arrive` 内、2本/barrier） | **約 2.6 µs/本 ≒ 0.66 ms/token（+2.44%）** |
+| `hipGetDeviceCount` / `hipGetDeviceProperties` | **0（cache 済みで実質無料）** |
+
+よって **`hipEventRecord` が host 側の支配的コスト**で、他の HIP API 呼び出しは安い。
+
+### step6-B: ScopedDevice を最小 switch に置換（**REJECT**）
+
+`ScopedDevice::create` は毎回 `hipGetDeviceCount` + `hipGetDeviceProperties`
+（`gcnArchName` 評価）+ `hipGetDevice` + `hipSetDevice` + destructor での復元を実行し、
+`HipPeerTpTransport::enqueue_sum` は 1 barrier で 4 回呼ぶ。
+transport は `create()` 時に device 数と gfx1201 を検証済みなので、
+hot path の再検証は不要と考え、検証済み前提の最小 switch `TpDeviceSwitch` に置換した
+（1 barrierあたり 8 HIP API 呼び出しを削除できるはずだった）。
+
+5反復 interleaved の結果:
+
+| config | metric | step6-A | step6-B | delta |
+| --- | --- | ---: | ---: | ---: |
+| ctx64 | decode | 25.800 ms/token | 25.810 | **−0.04%** |
+| ctx2048 | decode | 26.484 ms/token | 26.471 | **+0.05%** |
+
+paired は 1/5・3/5 で**ノイズ帯（spread 0.2〜0.3%）**。→ **REJECT して revert 済み**。
+`hipGetDeviceCount` / `hipGetDeviceProperties` は cache されており無料だった。
+
+### step6 後の collective コスト（現状）
 
 ```text
-hipGetDeviceCount + hipGetDeviceProperties(gcnArchName 評価) + hipGetDevice
-+ hipSetDevice（違う場合）+ destructor の hipSetDevice（復元）
+sum_hidden（transport 本体）      : 2.45 ms/token ≒ 19.1 µs/collective ≒ wall の 9.2%
+  内訳のうち判明している大物      : hipEventRecord 2本 ≒ 5.2 µs/collective
+arrive の overhead                : 0（step6-A で除去済み）
 ```
 
-と 5 相当の HIP 呼び出しで、transport 自身は既に `create()` 時に
-device 数と gfx1201 を検証済み。**hot path で毎回同じ検証を繰り返している**ことになる。
+`sum_hidden` の残り 14 µs は、kernel launch 4本 + `hipEventRecord` 2本 +
+device switch + condvar で、**cross-device 順序のための `hipEventRecord` は構造上不可避**。
+つまり **host 側の削減は限界に近い**。
 
 ### gate
 
