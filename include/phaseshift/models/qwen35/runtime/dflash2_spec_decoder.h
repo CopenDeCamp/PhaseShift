@@ -34,37 +34,41 @@ struct DFlash2SpecDecoderConfig {
 
 struct DFlash2SpecTiming;
 
+struct DFlash2GdnRankState {
+    GdnStatePool* pool = nullptr;
+    hipStream_t stream = nullptr;
+    int device = -1;
+    void* conv_snapshot = nullptr;
+    void* rec_snapshot = nullptr;
+    std::size_t conv_bytes = 0u;
+    std::size_t rec_bytes = 0u;
+    GdnSpecHistory history;
+    float* compact_delta = nullptr;
+    float* compact_k = nullptr;
+    float* compact_a = nullptr;
+    uint64_t compact_delta_layer_stride = 0u;
+    uint64_t compact_k_layer_stride = 0u;
+    uint64_t compact_a_layer_stride = 0u;
+    ::ps::runtime::DeviceRequestDescriptor* commit_request = nullptr;
+    float* compact_scratch = nullptr;
+};
+
 struct DFlash2SpecDecoder {
     Executor* target = nullptr;
     dflash2::DFlash2Executor* draft = nullptr;
     dflash2::DFlash2ContextState* context = nullptr;
     PagedSequenceState* sequence = nullptr;
-    GdnStatePool* gdn_pool = nullptr;
     hipStream_t stream = nullptr;
     DFlash2SpecDecoderConfig config;
 
-    void* gdn_conv_snapshot = nullptr;
-    void* gdn_rec_snapshot = nullptr;
-    std::size_t gdn_conv_bytes = 0u;
-    std::size_t gdn_rec_bytes = 0u;
-
-    GdnSpecHistory gdn_history;
+    std::vector<DFlash2GdnRankState> gdn_ranks;
     bool gdn_history_enabled = false;
     bool gdn_rerun_reference = false;
     uint64_t gdn_snapshot_bytes = 0u;
     uint64_t gdn_compact_bytes = 0u;
 
     bool gdn_compact_commit = false;
-    float* gdn_compact_delta = nullptr;
-    float* gdn_compact_k = nullptr;
-    float* gdn_compact_a = nullptr;
-    uint64_t gdn_compact_delta_layer_stride = 0u;
-    uint64_t gdn_compact_k_layer_stride = 0u;
-    uint64_t gdn_compact_a_layer_stride = 0u;
-    ::ps::runtime::DeviceRequestDescriptor* gdn_commit_request = nullptr;
     uint32_t gdn_key_heads = 0u;
-
-    float* gdn_compact_scratch = nullptr;
     uint32_t gdn_compact_compare_remaining = 0u;
     std::vector<float> gdn_compact_host_a;
     std::vector<float> gdn_compact_host_b;
