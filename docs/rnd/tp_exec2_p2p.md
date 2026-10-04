@@ -255,3 +255,65 @@ decode の wall に対する上限は以下で、**通信回数の削減は最�
 - それでも足りなければ overlap（`docs/developer/tensor_parallel_execution.md` §10 の
   「通信と計算の本格的な overlap は未対応」）を検討
 - 通信回数そのものの削減（2 collective/layer → 1）は上記を先に済ませてから
+
+## step6-A: 未使用の ready event とその device switch を削除
+
+step5 の結果（collective 19.5 µs/回のうち **81% が host 側**）を受けて、
+hot path から**証明済みの死んでいる作業**だけを削除した。
+
+### 変更
+
+`TpBarrierGroup::arrive`（毎 barrier × 毎 rank）:
+
+```text
+- hipEventRecord(ready_[index], stream)
+- それを伴う ScopedDevice::create
+```
+
+安全根拠: `invocation.ready` を読む実装は
+`tp_transport_internal.h:94` の **size 検証のみ**で、
+`HipPeerTpTransport` / `HostMediatedTpTransport` とも実イベントを参照しない。
+`arrive` の残りは host 処理と `sum_hidden`（内部で独自に device を切る）だけなので
+device switch も不要になる。
+
+削除分は 1 barrier × 2 rank = `hipEventRecord` 1 本 + `hipGetDevice` / `hipSetDevice` 各 2 本 = **6 HIP API 呼び出し**。
+
+### A/B（同一バイナリを 2 種に分け、5反復 interleaved、`decode_ms / decode_steps`）
+
+| config | metric | base p50 | cand p50 | delta | spread(base/cand) |
+| --- | --- | ---: | ---: | ---: | --- |
+| ctx64 | decode | 26.494 ms/token | **25.848** | **+2.44%** | 0.3% / 0.3% |
+| ctx2048 | decode | 27.148 ms/token | **26.487** | **+2.44%** | 0.2% / 0.2% |
+| ctx64 | prefill | 58.241 ms | 57.930 | +0.53% | 7.3% / 3.5%（ノイズ） |
+| ctx2048 | prefill | 574.812 ms | 572.946 | +0.32% | 0.6% / 0.4% |
+
+- **decode は両 config で +2.44%、paired 5/5 同方向、spread 0.3%** → 有意。
+- 削減量は **0.645〜0.661 ms/token = 5.0〜5.2 µs per collective**。
+
+### コストモデル（この 6 削除で確定）
+
+```text
+6 HIP API 呼び出しで 5.0 µs  →  約 0.83 µs / HIP API 呼び出し
+collective 19.5 µs/回 → 削除後 約 14.4 µs/回
+```
+
+collective の host コストは **HIP API 呼び出し数 × 約0.83 µs** でほぼ説明できる。
+
+### 残っている host コスト（next target）
+
+`HipPeerTpTransport::enqueue_sum` は 1 barrier あたり **`ScopedDevice::create` を 4 回**呼ぶ。
+`ScopedDevice::create` は
+
+```text
+hipGetDeviceCount + hipGetDeviceProperties(gcnArchName 評価) + hipGetDevice
++ hipSetDevice（違う場合）+ destructor の hipSetDevice（復元）
+```
+
+と 5 相当の HIP 呼び出しで、transport 自身は既に `create()` 時に
+device 数と gfx1201 を検証済み。**hot path で毎回同じ検証を繰り返している**ことになる。
+
+### gate
+
+- correctness: `test_tp_reduction` / `test_tp_transport` / `test_qwen35_tp_execution` /
+  `test_qwen35_tp_e2e` 4/4 PASS
+- required acceptance: **124/124 PASS**（failure 0 / skip 0 / error 0）

@@ -80,17 +80,6 @@ Status TpBarrierGroup::arrive(int rank, const TpSumTarget& target, hipStream_t s
         std::lock_guard<std::mutex> lock(mutex_);
         if (aborted_) return abort_status_;
     }
-    {
-        auto scope = ps::gpu::ScopedDevice::create(devices_[index]);
-        if (!scope.ok()) return scope.status();
-        const hipError_t record = hipEventRecord(ready_[index], stream);
-        if (record != hipSuccess) {
-            Status error = Status::hip_error("hipEventRecord tp segment",
-                                             hipGetErrorString(record), __FILE__, __LINE__);
-            abort(error);
-            return error;
-        }
-    }
 
     std::unique_lock<std::mutex> lock(mutex_);
     if (aborted_) return abort_status_;
