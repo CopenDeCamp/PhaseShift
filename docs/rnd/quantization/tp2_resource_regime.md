@@ -450,3 +450,75 @@ TP1 では k ∈ {5120, 6144, 17408} が揃い全部 specialized、
 - targeted ctest: `test_activation_quantize_a8` / `test_activation_quantize_e4m3` /
   `test_bench_help_activation_quantize` **3/3 PASS**
 - required acceptance: **124/124 PASS**
+
+## step8: `activation_quantize` の TP2 shape を specialized へ移行
+
+### 変更
+
+```text
+src/phaseshift/models/qwen35/kernels/optimized/activation_quantize.hip
+  + switch(k) に case 8704u / case 3072u（vec_kernel<8704u> / <3072u>）
+  + activation_quantize_e4m3_vec_supported() の k allowlist に 8704 / 3072 を追加
+tests/kernels/optimized/test_activation_quantize_e4m3.hip
+  + production_k に 8704u, 3072u を追加
+  + run_kernel に expect_specialized を導入（auto path が専用 kernel に
+    到達している／していないことを検証）
+  + arena 512 MB → 1536 MB（新 k × 4 rows × 13 pattern で tail の alloc が枯渇）
+```
+
+対象 k は Gate 1 の inventory と一致する（act-quant の k = linear の K）:
+
+```text
+K=8704  mlp.down（GDN 48 層 + attention 16 層）
+K=3072  self_attn.o_proj / linear_attn.out_proj
+K=5120  それ以外（既に specialized）
+```
+
+### 途中で見落とした 2 つの罠
+
+**1. 同一ファイル内に k allowlist が 2 箇所あった**
+
+`switch(k)` に `case 8704u` を追加しただけで動かず、件数が 2048 のまま不変だった。
+原因は `activation_quantize_e4m3_vec_supported()` が
+
+```cpp
+if (k != 5120u && k != 6144u && k != 17408u) return false;
+```
+
+と**もう1つのハードコード**を抱えており、そちらが switch に到達させないからだった。
+k の allowlist は `vec_supported` と `switch` の 2 箇所にあるため、**片方だけ更新は無効**。
+
+**2. 追加直後の test PASS は「偽の PASS」だった**
+
+`compare_cases` は `launch_activation_quantize_e4m3`（auto）を呼ぶが、
+`vec_supported` が false のため auto も generic に落ち、
+**「generic vs generic」を比較して自明に一致**していた。つまり
+**k を switch に追加しても test は失敗しない**状態だった。
+そこで `run_kernel` に `expect_specialized` を導入し、
+production k では専用 kernel への到達を、非 production k では
+専用 kernel への**不**到達を必須にした。
+
+### counter の推移
+
+```text
+修復前   TP2: activation_quantize=2064  KERNEL_TRACE_FALLBACK ACTIVATION_QUANTIZE_W4A8 2048
+修復後   TP2: activation_quantize=4112  KERNEL_TRACE_FALLBACK 0 件   (= 2064 + 2048)
+         TP1: activation_quantize=2056  KERNEL_TRACE_FALLBACK 0 件（変化なし）
+```
+
+### A/B（baseline = counter 修正のみ / candidate = k 追加、5反復 interleaved）
+
+| config | pre p50 | post p50 | gain | spread(pre/post) | 同方向 |
+| --- | ---: | ---: | ---: | --- | --- |
+| ctx64 decode | 25.826 ms/token | **24.761** | **+4.12%** | 0.3% / 2.4% | **5/5** |
+| ctx2048 decode | 26.497 ms/token | **25.406** | **+4.11%** | 0.2% / 0.3% | **5/5** |
+
+削減量は 1.065 / 1.090 ms/token（compute 分解での推定 1.2 ms と整合）。
+ctx2048 は 37.75 → **39.36 tok/s**。
+
+### gate
+
+- targeted ctest: `test_activation_quantize_a8` / `test_activation_quantize_e4m3` /
+  `test_bench_help_activation_quantize` / `test_tp_reduction` / `test_tp_transport` /
+  `test_qwen35_tp_execution` / `test_qwen35_tp_e2e` **7/7 PASS**
+- required acceptance: **124/124 PASS**（failure 0 / skip 0 / error 0）

@@ -172,7 +172,7 @@ struct Result {
 
 bool run_kernel(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t k,
                 uint32_t kp, bool generic, ps::gpu::GpuArena& arena, hipStream_t stream,
-                Result& out, std::string& err) {
+                Result& out, std::string& err, bool expect_specialized = true) {
     const auto layout = ::ps::runtime::Int8ActivationWorkspaceLayout::make(k, rows);
     auto ws_res = arena.allocate_aligned(layout.total_bytes, 256);
     auto in_res = arena.allocate_aligned((size_t)rows * k * sizeof(ps::bf16_t), 256);
@@ -192,15 +192,22 @@ bool run_kernel(const std::vector<uint16_t>& h_in, uint32_t rows, uint32_t k,
     }
     uint8_t* codes = ws + layout.codes_offset;
     float* scales = reinterpret_cast<float*>(ws + layout.scales_offset);
+    bool specialized = false;
     const hipError_t herr = generic
         ? ps::kernel::launch_activation_quantize_e4m3_generic(
               in, codes, scales, rows, k, kp, k,
               layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream)
         : ps::kernel::launch_activation_quantize_e4m3(
               in, codes, scales, rows, k, kp, k,
-              layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream);
+              layout.code_row_stride_bytes, layout.scale_row_stride_bytes, stream,
+              &specialized);
     if (herr != hipSuccess) {
         err = std::string("launch: ") + hipGetErrorString(herr);
+        return false;
+    }
+    if (!generic && specialized != expect_specialized) {
+        err = specialized ? "auto path did not take the specialized kernel"
+                          : "auto path unexpectedly took the specialized kernel";
         return false;
     }
     if (hipStreamSynchronize(stream) != hipSuccess) {
@@ -314,7 +321,7 @@ bool check_fallback_shape(uint32_t rows, uint32_t k, ps::gpu::GpuArena& arena,
     Result vec;
     std::string err;
     if (!run_kernel(h_in, rows, k, kp, true, arena, stream, gen, err) ||
-        !run_kernel(h_in, rows, k, kp, false, arena, stream, vec, err)) {
+        !run_kernel(h_in, rows, k, kp, false, arena, stream, vec, err, false)) {
         std::printf("FAIL: fallback rows=%u k=%u: %s\n", rows, k, err.c_str());
         failed++;
         return false;
@@ -340,14 +347,14 @@ int main() {
     if (hipSetDevice(0) != hipSuccess) return 1;
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) return 1;
-    auto arena_result = ps::gpu::GpuArena::create(0, 512 * 1024 * 1024);
+    auto arena_result = ps::gpu::GpuArena::create(0, 1536u * 1024u * 1024u);
     if (!arena_result.ok()) {
         std::printf("FAIL: arena create: %s\n", arena_result.status().message().c_str());
         return 1;
     }
     ps::gpu::GpuArena arena = arena_result.release();
 
-    const uint32_t production_k[] = {5120u, 6144u, 17408u};
+    const uint32_t production_k[] = {5120u, 6144u, 17408u, 8704u, 3072u};
     const uint32_t row_list[] = {1u, 2u, 16u, 128u};
 
     std::printf("\n-- production shapes: all patterns, specialized vs generic vs cpu --\n");
