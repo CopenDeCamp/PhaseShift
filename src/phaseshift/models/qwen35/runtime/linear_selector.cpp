@@ -288,6 +288,11 @@ select_psq8_gemm_config(const Psq8GemmSelectorInput& input) {
         uint32_t cfg;
         if (ov >= 0) {
             cfg = static_cast<uint32_t>(ov);
+        } else if (input.rows < ps::kernel::kPsq8GemmPrefill2dLargeMinRows &&
+                   input.out_features >= ps::kernel::kPsq8GemmPrefill2dLargeMinOutFeatures &&
+                   static_cast<uint64_t>(input.rows) * input.out_features <=
+                       ps::kernel::kPsq8GemmPrefill2dSmallWorkElements) {
+            cfg = 0u;
         } else {
             const bool ob128 =
                 (input.out_features % ps::kernel::kPsq8GemmPrefill2dBlock128) == 0u;

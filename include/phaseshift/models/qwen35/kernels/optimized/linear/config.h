@@ -46,6 +46,9 @@ inline constexpr uint32_t kPsq8GemmPrefill2dOutBlock = 64u;
 inline constexpr uint32_t kPsq8GemmPrefill2dKChunk = 64u;
 inline constexpr uint32_t kPsq8GemmPrefill2dBlock64 = 64u;
 inline constexpr uint32_t kPsq8GemmPrefill2dBlock128 = 128u;
+inline constexpr uint64_t kPsq8GemmPrefill2dSmallWorkElements = 3000000ull;
+inline constexpr uint32_t kPsq8GemmPrefill2dLargeMinRows = 1024u;
+inline constexpr uint32_t kPsq8GemmPrefill2dLargeMinOutFeatures = 2048u;
 
 enum class Psq4GemmConfigId : uint8_t {
     RowBlock1,

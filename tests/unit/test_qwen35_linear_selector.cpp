@@ -324,6 +324,56 @@ void test_tp2_shapes() {
           "tp2 psq8 24x5120 not enabled");
 }
 
+void test_psq8_small_work_prefill2d() {
+    check(is_psq8(sel_psq8(512, 3072, 5120, 5120), ps::kernel::Psq8GemmConfigId::Prefill2D),
+          "psq8 rows=512 N=3072 small work -> K64N64");
+    check(is_psq8(sel_psq8(512, 5120, 5120, 5120), ps::kernel::Psq8GemmConfigId::Prefill2D),
+          "psq8 rows=512 N=5120 small work -> K64N64");
+    check(is_psq8(sel_psq8(768, 3072, 5120, 5120), ps::kernel::Psq8GemmConfigId::Prefill2D),
+          "psq8 rows=768 N=3072 small work -> K64N64");
+    check(is_psq8(sel_psq8(768, 5120, 5120, 5120),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128),
+          "psq8 rows=768 N=5120 large work -> K128N128");
+    check(is_psq8(sel_psq8(1024, 3072, 5120, 5120),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128),
+          "psq8 rows=1024 N=3072 large work -> K128N128");
+    check(is_psq8(sel_psq8(1024, 5120, 5120, 5120),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128),
+          "psq8 rows=1024 N=5120 large work -> K128N128");
+    check(is_psq8(sel_psq8(2048, 5120, 8704, 8704),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128),
+          "psq8 rows=2048 N=5120 -> K128N128");
+    check(is_psq8(sel_psq8(512, 5120, 8704, 8704),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D),
+          "psq8 rows=512 N=5120 K=8704 small work -> K64N64");
+
+    check(is_psq8(sel_psq8(64, 5120, 5120, 5120), ps::kernel::Psq8GemmConfigId::RowBlock4),
+          "psq8 rows=64 -> row block (no 2d)");
+    check(is_psq8(sel_psq8(1, 5120, 5120, 5120), ps::kernel::Psq8GemmConfigId::RowBlock1),
+          "psq8 rows=1 -> decode1 row block");
+    check(is_psq8(sel_psq8(2049, 5120, 5120, 5120), ps::kernel::Psq8GemmConfigId::RowBlock8),
+          "psq8 rows=2049 out of 2d rows -> row block");
+    check(is_psq8(sel_psq8(512, 1024, 2560, 2560),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128),
+          "psq8 rows=512 out<2048 keeps historical K128N128");
+    check(is_psq8(sel_psq8(1024, 2560, 4096, 4096),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128),
+          "psq8 rows=1024 keeps K128N128");
+
+    setenv("PHASESHIFT_PSQ8_PREFILL_2D", "bk128bn128", 1);
+    check(is_psq8(sel_psq8(512, 3072, 5120, 5120),
+                  ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128),
+          "psq8 override beats small work rule");
+    unsetenv("PHASESHIFT_PSQ8_PREFILL_2D");
+
+    check(is_psq4(sel_psq4(512, 8704, 5120, 5120),
+                  ps::kernel::Psq4GemmConfigId::Prefill2D_K128N64),
+          "psq4 rows=512 unchanged (K128N64)");
+    check(is_psq4(sel_psq4(2048, 8704, 5120, 5120),
+                  ps::kernel::Psq4GemmConfigId::Prefill2D_K128N128),
+          "psq4 rows=2048 unchanged (K128N128)");
+}
+
 }  // namespace
 
 int main() {
@@ -334,6 +384,7 @@ int main() {
     test_fp8_block128();
     test_mxfp4();
     test_tp2_shapes();
+    test_psq8_small_work_prefill2d();
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
