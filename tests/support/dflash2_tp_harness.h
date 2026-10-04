@@ -30,10 +30,14 @@ inline bool dflash2_step_loop(::ps::qwen35::runtime::DFlash2SpecDecoder& decoder
     const auto t0 = std::chrono::steady_clock::now();
     auto prefill = ::ps::qwen35::runtime::dflash2_spec_prefill(
         decoder, opts.prompt.data(), static_cast<std::uint32_t>(opts.prompt.size()));
+    const auto t_pre = std::chrono::steady_clock::now();
     if (!prefill.ok()) {
         result.error = "dflash2 prefill: " + prefill.status().message();
         return false;
     }
+    const double prefill_ms =
+        std::chrono::duration<double, std::milli>(t_pre - t0).count();
+    const double prefill_tokens = static_cast<double>(opts.prompt.size());
     std::int32_t pending = prefill.value().pending_token;
     result.tokens.push_back(pending);
     bool finished = ::ps::qwen35::is_stop_token(text_config.stop_tokens, pending);
@@ -53,14 +57,22 @@ inline bool dflash2_step_loop(::ps::qwen35::runtime::DFlash2SpecDecoder& decoder
         finished = out.finished;
     }
     const auto t1 = std::chrono::steady_clock::now();
-    const double ms =
+    const double total_ms =
         std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double decode_ms = total_ms - prefill_ms;
     const std::size_t n = result.tokens.size();
-    char buf[192];
+    const double generated = static_cast<double>(n > 0 ? n - 1 : 0);
+    char buf[384];
     std::snprintf(buf, sizeof(buf),
+                  "pp_prefill_ms=%.1f pp_tokens=%.0f pp_tokens_per_s=%.2f\n"
+                  "tg_decode_ms=%.1f tg_tokens=%.0f tg_tokens_per_s=%.2f\n"
                   "dflash2_prefill_plus_decode_ms=%.1f dflash2_tokens=%zu "
                   "dflash2_tok_per_s=%.2f\n",
-                  ms, n, ms > 0.0 ? static_cast<double>(n) * 1000.0 / ms : 0.0);
+                  prefill_ms, prefill_tokens,
+                  prefill_ms > 0.0 ? prefill_tokens * 1000.0 / prefill_ms : 0.0,
+                  decode_ms, generated,
+                  decode_ms > 0.0 ? generated * 1000.0 / decode_ms : 0.0,
+                  total_ms, n, total_ms > 0.0 ? static_cast<double>(n) * 1000.0 / total_ms : 0.0);
     loop_report = buf;
     return true;
 }

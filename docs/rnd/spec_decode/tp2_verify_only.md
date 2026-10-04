@@ -345,3 +345,61 @@ barrier と replicated 部分を織り込んで **1.4〜1.6×** を推定して�
 - compact の host 比較 diag（`gdn_compact_compare_remaining`）は rank0 専用のため、
   TP2 では **diag を無効化する前提**（既定 OFF）
 - TP2 化の性能効果は本 step では未計測
+
+## 5.6 docs の corpus による pp / tg 計測（300 W）
+
+### 計測方法の制約
+
+`phaseshift-bench tg` / `pp` は **TP にも DFlash2 にも対応していない**
+（single GPU・target only、TP/DFlash2 参照ゼロ、docs/perf の pp2048 / tg128 baseline
+はこの形式）。よって TP2 + DFlash2 の pp / tg は harness で同等指標を出す。
+
+- harness の `dflash2_step_loop` を prefill / decode に分割し
+  `pp_prefill_ms` `pp_tokens_per_s` / `tg_decode_ms` `tg_tokens_per_s` を出力
+- `test_dflash2_tp_e2e` に `PHASESHIFT_DFLASH2_PROMPT_FILE` / `PHASESHIFT_DFLASH2_TOKENS`
+  を追加（`max_seq_len` は prompt + tokens + 64 から導出）
+- prompt を差し替えた場合、docs §9 の「greedy16 token 一致」assert は **print のみ**にする
+  （16 token の margin 保証は既定 prompt 専用であり、差し替え prompt で同じ前提を試すことになる）
+
+### corpus の再現
+
+`tools/reference/export_qwen38_dflash2_gate51_real.py --mode prompts`（main worktree を
+cwd にしないと相対 `models/...` が解決できない）で
+`build/dflash2-gate51/real/real_prose/prompt.txt` = **31 tokens** を再生成。
+これは docs の DFlash2 baseline（63.15 tok/s）と同じ prompt。
+
+### 結果（`max-new-tokens 256`、run 中 socket power max 263 W / 2秒間隔、cap 300W 未達）
+
+| 指標 | TP1 | TP2 | TP2/TP1 |
+| --- | ---: | ---: | ---: |
+| **pp**（prefill 31 tokens） | 56.8 ms → 545.9 tok/s | 36.8 ms → **842.0 tok/s** | **1.54×** |
+| **tg**（decode 255 tokens） | 4004.0 ms → **63.69 tok/s** | 3510.4 ms → **72.64 tok/s** | **1.14×** |
+| round 単価 | 47.67 ms/round（84 rounds） | 35.46 ms/round（99 rounds） | **1.344×** |
+| accepted drafts | 171（2.04/round） | 156（1.58/round） | 0.91 |
+
+**baseline 検証**: TP1 の `ROUNDS=84` / `ACCEPTED_DRAFTS=171` が
+`docs/perf/current.md` の DFlash2 baseline と**完全一致**、tg は 63.69 vs 63.15（差 0.9%）。
+harness が正本と接続している。
+
+### tg の 1.14× には content effect が混ざる（重要）
+
+```text
+tp1 vs tp2 greedy first-16: DIFFER      ← target-only greedy がこの prompt で token 1 から分岐
+tp1 vs tp2 speculative prefix: 1/256
+```
+
+この prompt は docs §9 の margin 保証対象外（既定 prompt 専用）。greedy 自体が冒頭から
+分岐するため生成列が異なり、accept 率も異なる（171 vs 156）。
+**よって tg の 1.14× は別 content を比較した値であり、speedup としては無効**。
+
+- **内容に依存しない clean な指標は round 単価 1.344×**（§5.5 の 5-token prompt で
+  測た 1.385× と整合）
+- accepted の差（−8.8%）は「content の違い」と「drafter が TP2 の taps を入力に受ける
+  数値差」の**どちらか・あるいは両方**で、同一 content が作れないため**本計測では切り分け不能**
+- 「accept 率が揃えば」の投影は `84 × 35.46 ms = 2979 ms → 85.6 tok/s`。**これは投影**
+
+### pp について
+
+31 tokens の pp は固定費寄与が大きく（TP1 で 56.8 ms）実効 545.9 tok/s。
+bench 形式の pp2048 とは別物。**TP2 の pp2048 は §5.5 直前の計測で 563.37 ms = 3635 tok/s**
+（ctx512 / 1024 / 2048 で TP2/TP1 = 0.706 / 0.669 / 0.647）。

@@ -84,6 +84,29 @@ int main() {
         o.taps.push_back(static_cast<int>(dflash_config.target_layer_ids[i]));
     }
 
+    bool custom_prompt = false;
+    if (const char* pf = std::getenv("PHASESHIFT_DFLASH2_PROMPT_FILE")) {
+        FILE* fp = std::fopen(pf, "r");
+        if (fp == nullptr) {
+            std::printf("FAIL: cannot open PHASESHIFT_DFLASH2_PROMPT_FILE %s\n", pf);
+            return 1;
+        }
+        o.prompt.clear();
+        while (true) {
+            char* end = nullptr;
+            char buf[64];
+            if (std::fscanf(fp, " %63[^, \t\n],", buf) != 1) break;
+            const long value = std::strtol(buf, &end, 10);
+            if (end == buf) break;
+            o.prompt.push_back(static_cast<int32_t>(value));
+        }
+        std::fclose(fp);
+        if (o.prompt.empty()) {
+            std::printf("FAIL: prompt file %s yielded no tokens\n", pf);
+            return 1;
+        }
+        custom_prompt = true;
+    }
     if (const char* prompt_env = std::getenv("PHASESHIFT_TP_PROMPT")) {
         o.prompt.clear();
         const char* p = prompt_env;
@@ -96,7 +119,15 @@ int main() {
             while (*p == ',' || *p == ' ') ++p;
         }
         if (o.prompt.empty()) o.prompt = {304, 17, 283, 2454, 304};
+        custom_prompt = true;
     }
+    if (const char* tok_env = std::getenv("PHASESHIFT_DFLASH2_TOKENS")) {
+        const long t = std::strtol(tok_env, nullptr, 10);
+        if (t > 0) o.max_new_tokens = static_cast<std::uint32_t>(t);
+    }
+    const std::uint32_t needed_seq =
+        static_cast<std::uint32_t>(o.prompt.size()) + o.max_new_tokens + 64u;
+    if (needed_seq > o.max_seq_len) o.max_seq_len = needed_seq;
 
     std::printf("prompt:");
     for (int32_t t : o.prompt) std::printf(" %d", t);
@@ -160,17 +191,20 @@ int main() {
           "tp2: speculative decode matches target-only greedy");
 
     constexpr std::size_t kGreedyMatchTokens = 16;
-    check(tp1_plain.tokens.size() >= kGreedyMatchTokens &&
-              tp2_plain.tokens.size() >= kGreedyMatchTokens,
-          "both backends produced at least 16 greedy tokens");
     const bool greedy_match_16 =
         tp1_plain.tokens.size() >= kGreedyMatchTokens &&
         tp2_plain.tokens.size() >= kGreedyMatchTokens &&
         std::equal(tp1_plain.tokens.begin(),
                    tp1_plain.tokens.begin() + kGreedyMatchTokens,
                    tp2_plain.tokens.begin());
-    check(greedy_match_16,
-          "target-only greedy matches for the first 16 tokens (tp1 vs tp2)");
+    std::printf("tp1 vs tp2 greedy first-16: %s%s\n", greedy_match_16 ? "match" : "DIFFER",
+                custom_prompt
+                    ? " (custom prompt: informational only, docs §9 margin applies to the default prompt)"
+                    : "");
+    if (!custom_prompt) {
+        check(greedy_match_16,
+              "target-only greedy matches for the first 16 tokens (tp1 vs tp2)");
+    }
 
     std::printf("tp1 vs tp2 speculative prefix:");
     std::size_t same = 0;
