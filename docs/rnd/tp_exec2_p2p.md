@@ -496,3 +496,85 @@ copy kernel の flag 書き込み + `hipStreamWaitValue32` に置換 | 約 2.6 �
   `test_qwen35_tp_e2e` **4/4 PASS**（E2E の TP1/TP2 token 一致含む）。
   効果ゼロのため required acceptance は実施せず **revert**。
 - 最終状態は HEAD `a91dd715`（本 step の変更なし）。prototype は R&D 記録のみ残す。
+
+## step13: device-side barrier（wait-value 化）の試行と **REJECT**
+
+step12 で「wall の律速は barrier ごとの HIP API 呼び出し数そのもの」ことを確認した。
+host 時間は TP2 plain decode の wall 25.41 ms のうち **4.33 ms（17%）** で、
+GPU busy ≈ 20.6 ms との差（≈ 4.8 ms）の**約90%を占める**最大項目である
+（step7 の摂動実験で host 時間は wall に 1:1 で乗ることを確認済み）。
+これを「消す」案として **device-side barrier（host がブロックしない）** を試した。
+
+### 手法
+
+`hipStreamWaitValue32` で相手 rank の kernel が peer write した flag を待つことで、
+`TpBarrierGroup::arrive` の host condvar wait を排除し、host を run-ahead させる。
+本ホストは peer READ が破損するため、flag は「相手が peer write してくる側の
+ローカルメモリ」を読む形にする（peer WRITE のみ使用）。
+
+### GPU-MCU の R&D から借りた contract（本試行で最初に踏んだ禁止事項）
+
+`exp/gpu-mcu` の `docs/developer/gpu_mcu/low_level.md` と
+`docs/rnd/gpu_mcu/production_decode_integration.md` に明文化されている。
+
+- **同期 `hipMemcpy` / `hipMemcpyWithStream`（pageable dst）→ 返らない**（ハング）
+- **`hipDeviceSynchronize`** は禁止（persistent wave 稼働中に legacy/default stream 操作も同様）
+- readback は **submit 時に stream へ enqueue し、完了 event（または stream sync）で覆う**
+- pageable な stack 変数へ同期コピーしてはならない
+- signal memory は **host-readable が必須**。`stream_signal_alloc` は host-mapped のみを
+  試して fail-closed にする（plain `hipMalloc` へは落とさない）
+- この gate は MCU branch の `tools/check_mcu_sync.py`（**現行 branch には無い**）が
+  `phaseshift_mcu_sync_check` target として compile 前に走らせる
+
+初版の prototype はこのうち2つ（同期 D2H → stack 変数、`hipDeviceSynchronize`）を踏んで
+いた。`test_tp_wait_value.hip` は pinned (`hipHostMalloc`) staging +
+`hipMemcpyAsync` + `hipStreamSynchronize(stream)` に直し、ハングを回避したうえで
+機構そのものを測定している。
+
+### 実測（`tests/unit/test_tp_wait_value.hip`、gfx1201 / ROCm）
+
+| # | 構成 | 結果 |
+| --- | --- | --- |
+| [1] | host-coherent signal + host が **3000 µs 遅延後に書き込み** | waiter elapsed **3 µs** → **不ブロック** |
+| [2] | host 呼び出しコスト | `stream_wait_value32` **1.255 µs/call** vs `hipStreamWaitEvent` **0.057 µs/call**（**22 倍**） |
+| [3] | plain `hipMalloc` + peer kernel write | 4 µs → 不ブロック（memory 要件未達。doc の fail-closed 方針と整合） |
+| [4] | host-coherent + peer `hipStreamWriteValue32` | 0 µs → 不観測 |
+| [5] | host-coherent + peer kernel write | 3 µs → 不観測 |
+| [6] | **ExtSignal（`hipMallocSignalMemory`）+ 同一 device の遅延 writer（2 stream）** | writer **5.93 ms** / waiter **0.01 ms** / GPU elapsed **6 µs** → **不ブロック** ← 決定的 |
+| [7] | ExtSignal + peer stream write | 4 µs → 不観測 |
+| [8] | [6] 同一構成で `hipStreamBatchMemOp`(`hipStreamMemOpWaitValue32`) に置換 | writer 5.86 ms / waiter 0.00 ms → **不ブロック**（enqueue は成功） |
+
+- `hipDeviceAttributeCanUseStreamWaitValue` は **両 device とも 1**（= supported と答える）
+- ExtSignal の確保は `hipExtMallocWithFlags(..., hipMallocSignalMemory)` で**成功**
+- `stream_bridge.cpp` の引数（`hipStreamWaitValueEq` / `mask=0xFFFFFFFF`）は
+  HIP ヘッダのドキュメントと一致（**呼び出し側の誤りではない**）
+- [6] の対照実験（writer の所要時間を実測して 5.93 ms を確認）により、
+  **delay kernel は正常に動作しており、wait 側が待っていない**ことを切り分けた
+
+### 結論
+
+1. **`hipStreamWaitValue32` / `hipStreamBatchMemOp` は doc 準拠の構成でも機能しない**
+   （属性は supported を返すが実体は no-op）。→ **device-side wait による barrier 除去は REJECT。**
+2. `stream_wait_value32` は現行コードで**宣言のみ・呼び出しが無い**（completion は
+   `stream_write_value32` + host 側 `stream_signal_load` の polling）。**未検証の素だった。**
+3. step12 と合わせると、TP2 の host 時間（≈4.33 ms/token = wall の17%）は
+   - 構造の再配分（step12）→ **効かず**
+   - HIP の device-side wait（本 step）→ **手段が存在しない**
+   の2通りを潰した。残る選択肢は **kernel 側 polling**（相手が peer write したローカル
+   flag を spin kernel が読む。peer WRITE は実証済み・ローカル read は自明）のみで、
+   spin 中の workgroup 占有と `predictable execution` との両立を検討する必要がある。
+
+### GPU-MCU track への示唆（未検証）
+
+`exp/gpu-mcu` の architecture doc は
+「GPU-MCU と Host runtime は同じ `stream_signal_alloc` / `stream_write_value32` /
+`stream_wait_value32` を使う」と書く。本計測が正しければ **device 側 wait は使えない**ため、
+MCU の device 側順序は host polling（`stream_signal_load`）に依存しているはずである。
+MCU の移植評価では、**この素が機能しない前提でその設計が成立するか**を最初に確認する。
+
+### gate
+
+- `test_tp_wait_value` は**情報出力（FINDING）型**。blocking 挙動を assert せず、
+  enqueue / sync / value がエラーなく完走することのみを確認する。
+  ROCm 側で機構が直った場合、FINDING の文言が変わるため気づける。
+- 本 step で production code は変更していない（test + cmake のみ）。

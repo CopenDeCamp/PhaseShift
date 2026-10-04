@@ -96,6 +96,10 @@ phaseshift_add_test(NAME test_qwen35_tp_context SOURCE unit/test_qwen35_tp_conte
 phaseshift_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
 target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES phaseshift_runtime)
+
+# device-side barrier の前提確認: peer kernel write した flag を
+# hipStreamWaitValue32 で待てるか、および host 呼び出しコスト。
+phaseshift_add_test(NAME test_tp_wait_value SOURCE unit/test_tp_wait_value.hip LABELS "gpu2;optional" TIMEOUT 300 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES phaseshift_runtime)
 phaseshift_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime)
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES phaseshift_qwen35_runtime)
