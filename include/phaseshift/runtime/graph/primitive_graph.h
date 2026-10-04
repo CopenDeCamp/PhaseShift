@@ -60,6 +60,7 @@ struct PrimitiveGraphNode {
     std::vector<ValueId> keep_alive;
     std::string debug_name;
     uint32_t imatrix_tag = 0;
+    uint8_t tp_combine = 0;
 };
 
 struct PrimitiveGraph {

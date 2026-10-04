@@ -221,6 +221,9 @@ int main() {
         {"mixed", 8, 2048, 128, 2048, 2048, 1e-6f, 9, Fill::Mixed},
         {"large", 8, 2048, 128, 2048, 2048, 1e-6f, 10, Fill::Large},
         {"group-tail", 4, 2048, 64, 2048, 2048, 1e-6f, 11, Fill::Normal},
+        {"tp2-r1", 1, 1024, 128, 1024, 1024, 1e-6f, 12, Fill::Normal},
+        {"tp2-r64", 64, 1024, 128, 1024, 1024, 1e-6f, 13, Fill::Normal},
+        {"tp2-r2048", 2048, 1024, 128, 1024, 1024, 1e-6f, 14, Fill::Normal},
     };
 
     for (const auto& c : cases) {

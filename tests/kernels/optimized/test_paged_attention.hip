@@ -683,6 +683,47 @@ int main() {
     c.visible_override = 32768;
     run_case(c, "bf16 DECODE long visible=32768 hd=256 rows=1");
 
+    // Qwen3.8-27B TP=2 local geometry: q_heads=12, kv_heads=2, head_dim=256, page=16.
+    c = Config{};
+    c.rows = 1;
+    c.q_heads = 12;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 16;
+    c.num_pages = 16;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 16;
+    c.max_sequences = 1;
+    c.visible_override = 64;
+    run_case(c, "bf16 TP2 DECODE qh=12 kvh=2 hd=256 page=16 vis=64 rows=1");
+    c = Config{};
+    c.rows = 64;
+    c.q_heads = 12;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 16;
+    c.num_pages = 16;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 16;
+    c.max_sequences = 8;
+    c.prefill = true;
+    run_case(c, "bf16 TP2 PREFILL qh=12 kvh=2 hd=256 page=16 rows=64");
+    c = Config{};
+    c.rows = 1;
+    c.q_heads = 12;
+    c.kv_heads = 2;
+    c.head_dim = 256;
+    c.page_tokens = 64;
+    c.num_pages = 64;
+    c.num_layers = 1;
+    c.layer = 0;
+    c.block_table_stride = 64;
+    c.max_sequences = 1;
+    c.visible_override = 2048;
+    run_case(c, "bf16 TP2 DECODE qh=12 kvh=2 hd=256 page=64 vis=2048 rows=1");
+
     c = Config{};
     c.rows = 8;
     c.q_heads = 16;

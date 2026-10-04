@@ -22,6 +22,8 @@ constexpr GdnConvRule kRules[] = {
       8192u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
     { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
       10240u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
+    { ::ps::runtime::ValueDType::BF16, ::ps::runtime::ValueDType::F32,
+      5120u, 3u, 1u, kMeasuredMaxRows, kMeasuredMaxRequests, kMeasuredMaxRows },
 };
 
 }  // namespace

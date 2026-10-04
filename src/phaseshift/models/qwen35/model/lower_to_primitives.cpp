@@ -227,18 +227,20 @@ Status validate_mlp_shapes(
 Status validate_full_attention_shapes(
     const Qwen35LayerWeights& weights,
     const Qwen35TextConfig& config,
-    std::uint32_t hidden_size) {
+    std::uint32_t hidden_size,
+    std::uint32_t local_query_heads,
+    std::uint32_t local_kv_heads) {
 
     std::uint32_t query_features = 0;
     std::uint32_t kv_features = 0;
     auto status = checked_product(
-        config.num_attention_heads,
+        local_query_heads,
         config.attention_head_dim,
         "invalid full attention query geometry",
         query_features);
     if (!status.ok()) return status;
     status = checked_product(
-        config.num_key_value_heads,
+        local_kv_heads,
         config.attention_head_dim,
         "invalid full attention KV geometry",
         kv_features);
@@ -254,9 +256,9 @@ Status validate_full_attention_shapes(
     std::uint32_t query_heads = 0;
     std::uint32_t kv_heads = 0;
     std::uint32_t head_dim = 0;
-    status = checked_u32(config.num_attention_heads, "invalid full attention query heads", query_heads);
+    status = checked_u32(local_query_heads, "invalid full attention query heads", query_heads);
     if (!status.ok()) return status;
-    status = checked_u32(config.num_key_value_heads, "invalid full attention KV heads", kv_heads);
+    status = checked_u32(local_kv_heads, "invalid full attention KV heads", kv_heads);
     if (!status.ok()) return status;
     status = checked_u32(config.attention_head_dim, "invalid full attention head dimension", head_dim);
     if (!status.ok()) return status;
@@ -290,18 +292,20 @@ Status validate_full_attention_shapes(
 Status validate_gdn_shapes(
     const Qwen35LayerWeights& weights,
     const Qwen35TextConfig& config,
-    std::uint32_t hidden_size) {
+    std::uint32_t hidden_size,
+    std::uint32_t local_key_heads,
+    std::uint32_t local_value_heads) {
 
     std::uint32_t qk_features = 0;
     std::uint32_t value_features = 0;
     auto status = checked_product(
-        config.linear_num_key_heads,
+        local_key_heads,
         config.linear_key_head_dim,
         "invalid GDN key geometry",
         qk_features);
     if (!status.ok()) return status;
     status = checked_product(
-        config.linear_num_value_heads,
+        local_value_heads,
         config.linear_value_head_dim,
         "invalid GDN value geometry",
         value_features);
@@ -315,9 +319,9 @@ Status validate_gdn_shapes(
     std::uint32_t key_head_dim = 0;
     std::uint32_t value_head_dim = 0;
     std::uint32_t conv_kernel = 0;
-    status = checked_u32(config.linear_num_value_heads, "invalid GDN value heads", value_heads);
+    status = checked_u32(local_value_heads, "invalid GDN value heads", value_heads);
     if (!status.ok()) return status;
-    status = checked_u32(config.linear_num_key_heads, "invalid GDN key heads", key_heads);
+    status = checked_u32(local_key_heads, "invalid GDN key heads", key_heads);
     if (!status.ok()) return status;
     status = checked_u32(config.linear_key_head_dim, "invalid GDN key head dimension", key_head_dim);
     if (!status.ok()) return status;
@@ -345,7 +349,8 @@ Status validate_gdn_shapes(
 
 Status validate_geometry(
     const Qwen35TextConfig& config,
-    const Qwen35ModelWeights& weights) {
+    const Qwen35ModelWeights& weights,
+    const Qwen35TensorParallelContext* tp) {
 
     std::uint32_t hidden_size = 0;
     std::uint32_t intermediate_size = 0;
@@ -353,6 +358,18 @@ Status validate_geometry(
     if (!status.ok()) return status;
     status = checked_u32(config.intermediate_size, "invalid intermediate size", intermediate_size);
     if (!status.ok()) return status;
+    const bool tp_active = tp != nullptr && tp->tp_size > 1;
+    std::uint32_t local_query_heads = config.num_attention_heads;
+    std::uint32_t local_kv_heads = config.num_key_value_heads;
+    std::uint32_t local_key_heads = config.linear_num_key_heads;
+    std::uint32_t local_value_heads = config.linear_num_value_heads;
+    if (tp_active) {
+        intermediate_size = tp->local_intermediate_size;
+        local_query_heads = tp->local_attention_heads;
+        local_kv_heads = tp->local_key_value_heads;
+        local_key_heads = tp->local_gdn_key_heads;
+        local_value_heads = tp->local_gdn_value_heads;
+    }
     if (config.num_hidden_layers == 0 ||
         weights.layers.size() != config.num_hidden_layers) {
         return Status::invalid_argument(
@@ -400,9 +417,11 @@ Status validate_geometry(
         if (!status.ok()) return status;
 
         if (is_gdn) {
-            status = validate_gdn_shapes(layer_weights, config, hidden_size);
+            status = validate_gdn_shapes(layer_weights, config, hidden_size,
+                                         local_key_heads, local_value_heads);
         } else {
-            status = validate_full_attention_shapes(layer_weights, config, hidden_size);
+            status = validate_full_attention_shapes(layer_weights, config, hidden_size,
+                                                    local_query_heads, local_kv_heads);
         }
         if (!status.ok()) return status;
     }
@@ -504,7 +523,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     const Qwen35TextConfig& config,
     const Qwen35ModelWeights& weights,
     const Qwen35LowerOptions& options) {
-    auto geometry_status = validate_geometry(config, weights);
+    auto geometry_status = validate_geometry(config, weights, options.tp);
     if (!geometry_status.ok()) return geometry_status;
 
     for (std::size_t t = 0; t < options.hidden_taps.size(); ++t) {
@@ -582,6 +601,14 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
     uint32_t q_heads = static_cast<uint32_t>(config.num_attention_heads);
     uint32_t kv_heads = static_cast<uint32_t>(config.num_key_value_heads);
     uint32_t head_dim = static_cast<uint32_t>(config.attention_head_dim);
+    uint32_t mlp_intermediate = static_cast<uint32_t>(config.intermediate_size);
+    if (options.tp != nullptr && options.tp->tp_size > 1) {
+        key_heads = options.tp->local_gdn_key_heads;
+        value_heads = options.tp->local_gdn_value_heads;
+        q_heads = options.tp->local_attention_heads;
+        kv_heads = options.tp->local_key_value_heads;
+        mlp_intermediate = options.tp->local_intermediate_size;
+    }
     float rope_theta = config.rope_theta;
     float eps = config.rms_norm_eps;
     float partial = config.partial_rotary_factor;
@@ -777,6 +804,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                                   imatrix_tag(static_cast<uint32_t>(li),
                                               ImatrixSite::GdnOutputInput));
             name_last("gdn_out");
+            pg.nodes.back().tp_combine = 1;
         } else {
             uint32_t q_features = q_heads * head_dim;
             uint32_t kv_features = kv_heads * head_dim;
@@ -872,6 +900,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                                   imatrix_tag(static_cast<uint32_t>(li),
                                               ImatrixSite::FullAttnOInput));
             name_last("o_proj");
+            pg.nodes.back().tp_combine = 1;
         }
 
         RT::ValueId attn_residual{0};
@@ -902,9 +931,9 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
         name_last("mlp_gate");
         RT::ValueId v_mlp_up = em.linear(w_up, lw_idx.mlp_up, post_norm);
         name_last("mlp_up");
-        RT::ValueId v_swiglu = em.value(static_cast<uint32_t>(config.intermediate_size));
+        RT::ValueId v_swiglu = em.value(mlp_intermediate);
         {
-            RT::SwiGluNode sn{RT::RowwiseShapeKey{static_cast<uint32_t>(config.intermediate_size)}};
+            RT::SwiGluNode sn{RT::RowwiseShapeKey{mlp_intermediate}};
             em.emit(RT::PrimitiveNode{sn}, {v_mlp_gate, v_mlp_up}, {v_swiglu});
             name_last("mlp_swiglu");
         }
@@ -912,6 +941,7 @@ Result<Qwen35LoweredPrimitives> lower_qwen35_to_primitives(
                                        imatrix_tag(static_cast<uint32_t>(li),
                                                    ImatrixSite::MlpDownInput));
         name_last("mlp_down");
+        pg.nodes.back().tp_combine = 1;
 
         RT::ValueId layer_output{0};
         {

@@ -22,6 +22,10 @@ constexpr RopeRule kRules[] = {
       4096u, 256u, 64u, 1u, kMeasuredMaxRows },
     { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
       6144u, 256u, 64u, 1u, kMeasuredMaxRows },
+    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
+      3072u, 256u, 64u, 1u, kMeasuredMaxRows },
+    { ::ps::runtime::ValueDType::F32, ::ps::runtime::ValueDType::BF16,
+      512u, 256u, 64u, 1u, kMeasuredMaxRows },
 };
 
 }  // namespace

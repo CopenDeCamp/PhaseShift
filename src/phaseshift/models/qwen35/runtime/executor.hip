@@ -869,6 +869,7 @@ Result<PendingBatch> submit_co_batch(
         batch.speculative_verify && options.gdn_spec_history.recurrent_history == nullptr;
     const bool graph_eligible =
         !executor.graph_failed &&
+        executor.tp_schedules.empty() &&
         N > 0 &&
         graph_slot_idx >= 0 &&
         executor.imatrix_collector == nullptr &&
@@ -950,8 +951,24 @@ Result<PendingBatch> submit_co_batch(
             return Status::hip_error("hipMemsetAsync error word",
                                      hipGetErrorString(word_err), __FILE__, __LINE__);
         }
-        stq = launch_host_backend_range(executor, *program, ctx, stream, 0u,
-                                        dispatch_count);
+        const size_t program_index = static_cast<size_t>(
+            program - executor.program_set.programs.data());
+        const bool tp_configured = !executor.tp_schedules.empty();
+        if (tp_configured) {
+            if (program_index >= executor.tp_schedules.size() ||
+                !executor.tp_schedules[program_index].active() ||
+                executor.tp_barrier == nullptr) {
+                return Status::invalid_state(
+                    "tp execution schedule is active but cannot be launched",
+                    __FILE__, __LINE__);
+            }
+            stq = runtime::execute_program_tp_ranges(
+                *program, ctx, stream, executor.tp_schedules[program_index],
+                executor.tp_barrier, executor.tp_rank);
+        } else {
+            stq = launch_host_backend_range(executor, *program, ctx, stream, 0u,
+                                            dispatch_count);
+        }
         if (!stq.ok()) return stq;
         auto* host_status = static_cast<uint32_t*>(executor.host_status_staging);
         if (host_status == nullptr) {
@@ -1119,6 +1136,7 @@ constexpr uint32_t kKeepAliveIntervalUs = 1000u;
 struct KeepAlive {
     hipStream_t stream = nullptr;
     hipEvent_t event = nullptr;
+    int device = 0;
     std::atomic<bool> stop{false};
     std::thread thread;
 };
@@ -1142,7 +1160,9 @@ KeepAlive* keepalive_start() {
         delete ka;
         return nullptr;
     }
+    if (hipGetDevice(&ka->device) != hipSuccess) ka->device = 0;
     ka->thread = std::thread([ka] {
+        (void)hipSetDevice(ka->device);
         while (!ka->stop.load(std::memory_order_relaxed)) {
             (void)hipEventRecord(ka->event, ka->stream);
             std::this_thread::sleep_for(std::chrono::microseconds(kKeepAliveIntervalUs));
@@ -1205,6 +1225,9 @@ Executor::Executor(Executor&& other) noexcept
       active_submission_id(other.active_submission_id),
       program_set(std::move(other.program_set)),
       program_set_ready(other.program_set_ready),
+      tp_schedules(std::move(other.tp_schedules)),
+      tp_barrier(other.tp_barrier),
+      tp_rank(other.tp_rank),
       execution_status(std::move(other.execution_status)),
       execution_workspace(std::move(other.execution_workspace)),
       host_weight_table(other.host_weight_table),
@@ -1330,6 +1353,12 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         active_submission_id = other.active_submission_id;
         program_set = std::move(other.program_set);
         program_set_ready = other.program_set_ready;
+        tp_schedules = std::move(other.tp_schedules);
+        other.tp_schedules.clear();
+        tp_barrier = other.tp_barrier;
+        other.tp_barrier = nullptr;
+        tp_rank = other.tp_rank;
+        other.tp_rank = 0;
         host_weight_table = other.host_weight_table;
         other.host_weight_table = nullptr;
         host_parameter_table = other.host_parameter_table;
@@ -1750,7 +1779,10 @@ Result<Executor> create_model_executor(
 
     const Qwen35TextConfig& tc = model.text_config();
     {
-        const auto expected_gdn = GdnStatePoolLayout::from_text_config(tc);
+        auto expected_gdn_result = GdnStatePoolLayout::from_tensor_parallel_config(
+            tc, config.tp != nullptr ? config.tp->tp_size : 1u);
+        if (!expected_gdn_result.ok()) return expected_gdn_result.status();
+        const GdnStatePoolLayout& expected_gdn = expected_gdn_result.value();
         const auto& actual_gdn = gdn_state_pool.layout();
         if (actual_gdn.num_gdn_states != expected_gdn.num_gdn_states ||
             actual_gdn.conv_dim != expected_gdn.conv_dim ||
@@ -1778,7 +1810,10 @@ Result<Executor> create_model_executor(
         for (int lt : tc.layer_types) {
             if (lt == 1) ++expected_attn_layers;
         }
-        const uint32_t expected_kv_heads = static_cast<uint32_t>(tc.num_key_value_heads);
+        const uint32_t expected_kv_heads =
+            (config.tp != nullptr && config.tp->tp_size > 1)
+                ? config.tp->local_key_value_heads
+                : static_cast<uint32_t>(tc.num_key_value_heads);
         const uint32_t expected_head_dim = static_cast<uint32_t>(tc.attention_head_dim);
         if (kv_pool.num_attention_layers() != expected_attn_layers ||
             kv_pool.kv_heads() != expected_kv_heads ||
@@ -2002,6 +2037,7 @@ Result<Executor> create_model_executor(
         Qwen35LowerOptions lower_options;
         lower_options.hidden_taps = std::span<const uint32_t>(
             ex.config.target_hidden_taps.data(), ex.config.target_hidden_tap_count);
+        lower_options.tp = config.tp;
         auto lower_res =
             lower_qwen35_to_primitives(model.text_config(), model.weights(), lower_options);
         if (!lower_res.ok()) {
@@ -2037,6 +2073,25 @@ Result<Executor> create_model_executor(
                 return set_res.status();
             }
             built_set = set_res.release();
+
+            if (config.tp != nullptr && config.tp->tp_size > 1) {
+                ex.tp_schedules.reserve(::ps::runtime::ProgramSet::kRowBucketCount);
+                for (const auto& prog : built_set.programs) {
+                    auto schedule_res =
+                        ::ps::runtime::build_tp_execution_schedule(lowered_graph, prog);
+                    if (!schedule_res.ok()) {
+                        ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                        return schedule_res.status();
+                    }
+                    if (!schedule_res.value().active()) {
+                        ps::gpu::discard_cleanup_result(hipStreamDestroy(upload_stream));
+                        return Status::invalid_argument(
+                            "tp execution schedule has no segments", __FILE__, __LINE__);
+                    }
+                    ex.tp_schedules.push_back(schedule_res.release());
+                }
+                ex.tp_rank = static_cast<int>(config.tp->tp_rank);
+            }
 
             std::size_t max_workspace_bytes = 0;
             uint64_t max_staging_bytes = 0;

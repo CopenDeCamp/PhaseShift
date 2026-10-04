@@ -326,6 +326,20 @@ int main() {
         run_case(64, 64, 256, 256, 64, 0xB1600002u, arena, stream, "rep rows=64 N=64 K=256");
     }
 
+    // Qwen3.8-27B TP=2 local geometries.
+    {
+        run_case(1, 8704, 5120, 5120, 8704, 0x7B200001u, arena, stream,
+                 "tp2 rows=1 N=8704 K=5120");
+        run_case(1, 512, 5120, 5120, 512, 0x7B200002u, arena, stream,
+                 "tp2 rows=1 N=512 K=5120");
+        run_case(1, 5120, 8704, 8704, 5120, 0x7B200003u, arena, stream,
+                 "tp2 rows=1 N=5120 K=8704");
+        run_case(64, 3072, 5120, 5120, 3072, 0x7B200004u, arena, stream,
+                 "tp2 rows=64 N=3072 K=5120");
+        run_case(1, 24, 5120, 5120, 24, 0x7B200005u, arena, stream,
+                 "tp2 rows=1 N=24 K=5120");
+    }
+
     ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

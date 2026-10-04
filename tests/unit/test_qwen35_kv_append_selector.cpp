@@ -59,6 +59,14 @@ int main() {
           "bf16 unknown page_tokens -> Correctness");
     check(sel(KVCacheDType::FP8_E4M3, 8, 256, 16, 1) == KvAppendImplementation::Correctness,
           "fp8 unknown kv_heads -> Correctness");
+    check(sel(KVCacheDType::BF16, 2, 256, 16, 1) == KvAppendImplementation::Optimized,
+          "27b tp2 bf16 rows=1 -> Optimized");
+    check(sel(KVCacheDType::BF16, 2, 256, 16, 2048) == KvAppendImplementation::Optimized,
+          "27b tp2 bf16 rows=2048 -> Optimized");
+    check(sel(KVCacheDType::BF16, 2, 256, 16, 2049) == KvAppendImplementation::Correctness,
+          "27b tp2 bf16 rows=2049 -> Correctness");
+    check(sel(KVCacheDType::FP8_E4M3, 2, 256, 16, 1) == KvAppendImplementation::Correctness,
+          "27b tp2 fp8 kv not enabled -> Correctness");
 
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

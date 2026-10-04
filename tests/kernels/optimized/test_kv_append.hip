@@ -588,6 +588,12 @@ int main() {
     c.rows = 1;
     c.fp8 = true;
     run_case(c, "fp8 decode rows=1");
+    c = Config{};
+    c.kv_heads = 2;
+    c.rows = 1;
+    run_case(c, "27b tp2 bf16 decode kv_heads=2 rows=1");
+    c.rows = 64;
+    run_case(c, "27b tp2 bf16 prefill kv_heads=2 rows=64");
 
     for (int est = 0; est < 2; ++est) {
         const auto e = est == 0 ? psq4_test::Est::MaxAbs : psq4_test::Est::Lsq1;

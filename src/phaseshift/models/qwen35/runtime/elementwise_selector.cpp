@@ -27,6 +27,13 @@ constexpr Rule kRules[] = {
     {ElementwiseProfile::SiluBf16ToF32, 6144u, 0u, 1u, 2048u},
     {ElementwiseProfile::SiluBf16ToF32, 4096u, 0u, 1u, 2048u},
     {ElementwiseProfile::ScaleF32, 2048u, 0u, 1u, 2048u},
+    {ElementwiseProfile::SiluBf16ToF32, 3072u, 0u, 1u, 2048u},
+    {ElementwiseProfile::SiluF32ToBf16, 5120u, 0u, 1u, 2048u},
+    {ElementwiseProfile::SigmoidBf16ToF32, 3072u, 0u, 1u, 2048u},
+    {ElementwiseProfile::MulF32F32ToBf16, 3072u, 0u, 1u, 2048u},
+    {ElementwiseProfile::SwigluBf16, 8704u, 0u, 1u, 2048u},
+    {ElementwiseProfile::ScaleF32, 1024u, 0u, 1u, 2048u},
+    {ElementwiseProfile::SplitBf16InterleavedHeads, 3072u, 256u, 1u, 2048u},
 };
 
 }  // namespace

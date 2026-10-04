@@ -2,6 +2,7 @@
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/runtime/rope_selector.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
+#include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
 #include <phaseshift/models/qwen35/kernels/optimized/attention/rope.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
 #include <hip/hip_runtime.h>
@@ -135,6 +136,10 @@ Result<OptimizedLaunchResult> try_launch_rope(
     if (herr != hipSuccess)
         return Status::hip_error("rope optimized launch", hipGetErrorString(herr),
                                  __FILE__, __LINE__);
+    if (launch.variant == PhysicalRopeVariant::F32Bf16Generic)
+        record_correctness_fallback(b.kernel_id);
+    else
+        rope_optimized_hit();
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};

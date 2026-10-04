@@ -49,6 +49,13 @@ constexpr LinearShapeRule kLinearShapeRules[] = {
     { 17408, 5120, kFamilyBf16 | kFamilyPsq4 | kFamilyPsq8 | kFamilyFp8 | kFamilyMxfp4 },
     { 248320, 2560, kFamilyBf16 | kFamilyPsq8 },
     { 248320, 5120, kFamilyBf16 | kFamilyPsq8 },
+    { 8704, 5120, kFamilyPsq4 },
+    { 5120, 8704, kFamilyPsq4 | kFamilyPsq8 },
+    { 3072, 5120, kFamilyPsq4 | kFamilyPsq8 },
+    { 512, 5120, kFamilyPsq4 },
+    { 5120, 3072, kFamilyPsq4 | kFamilyPsq8 },
+    { 5120, 5120, kFamilyPsq4 | kFamilyPsq8 },
+    { 24, 5120, kFamilyBf16 },
 };
 
 uint8_t family_bit(LinearComputeFamily family) {
@@ -281,6 +288,11 @@ select_psq8_gemm_config(const Psq8GemmSelectorInput& input) {
         uint32_t cfg;
         if (ov >= 0) {
             cfg = static_cast<uint32_t>(ov);
+        } else if (input.rows < ps::kernel::kPsq8GemmPrefill2dLargeMinRows &&
+                   input.out_features >= ps::kernel::kPsq8GemmPrefill2dLargeMinOutFeatures &&
+                   static_cast<uint64_t>(input.rows) * input.out_features <=
+                       ps::kernel::kPsq8GemmPrefill2dSmallWorkElements) {
+            cfg = 0u;
         } else {
             const bool ob128 =
                 (input.out_features % ps::kernel::kPsq8GemmPrefill2dBlock128) == 0u;

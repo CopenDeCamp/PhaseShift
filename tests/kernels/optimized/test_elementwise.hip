@@ -432,6 +432,16 @@ int main(int argc, char** argv) {
         {"scale-27b-pad", Op::Scale, 2048, 4, 2064, 2064, 0, 0.5f, 157},
         {"silu-f2b-actual-4b-gdn", Op::SiluF2B, 8192, 1, 8192, 8192, 0, 0.0f, 160},
         {"silu-b2f-actual-4b-gdn", Op::SiluB2F, 4096, 1, 4096, 4096, 0, 0.0f, 161},
+        {"tp2-silu-b2f-3072-r1", Op::SiluB2F, 3072, 1, 3072, 3072, 0, 0.0f, 170},
+        {"tp2-silu-b2f-3072-r64", Op::SiluB2F, 3072, 64, 3072, 3072, 0, 0.0f, 171},
+        {"tp2-silu-f2b-5120-r1", Op::SiluF2B, 5120, 1, 5120, 5120, 0, 0.0f, 172},
+        {"tp2-silu-f2b-5120-r64", Op::SiluF2B, 5120, 64, 5120, 5120, 0, 0.0f, 173},
+        {"tp2-sigmoid-3072-r1", Op::Sigmoid, 3072, 1, 3072, 3072, 0, 0.0f, 174},
+        {"tp2-mul-3072-r1", Op::Mul, 3072, 1, 3072, 3072, 0, 0.0f, 175},
+        {"tp2-swiglu-8704-r1", Op::Swiglu, 8704, 1, 8704, 8704, 0, 0.0f, 176},
+        {"tp2-swiglu-8704-r64", Op::Swiglu, 8704, 64, 8704, 8704, 0, 0.0f, 177},
+        {"tp2-scale-1024-r1", Op::Scale, 1024, 1, 1024, 1024, 0, 0.5f, 178},
+        {"tp2-split-int-1536-r8", Op::SplitInterleaved, 1536, 8, 3072, 3072, 256, 0.0f, 179},
     };
     int fail = 0;
     for (const auto& c : cases) {

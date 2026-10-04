@@ -467,6 +467,45 @@ int main() {
         d.free_all();
     }
 
+    Shapes sh_tp2{};
+    sh_tp2.key_heads = 8u;
+    sh_tp2.num_v_heads = 24u;
+    for (uint32_t nreq : {1u, 4u}) {
+        Buf d;
+        if (!setup(d, sh_tp2, nreq, 3100u + nreq)) {
+            std::printf("FAIL: setup tp2 nreq=%u\n", nreq);
+            d.free_all();
+            failed++;
+            continue;
+        }
+        run_sequence(d, sh_tp2, nreq, 1u, false, stream);
+        run_sequence(d, sh_tp2, nreq, 16u, false, stream);
+        run_sequence(d, sh_tp2, nreq, 16u, true, stream);
+        d.free_all();
+    }
+    for (uint32_t rows : {2u, 4u, 8u}) {
+        Buf d;
+        if (!setup(d, sh_tp2, rows, 3200u + rows)) {
+            std::printf("FAIL: setup tp2 serial rows=%u\n", rows);
+            d.free_all();
+            failed++;
+            continue;
+        }
+        run_serial_equiv(d, sh_tp2, rows, stream);
+        d.free_all();
+    }
+    for (uint32_t rows : {2u, 8u}) {
+        Buf d;
+        if (!setup(d, sh_tp2, rows, 3300u + rows)) {
+            std::printf("FAIL: setup tp2 multirow rows=%u\n", rows);
+            d.free_all();
+            failed++;
+            continue;
+        }
+        run_multirow_equiv(d, sh_tp2, rows, false, 0u, stream);
+        d.free_all();
+    }
+
     ps::gpu::discard_cleanup_result(hipStreamDestroy(stream));
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;

@@ -3,6 +3,7 @@
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
 #include <phaseshift/models/qwen35/runtime/gdn_recurrence_selector.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
+#include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
 #include <hip/hip_runtime.h>
 #include <cstdint>
@@ -291,6 +292,7 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
     if (resolved.value() != PhysicalResolveStatus::Applicable)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
 
+    bool ran_f32 = launch.variant == PhysicalGdnRecurrenceVariant::F32;
     hipError_t herr = hipSuccess;
     switch (launch.variant) {
         case PhysicalGdnRecurrenceVariant::DecodeRowsExact:
@@ -314,10 +316,13 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
             break;
         default:
             herr = ::ps::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
+            ran_f32 = true;
             break;
     }
-    if (herr == hipErrorNotSupported)
+    if (herr == hipErrorNotSupported) {
         herr = ::ps::kernel::launch_gdn_recurrence_f32(launch.kernel, stream);
+        ran_f32 = true;
+    }
     if (herr != hipSuccess)
         return Status::hip_error("gdn-recurrence optimized launch",
                                  hipGetErrorString(herr), __FILE__, __LINE__);
@@ -325,6 +330,10 @@ Result<OptimizedLaunchResult> try_launch_gdn_recurrence(
         launch.variant == PhysicalGdnRecurrenceVariant::Decode1Serial
             ? launch.rows
             : 1u;
+    if (ran_f32)
+        record_correctness_fallback(b.kernel_id);
+    else
+        gdn_recurrence_optimized_hit();
     record_physical_launch(physical_launches);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1u};

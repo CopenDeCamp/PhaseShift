@@ -92,6 +92,7 @@ hipError_t launch_gemm_psq8_w8a8_wmma_auto(
     uint32_t activation_code_stride_bytes,
     uint32_t activation_scale_stride_bytes,
     uint32_t output_row_stride,
-    hipStream_t stream);
+    hipStream_t stream,
+    bool* decode1_used = nullptr);
 
 }  // namespace ps::kernel

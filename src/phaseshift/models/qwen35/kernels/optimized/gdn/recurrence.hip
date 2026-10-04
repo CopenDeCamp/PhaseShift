@@ -1248,8 +1248,10 @@ hipError_t launch_gdn_recurrence_f32_wmma_serial(
 
 bool gdn_recurrence_decode1_supported(const GdnRecurrenceArgs& args) {
     if (!gdn_recurrence_lossy_enabled()) return false;
-    return args.head_k == gdngfx12::kWk && args.head_v == 128u &&
-           args.key_heads == 16u && args.num_v_heads == 48u;
+    const bool tp1 = args.key_heads == 16u && args.num_v_heads == 48u;
+    const bool tp2 = args.key_heads == 8u && args.num_v_heads == 24u;
+    if (!tp1 && !tp2) return false;
+    return args.head_k == gdngfx12::kWk && args.head_v == 128u;
 }
 
 hipError_t launch_gdn_recurrence_f32_wmma_decode1(
@@ -1326,7 +1328,7 @@ hipError_t launch_gdn_recurrence_f32_wmma_decode_rows_exact(
 
 bool gdn_recurrence_commit_supported(const GdnRecurrenceArgs& args) {
     return args.head_k == gdngfx12::kWk && args.head_v == 128u &&
-           args.key_heads == 16u && args.num_v_heads == 48u;
+           args.num_v_heads != 0u;
 }
 
 hipError_t launch_gdn_recurrence_f32_wmma_commit(

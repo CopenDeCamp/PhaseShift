@@ -30,6 +30,10 @@
 - [mtp/optimization_history.md](mtp/optimization_history.md) — MTP の correctness / acceptance / Gate 検証
 - [dflash2/optimization_history.md](dflash2/optimization_history.md) — DFlash2 / speculative verify / INT2 coarse head
 
+## Tensor Parallel
+
+- [tp_exec2_p2p.md](tp_exec2_p2p.md) — R9700 PCIe P2P の切り分け（peer read 不安定 / peer write 安定）と peer-write transport の採用
+
 ## DFlash2 / speculative decode
 
 - [dflash2/dflash2.md](dflash2/dflash2.md) — DFlash2 drafter の Gate 別検証記録（正本）

@@ -20,7 +20,8 @@ GdnRecurrenceImplementation
 select_gdn_recurrence_implementation(const GdnRecurrenceSelectorInput& in) {
     constexpr Rule kRule_4b{16u, 32u, 128u, 128u, 1u, 2048u, 1u, 2048u, 1u, 2048u};
     constexpr Rule kRule_27b{16u, 48u, 128u, 128u, 1u, 2048u, 1u, 2048u, 1u, 2048u};
-    const Rule rules[] = {kRule_4b, kRule_27b};
+    constexpr Rule kRule_27b_tp2{8u, 24u, 128u, 128u, 1u, 2048u, 1u, 2048u, 1u, 2048u};
+    const Rule rules[] = {kRule_4b, kRule_27b, kRule_27b_tp2};
     for (const auto& r : rules) {
         if (in.key_heads != r.key_heads || in.num_v_heads != r.num_v_heads ||
             in.head_k != r.head_k || in.head_v != r.head_v) {

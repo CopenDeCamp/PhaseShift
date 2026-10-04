@@ -5,6 +5,7 @@
 #include <phaseshift/quantization/psq/quant_preshuffle.h>
 #include <phaseshift/quantization/fp8/block128_native.h>
 #include <phaseshift/quantization/mxfp4/mxfp4_native.h>
+#include <phaseshift/weights/canonical_partition.h>
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
@@ -166,7 +167,23 @@ Result<MatrixWeight> load_quantized_matrix_impl(
 {
     auto view_result = reader.resolve(name);
     if (!view_result.ok()) return view_result.status();
-    const QuantizedTensorView& v = view_result.value();
+
+    OwnedCanonicalTensor partitioned_payload;
+    QuantizedTensorView partitioned_view;
+    const QuantizedTensorView* resolved = &view_result.value();
+    const TensorPartitionDesc* applied_partition = nullptr;
+    if (options.partition_plan != nullptr) {
+        auto it = options.partition_plan->tensors.find(resolved->name);
+        if (it != options.partition_plan->tensors.end()) {
+            Status partition_status = materialize_rank_local_canonical(
+                it->second, *resolved, partitioned_payload, partitioned_view);
+            if (!partition_status.ok()) return partition_status;
+            resolved = &partitioned_view;
+            applied_partition = &it->second;
+        }
+    }
+
+    const QuantizedTensorView& v = *resolved;
 
     if (v.logical_shape.size() != 2) {
         return Status::invalid_argument(
@@ -183,6 +200,7 @@ Result<MatrixWeight> load_quantized_matrix_impl(
     MatrixWeight w;
     w.rows = static_cast<uint32_t>(m);
     w.cols = static_cast<uint32_t>(k);
+    if (applied_partition != nullptr) w.partition = *applied_partition;
 
     if (v.encoding == QuantizedEncoding::Bf16) {
         if (v.codes.data != nullptr || v.metadata1.data != nullptr) {
@@ -683,6 +701,11 @@ Result<MatrixWeight> load_bf16_matrix(
     hipStream_t stream,
     const WeightLoadOptions& options)
 {
+    if (options.partition_plan != nullptr) {
+        return Status::unsupported(
+            "tensor partition is not supported for raw safetensors matrix load",
+            __FILE__, __LINE__);
+    }
     (void)options;
     return load_bf16_matrix_raw(collection, name, arena, stream);
 }
@@ -701,11 +724,25 @@ Result<gpu::Tensor> load_quantized_small(
     const QuantizedModelReader& reader,
     const std::string& name,
     gpu::GpuArena& arena,
-    hipStream_t stream)
+    hipStream_t stream,
+    const WeightLoadOptions& options)
 {
     auto view_result = reader.resolve(name);
     if (!view_result.ok()) return view_result.status();
-    const QuantizedTensorView& v = view_result.value();
+
+    OwnedCanonicalTensor partitioned_payload;
+    QuantizedTensorView partitioned_view;
+    const QuantizedTensorView* resolved = &view_result.value();
+    if (options.partition_plan != nullptr) {
+        auto it = options.partition_plan->tensors.find(resolved->name);
+        if (it != options.partition_plan->tensors.end()) {
+            Status partition_status = materialize_rank_local_canonical(
+                it->second, *resolved, partitioned_payload, partitioned_view);
+            if (!partition_status.ok()) return partition_status;
+            resolved = &partitioned_view;
+        }
+    }
+    const QuantizedTensorView& v = *resolved;
 
     if (v.encoding != QuantizedEncoding::Bf16) {
         return Status::invalid_argument(

@@ -89,6 +89,25 @@ int main() {
               PagedAttentionImplementation::Correctness,
           "fp8 unknown q_heads/kv_heads -> Correctness");
 
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 1, 64) ==
+              PagedAttentionImplementation::Optimized,
+          "27b tp2 decode rows=1 vis=64 -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 64, 64) ==
+              PagedAttentionImplementation::Optimized,
+          "27b tp2 prefill rows=64 vis=64 -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 1, 2048) ==
+              PagedAttentionImplementation::Optimized,
+          "27b tp2 decode rows=1 vis=2048 -> Optimized");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 2049, 64) ==
+              PagedAttentionImplementation::Correctness,
+          "27b tp2 rows=2049 above measured -> Correctness");
+    check(sel(KVCacheDType::BF16, ValueDType::F32, 12, 2, 256, 16, 1, 262145) ==
+              PagedAttentionImplementation::Correctness,
+          "27b tp2 vis=262145 above measured -> Correctness");
+    check(sel(KVCacheDType::PSQ4_W32, ValueDType::F32, 12, 2, 256, 16, 1, 64) ==
+              PagedAttentionImplementation::Correctness,
+          "27b tp2 psq4 kv not enabled -> Correctness");
+
     std::printf("\nResults: %d passed, %d failed\n", passed, failed);
     return failed > 0 ? 1 : 0;
 }

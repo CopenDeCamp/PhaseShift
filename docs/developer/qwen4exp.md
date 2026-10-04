@@ -390,6 +390,17 @@ moe_out = routed_acc + shared
 
 MoE 層に dense FFN は存在しない。routed + shared のみである。
 
+### 7.5 tensor partition（EP 分散の表現）
+
+routed expert の fused tensor は、将来の EP 分散のために
+`TensorPartitionDesc` の axis=0 single-range partition で表現できる
+（例: `gate_up_proj` `[512,1280,2560]` を EP=2 で
+`ranges = {{0,256}}` / `{{256,256}}`、local `[256,1280,2560]`）。
+descriptor と N-D canonical slicing は generic weights layer にあり、
+Qwen4Exp 専用ではない。詳細は
+[tensor_partition.md](tensor_partition.md) を参照。
+現時点の contract は表現のみであり、EP / multi-GPU execution は未実装である。
+
 ---
 
 ## 8. Gated Residual / HyperConnection
@@ -646,3 +657,13 @@ n-gram context はトークン ID (integer) を保持するため dtype が異�
 `lower_to_primitives` は QSA attention の gated query (`q_proj` 2x + sigmoid gate) と
 partial rotary をすでに扱う。GDN の conv / recurrence / grouped RMSNorm (ONE_PLUS) も
 primitive として存在する。これらは geometry と activation の差分で再利用する。
+
+## 15. tensor partition / TP execution
+
+routed expert を将来 EP で分散する場合の weight storage geometry の正本は
+[tensor_partition.md](tensor_partition.md) である
+（`TensorPartitionDesc` による axis=0 single-range partition で表現できる）。
+Qwen3.8 Dense 向けの TP execution runtime は
+[tensor_parallel_execution.md](tensor_parallel_execution.md) を参照。
+現時点で Qwen3.8-Flash-Next / MoE / EP の execution は未実装である。
+

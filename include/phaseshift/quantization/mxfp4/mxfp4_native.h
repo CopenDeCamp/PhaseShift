@@ -38,6 +38,10 @@ struct Mxfp4NativeHost {
     Mxfp4NativeView view() const;
 };
 
+// Input contract: the canonical view is the whole logical tensor owned by the
+// caller. Under tensor parallelism that tensor is already rank-local; callers
+// partition the global canonical payload before calling this function, and
+// this function never sees tp_rank / tp_size.
 bool preshuffle_mxfp4_native(const Mxfp4CanonicalView& v, Mxfp4NativeHost& out);
 
 }  // namespace ps::quantization::mxfp4

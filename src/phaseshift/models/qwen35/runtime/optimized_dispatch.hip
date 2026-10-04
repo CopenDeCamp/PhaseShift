@@ -49,6 +49,7 @@ namespace {
  std::atomic<uint32_t> g_gdn_conv_optimized_count{0};
  std::atomic<uint32_t> g_rope_optimized_count{0};
  std::atomic<uint32_t> g_output_gather_optimized_count{0};
+ std::atomic<uint32_t> g_activation_quantize_optimized_count{0};
  std::atomic<uint32_t> g_fallback_counts[::ps::runtime::kernel_id_count()];
 
  bool kernel_trace_enabled() {
@@ -60,7 +61,7 @@ namespace {
         static bool registered = false;
         if (!registered) {
             std::atexit([]() {
-                    std::printf("KERNEL_TRACE rmsnorm_optimized=%u kv_append=%u paged_attention=%u gdn_recurrence=%u elementwise=%u embedding=%u sampling=%u l2_normalize=%u gdn_conv=%u rope=%u output_gather=%u\n",
+                    std::printf("KERNEL_TRACE rmsnorm_optimized=%u kv_append=%u paged_attention=%u gdn_recurrence=%u elementwise=%u embedding=%u sampling=%u l2_normalize=%u gdn_conv=%u rope=%u output_gather=%u activation_quantize=%u\n",
                      g_rmsnorm_optimized_count.load(std::memory_order_relaxed),
                      g_kv_append_optimized_count.load(std::memory_order_relaxed),
                      g_paged_attention_optimized_count.load(std::memory_order_relaxed),
@@ -71,7 +72,8 @@ namespace {
                      g_l2_normalize_optimized_count.load(std::memory_order_relaxed),
                      g_gdn_conv_optimized_count.load(std::memory_order_relaxed),
                      g_rope_optimized_count.load(std::memory_order_relaxed),
-                     g_output_gather_optimized_count.load(std::memory_order_relaxed));
+                     g_output_gather_optimized_count.load(std::memory_order_relaxed),
+                     g_activation_quantize_optimized_count.load(std::memory_order_relaxed));
                 for (uint32_t k = 0u; k < ::ps::runtime::kernel_id_count(); ++k) {
                     const uint32_t c = g_fallback_counts[k].load(std::memory_order_relaxed);
                     if (c != 0u)
@@ -106,13 +108,14 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize_a8(
     if (resolved.value() != PhysicalResolveStatus::Applicable)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
     hipError_t herr = hipSuccess;
+    bool specialized = false;
     if (launch.kind == PhysicalActivationQuantizeKind::E4M3)
         herr = ::ps::kernel::launch_activation_quantize_e4m3(
             reinterpret_cast<const ::ps::bf16_t*>(launch.input),
             reinterpret_cast<uint8_t*>(launch.codes),
             reinterpret_cast<float*>(launch.scales), launch.rows, launch.k,
             launch.k_padded, launch.input_row_stride, launch.code_row_stride,
-            launch.scale_row_stride, stream);
+            launch.scale_row_stride, stream, &specialized);
     else
         herr = ::ps::kernel::launch_activation_quantize_i8_row(
             reinterpret_cast<const ::ps::bf16_t*>(launch.input),
@@ -123,6 +126,10 @@ Result<OptimizedLaunchResult> try_launch_activation_quantize_a8(
     if (herr != hipSuccess)
         return Status::hip_error("act-quant optimized launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
+    if (launch.kind == PhysicalActivationQuantizeKind::E4M3 && !specialized)
+        record_correctness_fallback(b.kernel_id);
+    else if (launch.kind == PhysicalActivationQuantizeKind::E4M3)
+        g_activation_quantize_optimized_count.fetch_add(1u, std::memory_order_relaxed);
     record_physical_launch(1);
     record_optimized_op();
     return OptimizedLaunchResult{OptimizedLaunchKind::Launched, 1};
@@ -243,6 +250,8 @@ Result<OptimizedLaunchResult> try_launch_linear_psq4(
     if (herr != hipSuccess)
         return Status::hip_error("psq4 gemm launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
+    if (launch.rows == 1u && !launch.use_decode1)
+        record_correctness_fallback(b.kernel_id);
     linear_record_hit(LinearFamilyRef::Fp4, launch.rows);
     record_physical_launch(1);
     record_optimized_op();
@@ -331,6 +340,7 @@ Result<OptimizedLaunchResult> try_launch_linear_psq8(
         out_bf16 ? ::ps::kernel::Psq8GemmOutputDType::BF16
                  : ::ps::kernel::Psq8GemmOutputDType::F32;
     hipError_t herr;
+    bool decode1_used = false;
     herr = ::ps::kernel::launch_gemm_psq8_w8a8_wmma_auto(
             *config,
             static_cast<const uint8_t*>(e.codes),
@@ -339,12 +349,14 @@ Result<OptimizedLaunchResult> try_launch_linear_psq8(
             out.ptr, odt,
             rows, e.rows, wkp,
             sstride, b.activation_code_stride, b.activation_scale_stride,
-            out.row_stride, stream);
+            out.row_stride, stream, &decode1_used);
     if (herr == hipErrorNotSupported)
         return OptimizedLaunchResult{OptimizedLaunchKind::NotApplicable, 0};
     if (herr != hipSuccess)
         return Status::hip_error("psq8 gemm launch", hipGetErrorString(herr),
                                    __FILE__, __LINE__);
+    if (rows == 1u && !decode1_used)
+        record_correctness_fallback(b.kernel_id);
     linear_record_hit(LinearFamilyRef::Fp8, rows);
     record_physical_launch(1);
     record_optimized_op();
@@ -689,6 +701,14 @@ void record_correctness_fallback(::ps::runtime::KernelId id) {
         g_fallback_counts[k].fetch_add(1u, std::memory_order_relaxed);
 }
 
+void rope_optimized_hit() {
+    g_rope_optimized_count.fetch_add(1u, std::memory_order_relaxed);
+}
+
+void gdn_recurrence_optimized_hit() {
+    g_gdn_recurrence_optimized_count.fetch_add(1u, std::memory_order_relaxed);
+}
+
 uint32_t embedding_optimized_count() noexcept {
     return g_embedding_optimized_count.load(std::memory_order_relaxed);
 }
@@ -731,13 +751,8 @@ Result<OptimizedLaunchResult> try_launch_optimized(
         return try_launch_linear_bf16(program, b, ctx, stream);
     if (b.kernel_id == KernelId::RMS_NORM)
         return try_launch_rmsnorm(program, b, ctx, stream);
-    if (b.kernel_id == KernelId::ROPE) {
-        auto rp = try_launch_rope(program, dispatch_index, ctx, stream);
-        if (!rp.ok()) return rp.status();
-        if (rp.value().kind == OptimizedLaunchKind::Launched)
-            g_rope_optimized_count.fetch_add(1u, std::memory_order_relaxed);
-        return rp;
-    }
+    if (b.kernel_id == KernelId::ROPE)
+        return try_launch_rope(program, dispatch_index, ctx, stream);
     if (b.kernel_id == KernelId::OUTPUT_GATHER) {
         auto og = try_launch_output_gather(program, b, ctx, stream);
         if (!og.ok()) return og.status();
