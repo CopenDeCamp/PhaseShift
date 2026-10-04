@@ -180,6 +180,86 @@ round1 後も `KERNEL_TRACE_FALLBACK` が残っていたため、各 dispatch �
   paged-attention の envelope 警告 0。
 - correctness gate 4/4 PASS、required acceptance 124/124 PASS。
 
+## 第4回: decode unroll / Prefill2D tile sweep（step2〜4、変更なし）
+
+`phaseshift-bench gemm` の `--psq4-unroll` / `--psq8-unroll` /
+`--psq4-prefill2d` / `--psq8-prefill2d` を使い、TP=2 の実 shape を測定した。
+いずれも **既定の auto が全形状で最優勝**であったため selector は変更していない。
+5反復（決定用の 3072 は20回・交互ペア）の p50 中央値で、値は µs。
+
+### step2: PSQ4 decode1 unroll（rows=1）
+
+| N:K | auto | u=2 | u=4 | u=8 | u=16 | auto の値 |
+|---|---:|---:|---:|---:|---:|---|
+| 512:5120 | 8.56 | 17.03 | 12.96 | 9.66 | **8.51** | 16（=最適） |
+| 3072:5120 | 13.87 | 26.05 | 18.01 | 13.92 | **13.72** | 8（u16 が −2%） |
+| 5120:3072 | **13.00** | 18.39 | 14.31 | 13.25 | 13.53 | 8（=最適） |
+| 5120:5120 | 26.97 | 31.25 | 27.66 | 26.96 | 28.18 | 8（=最適） |
+| 5120:8704 | **43.23** | 46.08 | 43.52 | 43.24 | 43.76 | 8（=最適） |
+| 8704:5120 | **43.00** | 47.10 | 43.93 | 43.00 | 44.26 | 8（=最適） |
+
+追加で閾値候補を測定:
+
+```text
+N=2560 (K=4096/5120/9216)  u8 の方が 1.0〜2.8% 速い
+N=4096 (K=2560/5120)       u8 の方が 1.3〜3.7% 速い
+N=3072 (K=5120)            20回ペア測定で u16 が 19/20 勝ち、中央値差 −0.72%
+```
+
+`out_features` 単独では 2560→u8 / 3072→u16 と非単調になるため、閾値では表現できない。
+また 3072 の優位は 0.14 µs/13.9 µs（0.7〜2%）で、該当 shape は token あたり16回
+出現するため E2E への影響は約 0.004% と測定誤差以下。**変更していない**。
+
+u=2 は全形状で −8〜−98%、u=4 も全面的に劣後。既定は u=16（N≤2048）/ u=8（それ以外）のまま。
+
+### step3: PSQ8 decode1 unroll（rows=1）
+
+現在 `psq8_decode1_unroll()` は shape を見ずに 8 を返すが、これが最適だった。
+
+```text
+3072:5120   u2 34.84  u4 30.88  u8 30.52  u16 30.36   → 差 0.5% 以下
+5120:3072   u2 33.63  u4 30.77  u8 30.42  u16 30.54   → 8 が最良
+5120:5120   u2 52.14  u4 48.30  u8 47.58  u16 47.66   → 8 が最良
+5120:8704   u2 78.02  u4 77.67  u8 77.63  u16 77.61   → 実質同値
+```
+
+**変更なし。**
+
+### step4: Prefill2D tile（rows=2048 = ctx2048 prefill）
+
+PSQ4（cfg 0=64x64 / 1=K128N64 / 2=K64N128 / 3=K128N128 / -1=auto）:
+
+```text
+N:K          auto      c0       c1       c2       c3     最良
+3072:5120    451.9   493.5    485.8    461.0    453.9    auto(=c3)
+512:5120      77.3    80.8     77.2     93.9     83.3    auto(=c1 K128N64)
+5120:3072    467.9   508.5    500.9    472.9    467.9    auto(=c3)
+5120:5120    761.2   826.2    819.3    769.0    765.1    auto(=c3)
+5120:8704   1393.0  1468.6   1437.5   1423.0   1394.8    auto(=c3)
+8704:5120   1409.8  1487.3   1452.5   1433.4   1413.9    auto(=c3)
+```
+
+PSQ8（cfg 0=64x64 / 1=K64N128 / 2=K128N128 / -1=auto）:
+
+```text
+N:K          auto      c0       c1       c2     最良
+3072:5120    458.1   476.0    460.3    457.5    実質 auto=c2
+5120:3072    470.6   491.3    473.0    471.7    auto(=c2)
+5120:5120    769.7   793.1    771.9    769.5    実質 auto=c2
+5120:8704   1433.6  1451.6   1436.3   1434.3    auto(=c2)
+```
+
+本番 selector と bench auto が一致することも確認済み
+（`kPsqGemmPrefill2dMinOutFeatures = 512` なので 512:5120 でも両者とも K128N64、
+それ以外は両者とも K128N128）。**変更なし。**
+
+### 第4回の結論
+
+「TP2 geometry が未チューニング」という仮説は、
+**decode1 unroll / Prefill2D tile という3つの knob については成立しない**。
+既定値は TP2 実 shape で既に最良（または 0.7% 以内の僅差）。
+残る価値は step5 の TP combine 実測と step6 の collective 削減 / overlap にある。
+
 ### 現在残るもの
 
 `KV_APPEND / ROPE / GDN conv1d / L2_NORMALIZE / RMS_NORM / elementwise` の
@@ -188,15 +268,12 @@ correctness fallback は 0 で、GDN decode1 も TP=2 へ開放済み。
 
 次の候補（未着手）:
 
-1. TP2 PSQ4 decode の unroll（U2/U4/U8/U16）を TP2 実 shape で再 sweep。
-   現状の境界 `out_features <= 2048 ? U16 : U8` は TP1 shape 向け。
-2. TP2 PSQ8 decode の unroll。現在 `psq8_decode1_unroll()` は shape を見ずに
-   8 固定で、U2/U4/U8/U16 の余地がある。
-3. ctx2048 での PSQ4/PSQ8 Prefill2D tile sweep
-   （`PHASESHIFT_PSQ4_PREFILL_2D` / `PHASESHIFT_PSQ8_PREFILL_2D` でコード変更なし）。
-4. TP combine の総時間計測（最大 64 層 × 2 = 128 回/token、rows=1 で
-   約 88us/combine なら約 11ms/token の見込み）と、その後の
-   collective 数削減 / compute-communication overlap。
+1. TP combine の総時間計測（最大 64 層 × 2 = 128 回/token、rows=1 で
+   約 88us/combine なら約 11ms/token の見込み）。
+2. その後、collective 数削減（2 collective/layer → 1 など）と
+   compute-communication overlap。decode の 26.5ms/token に対し
+   collective 推計 11ms は約 4割で、現時点で最大の残課題。
+3. RCCL backend（`RcclTpTransport`）。
 
 ## 変更ファイル
 
