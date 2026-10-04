@@ -117,6 +117,8 @@ public:
     Status on_sequence_created(const PagedSequenceState& source) override;
     Status on_sequence_released(const PagedSequenceState& source) override;
     Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch) override;
+    Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch,
+                                            const ExecuteBatchOptions* per_rank) override;
 
     void abort(const Status& reason) noexcept;
     std::string debug_report() const;
@@ -126,6 +128,7 @@ private:
         std::mutex mutex;
         std::condition_variable cv;
         const ScheduledBatch* job = nullptr;
+        const ExecuteBatchOptions* options = nullptr;
         bool job_pending = false;
         bool stop = false;
         bool done = true;
@@ -145,7 +148,8 @@ private:
     Status initialize(const TpCoordinatorConfig& config);
     void worker_loop(std::size_t rank);
     Status run_rank_step(std::size_t rank, const ScheduledBatch& batch,
-                         BatchExecutionOutput& output);
+                         BatchExecutionOutput& output,
+                         const ExecuteBatchOptions* options);
 
     std::vector<int> devices_;
     std::vector<std::unique_ptr<TpRankRuntime>> ranks_;

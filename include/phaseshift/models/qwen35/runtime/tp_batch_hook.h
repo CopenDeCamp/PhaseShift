@@ -18,6 +18,9 @@ public:
     virtual Status on_sequence_released(const PagedSequenceState& source) = 0;
 
     virtual Result<BatchExecutionOutput> on_execute(const ScheduledBatch& batch) = 0;
+
+    virtual Result<BatchExecutionOutput> on_execute(
+        const ScheduledBatch& batch, const ExecuteBatchOptions* per_rank) = 0;
 };
 
 }

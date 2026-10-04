@@ -117,7 +117,9 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     GdnStatePool& gdn_pool,
     gpu::GpuArena& arena,
     const DFlash2SpecDecoderConfig& config,
-    hipStream_t stream) {
+    hipStream_t stream,
+    const std::vector<DFlash2GdnRankBinding>* tp_ranks,
+    TpBatchHook* tp_hook) {
     if (target.model == nullptr) {
         return Status::invalid_state("create_dflash2_spec_decoder: target model is null",
                                      __FILE__, __LINE__);
@@ -178,17 +180,29 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     decoder.context = &context;
     decoder.sequence = &sequence;
     decoder.stream = stream;
-    decoder.gdn_ranks.resize(1u);
-    DFlash2GdnRankState& g0 = decoder.gdn_ranks[0];
-    g0.pool = &gdn_pool;
-    g0.stream = stream;
-    if (hipGetDevice(&g0.device) != hipSuccess) g0.device = 0;
+    decoder.tp_hook = tp_hook;
+    std::vector<DFlash2GdnRankBinding> bindings;
+    if (tp_ranks != nullptr && !tp_ranks->empty()) {
+        bindings = *tp_ranks;
+    } else {
+        int dev = 0;
+        if (hipGetDevice(&dev) != hipSuccess) dev = 0;
+        bindings.push_back(DFlash2GdnRankBinding{&gdn_pool, &arena, stream, dev});
+    }
+    decoder.gdn_ranks.resize(bindings.size());
+    for (std::size_t r = 0; r < bindings.size(); ++r) {
+        DFlash2GdnRankState& g = decoder.gdn_ranks[r];
+        g.pool = bindings[r].pool;
+        g.stream = bindings[r].stream;
+        g.device = bindings[r].device;
+    }
     decoder.config = config;
     decoder.hidden_size = static_cast<uint32_t>(dcfg.hidden_size);
     decoder.device_token_bridge =
         env_flag_enabled("PHASESHIFT_DFLASH2_DEVICE_TOKEN_BRIDGE", true);
     decoder.host_proposal_visibility =
         env_flag_enabled("PHASESHIFT_DFLASH2_HOST_PROPOSAL_D2H", false);
+    if (tp_hook != nullptr) decoder.device_token_bridge = false;
 
     {
         auto verify_alloc = arena.allocate_aligned(
@@ -221,88 +235,99 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
         decoder.verify_stop_event = events[3];
     }
 
-    g0.conv_bytes = spec_gdn_conv_bytes(gdn_pool);
-    g0.rec_bytes = spec_gdn_recurrent_bytes(gdn_pool);
     const bool compact_requested =
         env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_COMMIT", true);
     const bool compact_diag = env_flag_enabled("PHASESHIFT_DFLASH2_GDN_COMPACT_DIAG", false);
     const char* rerun_env = std::getenv("PHASESHIFT_DFLASH2_GDN_RERUN_REFERENCE");
     decoder.gdn_rerun_reference =
         rerun_env != nullptr && rerun_env[0] != '\0' && rerun_env[0] != '0';
-    uint32_t history_rows = config.num_drafts;
-    const GdnStatePoolDeviceView pool_view = gdn_pool.device_view();
-    if (decoder.gdn_rerun_reference || compact_requested) {
-        if (g0.conv_bytes != 0u) {
-            auto conv_alloc = arena.allocate_aligned(g0.conv_bytes, 256u);
-            if (!conv_alloc.ok()) return conv_alloc.status();
-            g0.conv_snapshot = conv_alloc.release().data();
-            decoder.gdn_snapshot_bytes += g0.conv_bytes;
-        }
-        if (g0.rec_bytes != 0u) {
-            auto rec_alloc = arena.allocate_aligned(g0.rec_bytes, 256u);
-            if (!rec_alloc.ok()) return rec_alloc.status();
-            g0.rec_snapshot = rec_alloc.release().data();
-            decoder.gdn_snapshot_bytes += g0.rec_bytes;
-        }
-    }
-    if (!decoder.gdn_rerun_reference || compact_requested) {
-        auto history_result = create_gdn_spec_history(
-            arena, gdn_pool, history_rows, !compact_requested || compact_diag);
-        if (!history_result.ok()) return history_result.status();
-        g0.history = history_result.release();
-        decoder.gdn_history_enabled = true;
-    }
-    if (compact_requested) {
-        const uint64_t states = pool_view.num_gdn_states;
-        const bool diag = compact_diag;
-        const uint64_t log_rows = kDFlash2SpecMaxVerifyRows;
-        const uint64_t vdim = static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
-        const uint64_t key_heads = tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16u;
-        const uint64_t qkdim = pool_view.num_v_heads * pool_view.head_k;
-        const uint64_t dper = log_rows * vdim;
-        const uint64_t kper = log_rows * qkdim;
-        const uint64_t aper = log_rows * pool_view.num_v_heads;
-        auto d_alloc = arena.allocate_aligned(states * dper * sizeof(float), 256u);
-        if (!d_alloc.ok()) return d_alloc.status();
-        g0.compact_delta = static_cast<float*>(d_alloc.release().data());
-        auto k_alloc = arena.allocate_aligned(states * kper * sizeof(float), 256u);
-        if (!k_alloc.ok()) return k_alloc.status();
-        g0.compact_k = static_cast<float*>(k_alloc.release().data());
-        auto a_alloc = arena.allocate_aligned(states * aper * sizeof(float), 256u);
-        if (!a_alloc.ok()) return a_alloc.status();
-        g0.compact_a = static_cast<float*>(a_alloc.release().data());
-        g0.compact_delta_layer_stride = dper;
-        g0.compact_k_layer_stride = kper;
-        g0.compact_a_layer_stride = aper;
-        decoder.gdn_key_heads = static_cast<uint32_t>(key_heads);
-        decoder.gdn_compact_bytes = states * (dper + kper + aper) * sizeof(float);
+    const uint32_t history_rows = config.num_drafts;
+    const bool diag = compact_diag;
+    decoder.gdn_key_heads =
+        static_cast<uint32_t>(tc.linear_num_key_heads != 0 ? tc.linear_num_key_heads : 16u);
 
-        auto req_alloc = arena.allocate_aligned(
-            sizeof(::ps::runtime::DeviceRequestDescriptor), 256u);
-        if (!req_alloc.ok()) return req_alloc.status();
-        g0.commit_request =
-            static_cast<::ps::runtime::DeviceRequestDescriptor*>(req_alloc.release().data());
-        ::ps::runtime::DeviceRequestDescriptor req{};
-        req.request_handle.slot = decoder.sequence->slot;
-        req.row_begin = 0u;
-        req.row_count = 0u;
-        const hipError_t req_err = hipMemcpy(g0.commit_request, &req, sizeof(req),
-                                             hipMemcpyHostToDevice);
-        if (req_err != hipSuccess) {
-            return Status::hip_error("create_dflash2_spec_decoder gdn commit request",
-                                     hipGetErrorString(req_err), __FILE__, __LINE__);
+    for (std::size_t r = 0; r < bindings.size(); ++r) {
+        DFlash2GdnRankState& g = decoder.gdn_ranks[r];
+        gpu::GpuArena& rank_arena = *bindings[r].arena;
+        GdnStatePool& rank_pool = *bindings[r].pool;
+        auto dev_scope = ps::gpu::ScopedDevice::create(g.device);
+        if (!dev_scope.ok()) return dev_scope.status();
+
+        g.conv_bytes = spec_gdn_conv_bytes(rank_pool);
+        g.rec_bytes = spec_gdn_recurrent_bytes(rank_pool);
+        const GdnStatePoolDeviceView pool_view = rank_pool.device_view();
+
+        if (decoder.gdn_rerun_reference || compact_requested) {
+            if (g.conv_bytes != 0u) {
+                auto conv_alloc = rank_arena.allocate_aligned(g.conv_bytes, 256u);
+                if (!conv_alloc.ok()) return conv_alloc.status();
+                g.conv_snapshot = conv_alloc.release().data();
+                decoder.gdn_snapshot_bytes += g.conv_bytes;
+            }
+            if (g.rec_bytes != 0u) {
+                auto rec_alloc = rank_arena.allocate_aligned(g.rec_bytes, 256u);
+                if (!rec_alloc.ok()) return rec_alloc.status();
+                g.rec_snapshot = rec_alloc.release().data();
+                decoder.gdn_snapshot_bytes += g.rec_bytes;
+            }
         }
-        if (diag && g0.rec_bytes != 0u) {
-            auto scratch = arena.allocate_aligned(g0.rec_bytes, 256u);
-            if (!scratch.ok()) return scratch.status();
-            g0.compact_scratch = static_cast<float*>(scratch.release().data());
-            decoder.gdn_compact_compare_remaining = 8u;
-            const std::size_t n = g0.rec_bytes / sizeof(float);
-            decoder.gdn_compact_host_a.assign(n, 0.0f);
-            decoder.gdn_compact_host_b.assign(n, 0.0f);
+        if (!decoder.gdn_rerun_reference || compact_requested) {
+            auto history_result = create_gdn_spec_history(
+                rank_arena, rank_pool, history_rows, !compact_requested || compact_diag);
+            if (!history_result.ok()) return history_result.status();
+            g.history = history_result.release();
+            decoder.gdn_history_enabled = true;
         }
-        decoder.gdn_compact_commit = true;
+        if (compact_requested) {
+            const uint64_t states = pool_view.num_gdn_states;
+            const uint64_t log_rows = kDFlash2SpecMaxVerifyRows;
+            const uint64_t vdim =
+                static_cast<uint64_t>(pool_view.num_v_heads) * pool_view.head_v;
+            const uint64_t qkdim = pool_view.num_v_heads * pool_view.head_k;
+            const uint64_t dper = log_rows * vdim;
+            const uint64_t kper = log_rows * qkdim;
+            const uint64_t aper = log_rows * pool_view.num_v_heads;
+            auto d_alloc = rank_arena.allocate_aligned(states * dper * sizeof(float), 256u);
+            if (!d_alloc.ok()) return d_alloc.status();
+            g.compact_delta = static_cast<float*>(d_alloc.release().data());
+            auto k_alloc = rank_arena.allocate_aligned(states * kper * sizeof(float), 256u);
+            if (!k_alloc.ok()) return k_alloc.status();
+            g.compact_k = static_cast<float*>(k_alloc.release().data());
+            auto a_alloc = rank_arena.allocate_aligned(states * aper * sizeof(float), 256u);
+            if (!a_alloc.ok()) return a_alloc.status();
+            g.compact_a = static_cast<float*>(a_alloc.release().data());
+            g.compact_delta_layer_stride = dper;
+            g.compact_k_layer_stride = kper;
+            g.compact_a_layer_stride = aper;
+            decoder.gdn_compact_bytes = states * (dper + kper + aper) * sizeof(float);
+
+            auto req_alloc = rank_arena.allocate_aligned(
+                sizeof(::ps::runtime::DeviceRequestDescriptor), 256u);
+            if (!req_alloc.ok()) return req_alloc.status();
+            g.commit_request =
+                static_cast<::ps::runtime::DeviceRequestDescriptor*>(req_alloc.release().data());
+            ::ps::runtime::DeviceRequestDescriptor req{};
+            req.request_handle.slot = decoder.sequence->slot;
+            req.row_begin = 0u;
+            req.row_count = 0u;
+            const hipError_t req_err = hipMemcpy(g.commit_request, &req, sizeof(req),
+                                                 hipMemcpyHostToDevice);
+            if (req_err != hipSuccess) {
+                return Status::hip_error("create_dflash2_spec_decoder gdn commit request",
+                                         hipGetErrorString(req_err), __FILE__, __LINE__);
+            }
+            if (diag && g.rec_bytes != 0u) {
+                auto scratch = rank_arena.allocate_aligned(g.rec_bytes, 256u);
+                if (!scratch.ok()) return scratch.status();
+                g.compact_scratch = static_cast<float*>(scratch.release().data());
+                decoder.gdn_compact_compare_remaining = 8u;
+                const std::size_t n = g.rec_bytes / sizeof(float);
+                decoder.gdn_compact_host_a.assign(n, 0.0f);
+                decoder.gdn_compact_host_b.assign(n, 0.0f);
+            }
+        }
     }
+    if (compact_requested) decoder.gdn_compact_commit = true;
 
     decoder.initialized = true;
     return decoder;
@@ -401,6 +426,35 @@ Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept {
     return first_error;
 }
 
+std::vector<ExecuteBatchOptions> build_gdn_options(DFlash2SpecDecoder& decoder,
+                                                  uint32_t capture_rows) {
+    std::vector<ExecuteBatchOptions> options(decoder.gdn_ranks.size());
+    for (std::size_t r = 0; r < decoder.gdn_ranks.size(); ++r) {
+        const DFlash2GdnRankState& g = decoder.gdn_ranks[r];
+        if (decoder.gdn_history_enabled) {
+            options[r].gdn_spec_history = gdn_spec_history_view(g.history, capture_rows);
+        }
+        if (decoder.gdn_compact_commit) {
+            options[r].gdn_compact.delta = g.compact_delta;
+            options[r].gdn_compact.k = g.compact_k;
+            options[r].gdn_compact.a = g.compact_a;
+            options[r].gdn_compact.delta_layer_stride = g.compact_delta_layer_stride;
+            options[r].gdn_compact.k_layer_stride = g.compact_k_layer_stride;
+            options[r].gdn_compact.a_layer_stride = g.compact_a_layer_stride;
+        }
+    }
+    return options;
+}
+
+Result<BatchExecutionOutput> run_target_batch(DFlash2SpecDecoder& decoder,
+                                              const ScheduledBatch& batch,
+                                              const std::vector<ExecuteBatchOptions>& options) {
+    if (decoder.tp_hook != nullptr) {
+        return decoder.tp_hook->on_execute(batch, options.data());
+    }
+    return execute_batch(*decoder.target, batch, decoder.stream, options[0]);
+}
+
 Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
@@ -454,7 +508,8 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
             masked ? decoder.constraint_mask_host.data() : nullptr,
             decoder.constraint_mask_words,
             final_chunk ? &decoder.sampling : nullptr, decoder.sample_index);
-        auto executed = execute_batch(*decoder.target, batch, decoder.stream);
+        const std::vector<ExecuteBatchOptions> poptions = build_gdn_options(decoder, 1u);
+        auto executed = run_target_batch(decoder, batch, poptions);
         if (!executed.ok()) return executed.status();
         BatchExecutionOutput output = executed.release();
 
@@ -600,7 +655,8 @@ Status run_single_target(
         *decoder.sequence, requests, &single, 1u, position, 1u, false,
         ::ps::runtime::VerifyNumericMode::Fast, TokenIdsLocation::Host, mask,
         decoder.constraint_mask_words, &decoder.sampling, decoder.sample_index);
-    auto executed = execute_batch(*decoder.target, batch, decoder.stream);
+    const std::vector<ExecuteBatchOptions> soptions = build_gdn_options(decoder, 1u);
+    auto executed = run_target_batch(decoder, batch, soptions);
     if (!executed.ok()) return executed.status();
     BatchExecutionOutput output = executed.release();
     int32_t sampled = -1;
@@ -828,21 +884,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                 TokenIdsLocation::Host, mask, decoder.constraint_mask_words,
                 &decoder.sampling, round_sample_index);
         }
-        std::vector<ExecuteBatchOptions> options(decoder.gdn_ranks.size());
-        for (std::size_t r = 0; r < decoder.gdn_ranks.size(); ++r) {
-            const DFlash2GdnRankState& g = decoder.gdn_ranks[r];
-            if (decoder.gdn_history_enabled) {
-                options[r].gdn_spec_history = gdn_spec_history_view(g.history, total_k);
-            }
-            if (decoder.gdn_compact_commit) {
-                options[r].gdn_compact.delta = g.compact_delta;
-                options[r].gdn_compact.k = g.compact_k;
-                options[r].gdn_compact.a = g.compact_a;
-                options[r].gdn_compact.delta_layer_stride = g.compact_delta_layer_stride;
-                options[r].gdn_compact.k_layer_stride = g.compact_k_layer_stride;
-                options[r].gdn_compact.a_layer_stride = g.compact_a_layer_stride;
-            }
-        }
+        std::vector<ExecuteBatchOptions> options = build_gdn_options(decoder, total_k);
         if (want_timing) {
             const hipError_t start_err =
                 hipEventRecord(decoder.verify_start_event, decoder.stream);
@@ -852,17 +894,42 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             }
             verify_events_recorded = true;
         }
-        auto submitted = submit_batch(*decoder.target, batch, decoder.stream, options[0]);
-        if (!submitted.ok()) return submitted.status();
-        PendingBatch pending = submitted.release();
-        if (want_timing) {
-            const hipError_t stop_err =
-                hipEventRecord(decoder.verify_stop_event, decoder.stream);
-            if (stop_err != hipSuccess) {
-                return Status::hip_error("dflash2 verify stop event",
-                                         hipGetErrorString(stop_err), __FILE__, __LINE__);
+        if (decoder.tp_hook != nullptr) {
+            auto executed = decoder.tp_hook->on_execute(batch, options.data());
+            if (!executed.ok()) return executed.status();
+            BatchExecutionOutput hook_output = executed.release();
+            if (want_timing) {
+                const hipError_t stop_err =
+                    hipEventRecord(decoder.verify_stop_event, decoder.stream);
+                if (stop_err != hipSuccess) {
+                    return Status::hip_error("dflash2 verify stop event",
+                                             hipGetErrorString(stop_err), __FILE__,
+                                             __LINE__);
+                }
             }
-        }
+            {
+                ScopedTimer tc(want_timing ? &tm->decision_copy_ms : nullptr);
+                const hipError_t err = hipMemcpy(
+                    sampled.data(), hook_output.sampled_tokens.data<int32_t>(),
+                    static_cast<std::size_t>(total_k + 1u) * sizeof(int32_t),
+                    hipMemcpyDeviceToHost);
+                if (err != hipSuccess) {
+                    return Status::hip_error("dflash2 verify sample copy",
+                                             hipGetErrorString(err), __FILE__, __LINE__);
+                }
+            }
+        } else {
+            auto submitted = submit_batch(*decoder.target, batch, decoder.stream, options[0]);
+            if (!submitted.ok()) return submitted.status();
+            PendingBatch pending = submitted.release();
+            if (want_timing) {
+                const hipError_t stop_err =
+                    hipEventRecord(decoder.verify_stop_event, decoder.stream);
+                if (stop_err != hipSuccess) {
+                    return Status::hip_error("dflash2 verify stop event",
+                                             hipGetErrorString(stop_err), __FILE__, __LINE__);
+                }
+            }
         if (bridge) {
             const int32_t* sampled_device = pending.output.sampled_tokens.data<int32_t>();
             hipError_t d_err = hipMemcpyAsync(
@@ -926,6 +993,7 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
                                              hipGetErrorString(err), __FILE__, __LINE__);
                 }
             }
+        }
         }
     }
 
@@ -1217,7 +1285,9 @@ Result<DFlash2SpecIterationOutput> dflash2_spec_step(
             ScheduledBatch batch = make_verify_batch(
                 *decoder.sequence, requests, prefix.data(), n, position, 1u, true,
                 decoder.config.verify_numeric_mode);
-            auto executed = execute_batch(*decoder.target, batch, decoder.stream);
+            const std::vector<ExecuteBatchOptions> roptions =
+                build_gdn_options(decoder, n);
+            auto executed = run_target_batch(decoder, batch, roptions);
             if (!executed.ok()) return executed.status();
         }
         {

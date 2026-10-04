@@ -394,6 +394,11 @@ Status TpCoordinator::on_sequence_released(const PagedSequenceState& source) {
 }
 
 Result<BatchExecutionOutput> TpCoordinator::on_execute(const ScheduledBatch& batch) {
+    return on_execute(batch, nullptr);
+}
+
+Result<BatchExecutionOutput> TpCoordinator::on_execute(
+    const ScheduledBatch& batch, const ExecuteBatchOptions* per_rank) {
     if (ranks_.size() < 2) {
         return Status::invalid_state("tp coordinator has no ranks", __FILE__, __LINE__);
     }
@@ -401,10 +406,9 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(const ScheduledBatch& bat
         return Status::unsupported(
             "tp execution requires host token ids", __FILE__, __LINE__);
     }
-    if (batch.speculative_verify) {
+    if (batch.speculative_verify && per_rank == nullptr) {
         return Status::unsupported(
-            "tp execution does not support speculative verify batches", __FILE__,
-            __LINE__);
+            "tp speculative verify requires per-rank options", __FILE__, __LINE__);
     }
     if (barrier_group_->aborted()) {
         return Status::invalid_state("tp barrier group is aborted", __FILE__, __LINE__);
@@ -442,6 +446,7 @@ Result<BatchExecutionOutput> TpCoordinator::on_execute(const ScheduledBatch& bat
         {
             std::lock_guard<std::mutex> lock(worker->mutex);
             worker->job = &rank_batches[r];
+            worker->options = per_rank != nullptr ? &per_rank[r] : nullptr;
             worker->job_pending = true;
             worker->done = false;
             worker->status = Status::make_ok();
@@ -479,17 +484,19 @@ void TpCoordinator::worker_loop(std::size_t rank) {
     }
     while (true) {
         const ScheduledBatch* job = nullptr;
+        const ExecuteBatchOptions* options = nullptr;
         {
             std::unique_lock<std::mutex> lock(worker->mutex);
             worker->cv.wait(lock, [&] { return worker->job_pending || worker->stop; });
             if (worker->stop) break;
             worker->job_pending = false;
             job = worker->job;
+            options = worker->options;
         }
         BatchExecutionOutput output;
         Status st = Status::make_ok();
         if (job != nullptr) {
-            st = run_rank_step(rank, *job, output);
+            st = run_rank_step(rank, *job, output, options);
         }
         if (!st.ok()) abort(st);
         {
@@ -503,9 +510,12 @@ void TpCoordinator::worker_loop(std::size_t rank) {
 }
 
 Status TpCoordinator::run_rank_step(std::size_t rank, const ScheduledBatch& batch,
-                                    BatchExecutionOutput& output) {
+                                    BatchExecutionOutput& output,
+                                    const ExecuteBatchOptions* options) {
     TpRankRuntime& runtime = *ranks_[rank];
-    auto pending = submit_batch(runtime.executor(), batch, runtime.stream());
+    auto pending = options != nullptr
+                       ? submit_batch(runtime.executor(), batch, runtime.stream(), *options)
+                       : submit_batch(runtime.executor(), batch, runtime.stream());
     if (!pending.ok()) return pending.status();
     auto completed =
         complete_batch(runtime.executor(), pending.release(), runtime.stream());

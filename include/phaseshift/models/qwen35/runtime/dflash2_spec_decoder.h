@@ -7,6 +7,7 @@
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
 #include <phaseshift/models/qwen35/runtime/token_constraint.h>
+#include <phaseshift/models/qwen35/runtime/tp_batch_hook.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/models/qwen35/stop_tokens.h>
@@ -33,6 +34,13 @@ struct DFlash2SpecDecoderConfig {
 };
 
 struct DFlash2SpecTiming;
+
+struct DFlash2GdnRankBinding {
+    GdnStatePool* pool = nullptr;
+    gpu::GpuArena* arena = nullptr;
+    hipStream_t stream = nullptr;
+    int device = -1;
+};
 
 struct DFlash2GdnRankState {
     GdnStatePool* pool = nullptr;
@@ -62,6 +70,7 @@ struct DFlash2SpecDecoder {
     DFlash2SpecDecoderConfig config;
 
     std::vector<DFlash2GdnRankState> gdn_ranks;
+    TpBatchHook* tp_hook = nullptr;
     bool gdn_history_enabled = false;
     bool gdn_rerun_reference = false;
     uint64_t gdn_snapshot_bytes = 0u;
@@ -103,7 +112,9 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     GdnStatePool& gdn_pool,
     gpu::GpuArena& arena,
     const DFlash2SpecDecoderConfig& config,
-    hipStream_t stream);
+    hipStream_t stream,
+    const std::vector<DFlash2GdnRankBinding>* tp_ranks = nullptr,
+    TpBatchHook* tp_hook = nullptr);
 
 Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept;
 
