@@ -522,3 +522,111 @@ ctx2048 は 37.75 → **39.36 tok/s**。
   `test_bench_help_activation_quantize` / `test_tp_reduction` / `test_tp_transport` /
   `test_qwen35_tp_execution` / `test_qwen35_tp_e2e` **7/7 PASS**
 - required acceptance: **124/124 PASS**（failure 0 / skip 0 / error 0）
+
+## step9: fallback counter 網の再点検
+
+### 目的
+
+step7/8 で `activation_quantize` に「`resolve` が `Applicable` を返した後に
+kernel の選択が下り、それがどの counter も数えていなかった」という穴が
+見つかった。同じ穴が他に無いかを、コードと実測の両面から洗い出す。
+
+### 網の構造
+
+`KERNEL_TRACE_FALLBACK` は次の 2 層しか数えない。
+
+| 層 | きっかけ | 記録 |
+| --- | --- | --- |
+| 1 | resolve が `NotApplicable` | executor が `record_correctness_fallback(kernel_id)` |
+| 2 | launcher が `hipErrorNotSupported` | `try_launch_*` が `NotApplicable` を返し、executor が記録 |
+
+**第 3 層が欠けている**: resolve が `Applicable` を返した後に、
+shape/param の gate で「違う（正しいが遅い）kernel」を選ぶ分岐は、
+`record_optimized_op()` のみ走り、**どちらのカウンタにも現れない**。
+
+### 穴の列挙（第 3 層）
+
+`try_launch_optimized` が受け取る 17 KernelId と、
+`Applicable` 後の内部 gate を機械的に照合した結果:
+
+| op | 内部 gate | 結果 | 発火 | counter |
+| --- | --- | --- | --- | --- |
+| `activation_quantize` | `vec_supported` の k allowlist + `switch(k)` | generic へ | **TP2 で 16384 launch** | step7 で追加済み |
+| `rope` | `rope_pair_shape_supported` | `F32Bf16Generic` | 未発火（pair のみ） | なし |
+| `gdn_recurrence` | `geo_ok`（`head_k`/`head_v` の WMMA 幾何） | `F32` | 未発火（WMMA のみ） | なし |
+| `linear psq4` | `use_decode1`（`psq4_decode1_supported`） | `RowBlock*`（wmma） | 未発火（decode1 のみ） | なし |
+
+第 3 層が存在しない（または第 2 層に落ちる） op:
+
+- `paged_attention`: `variant == Unsupported` → **`NotApplicable`**（層1）
+- `kv_append`: `default:` → **`NotApplicable`**（層1）
+- `elementwise`: shape/alias gate → **`NotApplicable`**（層1）
+- `linear` ×5: `hipErrorNotSupported` → **`NotApplicable`**（層2）
+- `linear psq8`: kernel 層の `launch_gemm_psq8_w8a8_wmma_auto` が判断、
+  未対応は `hipErrorNotSupported` → 層2
+
+### 調査中に見つけた構造上の癖（現在は無害）
+
+1. **`resolve_rmsnorm_physical` は `variant == Unsupported` でも `Applicable` を返す**
+   （`physical_launch.hip:138-142`）。ただし `PhysicalRmsNormVariant` は
+   `physical_launch.hip` の外で**一切消費されない**（＝実際の kernel 選択は
+   kernel 層が dtype/layout で行う）。kernel 層が拒否した場合の扱いは
+   `try_launch_rmsnorm` の `if (herr != hipSuccess) return Status::hip_error(...)`
+   で **hard error**。silent な退避ではないが、網ではなく停止する挙動。
+2. **`PhysicalPsq4Variant` / `PhysicalPsq8Variant` も resolve 外で未使用**。
+   実際は `use_decode1`（psq4）と kernel 層の `_auto`（psq8）が判断する。
+   `variant = Unsupported` は到達しても何も起きない metadata。
+3. **`LINEAR_*` には正の（optimized 側の）counter が無い**。
+   `KERNEL_TRACE_FALLBACK LINEAR_*` の負の側だけがあり、
+   `optimized = 総数 − fallback` の推定になる。穴ではないが非対称。
+
+### 実測: kernel name inventory による検証
+
+`rocprofv3 --kernel-trace` で TP1 / TP2 を取得し、
+**launch 数の TP2/TP1 比**を全 kernel について計算した
+（両 mode で同じ判断なら 2.000 = 各 GPU が同一判断をすることになる）。
+
+```text
+model kernel 41 種すべて  TP2/TP1 = 2.000（厳密一致）
+
+外れたのは 4 種のみ:
+  tp_copy / tp_add_peers        TP1=0  ← transport（設計どおり）
+  activation_quantize_e4m3_kernel TP1=0 / TP2=32768  ← 第3層の穴
+  vec_kernel<17408u> / <6144u>  TP2=0  ← TP2 の k が 8704/3072 のため
+  __amd_rocclr_copyBuffer       1.905 ← ROCr の runtime（model kernel ではない）
+```
+
+さらに prefill2D の tile 判断も `K128N64` = 304→608、`K64N64` = 32→64 と
+**両 mode で同一**（step2 の境界条件が TP1/TP2 で同じ選択をしている）。
+
+step8 修正後（同 config `tokens=64`）の同一比較:
+
+```text
+launch 数が同一の kernel      : 41 種
+変化した kernel                : 3 種
+  activation_quantize_e4m3_kernel   16384 -> 0
+  vec_kernel<8704u, 8704u>             0 -> 8192
+  vec_kernel<3072u, 3072u>             0 -> 8192
+act-quant 以外の変化          : なし
+```
+
+generic 16384 が vec<8704> 8192 + vec<3072> 8192 に**ちょうど置換**され、
+他の 41 種は launch 数が一切変わっていない。
+
+### 結論
+
+- 第 3 層の穴は **4 件**、そのうち**実際に発火していたのは `activation_quantize` の 1 件のみ**（step7/8 で修正済み）。
+- 残る 3 件（`rope` / `gdn_recurrence` / `linear psq4`）は現行モデルでは発火しない。
+  TP1 と TP2 の kernel 判断が全件一致していることが、これの実測上の裏付け。
+- ただし発火条件は「shape allowlist の外にあるモデルが来た時」であり、
+  発火しても **正しく動くが遅い**だけで、どの counter ゠けでは検知できない。
+
+### 採否の判断材料（未決定）
+
+残る 3 件をどう扱うかは本 step では決めない。選択肢:
+
+- (A) `activation_quantize` と同じ方式で counter を追加する（3 箇所、計 ~15 行、
+  hot path に atomic relax が 1 本ずつ増える）。発火前から可視化できる。
+- (B) 現状のまま記録のみ。発火していないものを instrumentation しない。
+- (C) ROCprof の kernel name inventory を qualification に組み込み、
+  「想定外の kernel 名が出た時」を検出する。code を増やさないが実行が重い。
