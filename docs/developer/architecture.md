@@ -123,20 +123,18 @@ Qwen35 kernels -> Qwen35 runtime  : forbidden
 ## Server layer
 
 `phaseshift-server` はserving productであり、inference engineではない。
-LocalAI v4.10.0をhidden API frontendとして起動し、そのexternal gRPC backend
-（`src/apps/server/backend/`）が `phaseshift-compute --serve-stdio` を所有する。
+aiohttp で OpenAI Chat Completions の subset を提供し、
+`phaseshift-compute --serve-stdio` へ直接 JSONL stdio で接続する。
 
 ```text
 OpenAI client
-     │ HTTP
+     │ HTTP / SSE
      ▼
-phaseshift-server (launcher)
-     │
-     ▼
-LocalAI v4.10.0
-     │ private gRPC
-     ▼
-phaseshift backend (Python)
+phaseshift-server
+     ├── aiohttp
+     ├── openai_protocol.py   (request validation / wire encoding)
+     ├── chat_service.py      (HF messages -> chat template -> compute -> response parser)
+     └── compute_client.py    (asyncio native JSONL client)
      │ persistent JSONL stdio
      ▼
 phaseshift-compute --serve-stdio   (token IDs in / token IDs out)
@@ -146,16 +144,14 @@ phaseshift-compute --serve-stdio   (token IDs in / token IDs out)
 
 - `phaseshift-compute` はtoken IDのin/outのみ。HTTP・OpenAI schema・messages・
   roles・tools・JSON Schema・tool parser・chat template・tokenizerを持たない。
-- server側（`src/apps/server/**`）だけがLocalAI・gRPC・protobuf・OpenAI schema・
-  tokenizer・chat template・tool parserに依存する。
-- `src/phaseshift/**` と `include/phaseshift/**` はLocalAI / gRPC / protobuf /
-  OpenAIを参照しない。`test_architecture_boundaries` の `check_no_server_deps` が
-  これを静的に検査する。
-- LocalAI protobuf stubは `vendor/localai/backend.proto` から生成し、
-  `src/apps/server/localai_proto/` へ保持する。
-- tokenizerとQwen3.5 chat templateの唯一のsource of truthはmodel directoryの
+- server側（`src/apps/server/**`）だけがOpenAI schema・tokenizer・chat template・
+  tool parserに依存する。
+- `src/phaseshift/**` と `include/phaseshift/**` はserving固有の技術
+  （HTTP / OpenAI schema / protobuf / gRPC / xgrammar）を参照しない。
+  `test_architecture_boundaries` の `check_no_server_deps` がこれを静的に検査する。
+- tokenizerとQwen chat templateの唯一のsource of truthはmodel directoryの
   Hugging Face processorである。server codecは `src/apps/common/phaseshift_chat/`
-  に置き、`phaseshift-cli` とbackendが共有する。
+  に置き、`phaseshift-cli` とserverが共有する。
 
 ### compute control plane
 
@@ -169,15 +165,11 @@ terminal eventは `done` の1個だけである。GPU runtimeを複数threadか�
 `ScheduledBatch` として co-batchされる。GPU runtime ownerは1 threadのままである。
 
 ```text
-HTTP threads
+aiohttp handlers
     ↓
-LocalAI max-concurrent-backend-requests N
+AsyncComputeClient per-request mailboxes
     ↓
-backend gRPC workers
-    ↓
-ComputeClient per-request mailboxes
-    ↓
-JSONL multiplex
+JSONL multiplex (1 stdin writer / 1 stdout reader)
     ↓
 single compute service loop (1 owner thread)
     ↓
@@ -194,52 +186,4 @@ GPU
 budgetから決める。budget不足時はKV BankerがQueued requestをActive完了後に
 admissionする。
 
-### grammar constraints
-
-Grammar-constrained decodeはGPU runtime ownerである単一thread上で完結する。
-
-責務境界は2つに分かれる。
-
-```
-server / control plane:
-    OpenAI format
-        ↓
-    LocalAI
-        ↓
-    GBNF
-
-runtime:
-    GBNF
-        ↓
-    XGrammar matcher
-        ↓
-    token bitmask
-        ↓
-    sampling
-```
-
-```
-LocalAI response_format / text.format
-    ↓ (JSON Schema -> GBNF)
-backend request.Grammar
-    ↓ (structured text / tool / composition)
-compute JSONL grammar or structural_tag field
-    ↓
-TokenConstraintCompiler (model lifetime)
-    ↓
-TokenConstraintState (request単位 matcher)
-    ↓
-compressed token bitmask (CPU)
-    ↓ (1 batched H2D / step)
-PhaseShift HIP sampling
-```
-
-computeが理解するのはtoken IDs、sampling、GBNF grammar、Structural Tagまでである。
-OpenAI / JSON Schema / Responses semanticsはcontrol-planeに留め、computeへ入れない。
-tool requestの制約はbackendがStructural Tagへ変換し、structured textとtoolsの同時指定は
-1つのStructural Tagへ合成する。computeへは常にgrammarかstructural_tagの片方だけを渡す。
-
-XGrammar v0.2.5は `vendor/xgrammar/` に固定vendorし、native C++ static libraryとしてbuildする。
-TokenizerInfo sidecar は Python xgrammar 0.2.5.post1 が生成する。
-詳細は [structured_generation.md](structured_generation.md) を参照。serverの対応surfaceは
-[../user/server.md](../user/server.md) を参照。
+serverの対応surfaceは [../user/server.md](../user/server.md) を参照。

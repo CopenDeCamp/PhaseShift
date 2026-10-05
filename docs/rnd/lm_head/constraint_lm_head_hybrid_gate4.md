@@ -3,7 +3,7 @@
 > Status: R&D record（Gate の経緯・採否判断・計測値）。現在の contract は
 > `docs/developer/qwen35.md` §7.1、mask と allowed count の受け渡しは
 > `docs/developer/runtime.md`、trace 出力は
-> `docs/developer/structured_generation.md` を正本とする。
+> structured generation は削除済みであり、この Gate の正本は存在しない。Git history を参照。
 
 ## 0. 目的
 

@@ -1,8 +1,11 @@
 # Constraint subsystem 監査
 
+> Status: historical R&D record（server 簡素化・constraint / LocalAI 削除 **前** の状態を記録している。現在の仕様ではない。現在の仕様は docs/developer/ を参照）
+
+
 PhaseShift の Constraint を1機能として扱わず、レイヤごとに分解した資料。
 すべて call site / CMake / default / runtime 分岐 / tests で確認済み。
-設計の正本は `docs/developer/structured_generation.md`。
+設計の正本だった `docs/developer/structured_generation.md` は削除済み。Git history を参照。
 
 ## 0. 全体構成(証拠)
 

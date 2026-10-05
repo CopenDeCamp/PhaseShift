@@ -21,7 +21,7 @@ Qwen3.5 の推論を実際に走らせる、ホスト側ランタイムから GP
 2つのパスが同居する。
 
 - **Correctness** : 1 dispatch ごとに単一カーネル `model_dispatch_kernel` を1回 launch し、デバイス内で `host_execute_binding` の switch によって op 分岐する。実装は `correctness/detail/*.inc` に分割し、単一 TU に include する。
-- **Optimized(Auto)** : 各 dispatch を op ごとの専用 launcher で実行する。`constraint_lm_head_exact` は複数 dispatch を消費し得るが、その他の単体 launcher は 1 dispatch を消費する。
+- **Optimized(Auto)** : 各 dispatch を op ごとの専用 launcher で実行する。単体 launcher は 1 dispatch を消費する。
 
 モードは環境変数 `PHASESHIFT_QWEN35_KERNEL_MODE` で決まる。
 
@@ -43,7 +43,6 @@ submit_batch
        ├─ (PHASESHIFT_HIP_GRAPH) graph capture/launch
        └─ launch_host_backend
             └─ execute_program      (program_executor.hip)
-                 ├─ [Auto] try_launch_constraint_lm_head_exact  (複数 dispatch を消費し得る)
                  ├─ [Auto] try_launch_optimized   (optimized_dispatch.hip)
                  │    └─ 1 dispatch を消費
                  └─ [fallback] launch_host_binding
@@ -216,8 +215,7 @@ bf16 linear（非量子化）はアクティベーション量子化を挟まず
 3. `for i in 0..program.dispatches.size()`:
    - `OpDumpTimer`（`PHASESHIFT_OP_DUMP` 有効時）
    - `semantic_timing_start`（`PHASESHIFT_OP_SYNC` 有効時）
-   - **Auto モード**（`constraint_lm_head_exact` → 単体 launcher の順に試す）:
-     - `try_launch_constraint_lm_head_exact`
+   - **Auto モード**（単体 launcher を試す）:
      - `try_launch_optimized(program, i, ctx, stream)`
      - `Launched` / `Skipped` なら `consumed_dispatches` を検証し、`i += consumed` でループ継続
      - `NotApplicable` なら fallthrough
@@ -287,37 +285,9 @@ embedding / output）に置き、`model_dispatch_correctness.hip` が単一 TU �
 
 ## 7. Optimized パス
 
-Auto モードでは `execute_program` が `constraint_lm_head_exact`、単体 launcher の順に試す。
+Auto モードでは `execute_program` が単体 launcher を試す。
 
-### 7.1 constraint lm_head exact
-
-`try_launch_constraint_lm_head_exact` を試す。`Launched` でなければ単体 launcher を試す。
-
-`PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT` が有効（非 0）のときだけ動作する（**既定 OFF**）。
-無効時は constrained full PSQ8 + sampling filter の full path が常に実行される。
-
-適用条件:
-
-- constraint 付き batch（`constraint_masks` あり）かつ `role == Decode`
-- weight は PSQ8 / preshuffled / `weight_scale_group == 32` / `k_padded % 32 == 0`
-- pattern は `ACTIVATION_QUANTIZE_W4A8` → `LINEAR_PSQ8` → `SAMPLING` の 3 連続 dispatch
-- 全 output row が constraint 付き、`stochastic_outputs == 0`、`sampled == outputs`、
-  allowed count が全 row で 1 以上
-- `max(allowed) <= kConstraintLmHeadExactMaxAllowed`（128）
-
-それ以外（mixed な constrained / unconstrained row、stochastic constraint、allowed 0、
-`max(allowed) > 128`）は full path へ fallback する。constraint で処理を諦めて
-制約を無視する fallback は無い。
-
-経路: activation quantize → constraint mask から allowed token を token id 昇順に
-candidate IDs へ展開 → PSQ8 candidate rerank → candidate argmax。候補集合が全 allowed token を含む限り、full PSQ8 の constrained argmax と
-同じ token を返す（exact）。candidate capacity は batch 内の `max(allowed)`、
-バッファは `kConstraintLmHeadExactMaxAllowed` で確保する。
-
-実装は `include/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.h` と
-`src/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.hip`。
-
-### 7.2 単体 launcher の dispatch 順序
+### 7.1 単体 launcher の dispatch 順序
 
 `try_launch_optimized` は以下のように分岐する（先着順）。
 
@@ -460,8 +430,6 @@ Qwen35 の top-level load path は partition plan を
   - `try_launch_kv_append` / `try_launch_paged_attention` / `try_launch_gdn_conv1d` /
     `try_launch_gdn_recurrence` / `try_launch_output_gather`
   - `read_qwen35_kernel_mode`
-- `src/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.hip`
-  - `try_launch_constraint_lm_head_exact`
 
 ### Correctness
 

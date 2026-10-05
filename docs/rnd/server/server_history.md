@@ -69,7 +69,7 @@ canonical branch は `feat/phaseshift-server`。最終状態は
 - XGrammar v0.2.5 の C++20/libc++ 互換 patch を最小 backport として保持する。PhaseShift native は
   例外なく C++20 で build する。
 - runtime EOS と tokenizer EOS の divergence は正常状態として許可する。現在の contract は
-  `docs/developer/structured_generation.md` の generation stop token を参照。
+  generation stop token の記述は structured generation 削除時の Git history を参照。
 - deferred constraint activation（reasoning 開始時の constraint 遅延 activation）は未実装。
   Gate 11C の測定で normalized overhead が negligible と確認されたため、当時は正当化されなかった。
 - Feature Complete 後の「Server へ戻る条件」は actual client incompatibility / actual correctness
@@ -127,5 +127,5 @@ tool calling ではモデルが `</tool_call><|im_end|>` の後も会話の続�
 2 個目の tool call を出す、または `max_tokens` が小さいと捏造途中で打ち切られて
 content に `user\n\nassistant\n<think>` が混入した。turn 終端 `<|im_end|>` を
 stop token に含めることで解消した。詳細は
-[structured_generation.md](../../developer/structured_generation.md#generation-stop-token) を参照。
+generation stop token の詳細は当時の Git history を参照。
 

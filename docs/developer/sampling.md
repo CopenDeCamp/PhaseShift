@@ -52,7 +52,7 @@ validation:
 - prefill 後の最初の sample は `0`
 - 次は `1`
 
-`sequence.position` は使わない。prefix cache の利用状況や batch 構成が変わっても
+`sequence.position` は使わない。batch 構成が変わっても
 同じ prompt + 同じ seed なら同じ sampling sequence になるようにするため。
 
 ## RNG contract
@@ -128,7 +128,6 @@ active-set path を使う。
 
 - stochastic かつ sampled rows == output rows
 - `top_k` が全 row で同じ値で `1 <= top_k <= 128`
-- constraint が無い
 - radix workspace が確保済み
 
 このとき `DeviceSamplingParams.reserved[0]` の top-k path フラグが立つ。
@@ -155,7 +154,7 @@ active set 上で 1 回だけ Gumbel-Max   (attempt = 0)
   score が同値なら token id が小さい方を選ぶ。
 - INT2 は使わない。Top-K selection は常に exact F32。
 
-top-k path が使われない batch（`top_k = 0`、`top_k > 128`、constraint 付き、
+top-k path が使われない batch（`top_k = 0`、`top_k > 128`、
 `top_k` が row ごとに異なる、stochastic が混在）は従来の rejection path をそのまま
 使う。
 

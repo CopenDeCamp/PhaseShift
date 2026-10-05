@@ -16,7 +16,7 @@ PoC・Gate・採否判断は `docs/rnd/`、現在の性能値は `docs/perf/`、
 - [qwen35.md](qwen35.md) — Qwen3.5 runtime family の配線（source path / KernelId / execution order）
 - [qwen4exp.md](qwen4exp.md) — Qwen3.8-Flash-Next (qwen4_exp) の architecture contract
 - [sampling.md](sampling.md) — target LM sampling（temperature / top-k / top-p / seed）
-- [prefix_cache.md](prefix_cache.md) — GPU-resident prefix cache の contract
+- [prefix_cache.md](prefix_cache.md) — prefix cache の protocol contract（実装は未提供）
 
 ## speculative decode
 
@@ -25,9 +25,7 @@ PoC・Gate・採否判断は `docs/rnd/`、現在の性能値は `docs/perf/`、
 ## server
 
 - [server_status.md](server_status.md) — Server の開発者向け入口（surface と詳細 contract へのリンク）
-- [reasoning.md](reasoning.md) — reasoning の enable/disable semantics と構成
-- [structured_generation.md](structured_generation.md) — grammar / structured generation / stop token
-- [prefix_cache.md](prefix_cache.md) — prefix cache
+- [prefix_cache.md](prefix_cache.md) — prefix cache の protocol contract
 
 ## quantization / formats
 

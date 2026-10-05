@@ -87,35 +87,34 @@ gate は通すが `[KNOWN-LOSSY]` として理由付きで出力される。
 
 ## server regression
 
-server / LocalAI / backend / compute E2E は `tests/server/` の Python suite で検証する。
-LocalAI runtime は `PHASESHIFT_LOCALAI_BINARY`（`vendor/localai/patches/` 適用済み）を指す。
+server / compute E2E は `tests/server/` の Python suite で検証する。
+`phaseshift-server` は `phaseshift-compute` を subprocess として起動するため、
+追加の frontend は要らない。model directory は `PHASESHIFT_MODEL_DIR` で指定する。
 
 canonical runner は `tests/server/run_server_regression.py` である。glob ではなく明示 manifest を
-持ち、group 単位で subprocess として順次実行する。non-zero return（prerequisite 不足を含む）は
-失敗として扱い、skip で通さない。
+持ち、group 単位で subprocess として順次実行する。non-zero return は失敗として扱い、
+skip で通さない（自己判定した skip は exit 77 で報告される）。
 
 ```bash
-python3 tests/server/run_server_regression.py --all
-python3 tests/server/run_server_regression.py --group reasoning --group reasoning-tools
+PHASESHIFT_MODEL_DIR=models/Qwen3.8-27B-PSQ \
+  python3 tests/server/run_server_regression.py --all
+python3 tests/server/run_server_regression.py --group tools --group agent
 python3 tests/server/run_server_regression.py --list
 ```
 
 group と test 一覧は `tests/server/run_server_regression.py` の `GROUPS` が正本である。
-現在の group は `core` / `constraints` / `tools` / `structured` / `composition` /
-`prefix-cache` / `reasoning` / `reasoning-tools` / `concurrency-cancel` / `capability` /
-`agent`。
+現在の group は `core` / `tools` / `unsupported` / `concurrency-cancel` / `agent`。
+
+prefix cache の JSONL contract は
+`tests/server/test_compute_prefix_contract.py` が固定する。
 
 ## 実行層
 
-3 層を混同しない。
+2 層を混同しない。
 
 ```
 required acceptance   self-contained C++ / GPU suite（tests/run_required_acceptance.py）
-server regression      model + LocalAI + compute E2E（run_server_regression.py）
-closure soak           manual 長時間 stability test（test_server_closure_soak.py）
+server regression      model + compute E2E（tests/server/run_server_regression.py）
 ```
 
-`support.py` は共有 helper であり test ではない。`test_server_closure_soak.py` と
-`tools/bench_server_reasoning_constraints.py` は manifest へ入れない。
-
-`test_structural_tool_constraint`（required）に reasoning envelope の CPU 試験を含む。
+`support.py` は共有 helper であり test ではない。manifest へ入れない。

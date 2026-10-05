@@ -114,6 +114,6 @@ full accept rate は +12.6% である。draft が grammar 外を提案してい�
 - contract は `docs/developer/dflash2.md`（Constraint 節 / Scope / Known limitations）、
   `docs/developer/prefix_cache.md`（DFlash2 有効時）、
   `docs/developer/runtime.md`（DFlash serve 経路）、
-  `docs/developer/structured_generation.md`、`docs/developer/sampling.md` に反映済み。
+  `docs/developer/sampling.md` に反映済み（structured generation は削除済み）。
 - user docs は `docs/user/server.md` / `docs/user/compute.md` / `docs/user/cli.md`。
 - 計測値の正本は本節であり、`docs/perf/current.md` は未計測のため触っていない。

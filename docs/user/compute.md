@@ -33,8 +33,7 @@
 `--model-dir` は必須。`--input-ids-file` なしでは既定prompt
 （`248041, 77091`）を使用。
 
-`--kv-cache-dtype psq4` / `psq8` は `head_dim == 256` を要求する。prefix cache と
-併用でき、cache pool も同じ KV dtype で作られる。
+`--kv-cache-dtype psq4` / `psq8` は `head_dim == 256` を要求する。
 
 ### DFlash2 speculative decoding
 
@@ -47,14 +46,9 @@
 - `--dump-logits`
 - `--dflash2-drafts` が `block_size - 1` を超える
 
-constrained な LM head の候補展開最適化（`PHASESHIFT_CONSTRAINT_LM_HEAD_EXACT`）は
-既定 0（無効）である。有効時も制約の正しさは full path の sampling filter が担保する。
-
 `--serve-stdio` と `--kv-cache-dtype psq4` は併用できる。serve mode では
-`grammar` / `structural_tag` / `prefix_cache_checkpoint_position` / `temperature > 0`
-を DFlash2 経路でも受け付ける。constraint は target verify の各行に適用され、
-generation は grammar 準拠である。prefix cache の checkpoint は prompt boundary
-（prompt 全体）で保存する。
+`prefix_cache_checkpoint_position`（現在は `0` のみ受理）と `temperature > 0` を
+DFlash2 経路でも受け付ける。
 
 ## serve-stdio
 
@@ -66,25 +60,34 @@ protocol専用で、`MODEL_*`・debug・load statusは出力しない（diagnost
 request:
 
 ```json
-{"op":"generate","request_id":1,"input_ids":[1,2,3],"max_new_tokens":32,"temperature":0.0,"top_p":1.0,"top_k":0,"seed":0}
+{"op":"generate","request_id":1,"input_ids":[1,2,3],"max_new_tokens":32,"temperature":0.0,"top_p":1.0,"top_k":0,"seed":0,"prefix_cache_checkpoint_position":0}
 ```
+
+未知の request field は `invalid_argument` で拒否する。
+`prefix_cache_checkpoint_position` は `0` のみ受理し、それ以外は
+`invalid_argument`（prefix cache はこの build では提供しない）で拒否する。
+silent ignore はしない。
 
 event:
 
 ```json
 {"event":"token","request_id":1,"token_id":1234}
-{"event":"done","request_id":1,"generated_ids":[10,20,30],"finish_reason":"max_tokens"}
-{"event":"error","request_id":1,"message":"..."}
+{"event":"done","request_id":1,"generated_ids":[10,20,30],"finish_reason":"stop","prompt_tokens":3,"prefill_tokens":3,"restored_tokens":0,"cache_checkpoint_tokens":0}
+{"event":"error","request_id":1,"code":"invalid_argument","message":"..."}
 ```
 
 `token` eventは生成token順に送られ、その連結は `done.generated_ids` とexact一致する。
+`finish_reason` は `stop` / `length` / `cancelled` / `error` / `none` のいずれかである。
 
 ping / shutdown:
 
 ```json
-{"op":"ping"}      -> {"event":"pong"}
+{"op":"ping"}      -> {"event":"pong","protocol_version":1,"capabilities":{"prefix_cache":false}}
 {"op":"shutdown"}  -> {"event":"shutdown"}
 ```
+
+`capabilities` は map であり、将来の capability はここへ追加する。未知の key は client が
+無視してよい。
 
 single-shot modeの出力契約（`GENERATED_IDS` 等）は変更されない。
 
@@ -106,7 +109,7 @@ vocab の host sort も行わない。
 rejection の試行回数が増える。
 
 同じ prompt・同じ `--seed`・同じ sampling 設定なら `GENERATED_IDS` は一致する。
-batch 構成や prefix cache の状態には依存しない。
+batch 構成には依存しない。
 
 ```bash
 ./build/phaseshift-compute \

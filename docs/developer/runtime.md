@@ -202,57 +202,15 @@ host-side request objectは解放しない。
   その後 `Qwen35ComputeRuntime::shutdown()` する。
 - `max_concurrent_requests` は compute の指定値をそのまま使う（DFlash2 でも複数
   受付できる）。inflight は順に1つずつ round され、同時に in-flight な target
-  submit は常に1つで、round ごとに完全 sync する。`temperature > 0` /
-  `grammar` / `structural_tag` /
-  `prefix_cache_checkpoint_position` は request ごとに受け付け、constraint state は
-  `DFlashServeSession` が所有して decoder へ渡す。constraint の配線は
-  `Qwen35ComputeRuntime::create_constraint_state()` を経由する。
+  submit は常に1つで、round ごとに完全 sync する。`temperature > 0` は
+  request ごとに受け付ける。
 - `--kv-cache-capacity-tokens` が未指定で concurrency > 1 のとき、server は
   `(concurrency + 1) × (max_seq_len + 1)` へ自動拡張する（DFlash は
   `ContinuousBatcher` を通らないため KV Banker の admission が効かない）。
-- DFlash の prefix cache checkpoint は prompt boundary（prompt 全体）で保存する。
-  `prefix_cache_checkpoint_position` は保存位置の指定としては使われない。
-- backend は chat template が確定した stable prompt boundary を常に
-  `prefix_cache_checkpoint_position` として送る。prefix cache が無効でも同じ位置で prefill
-  chunk を切るため、生成列は prefix cache の有効・無効に依存しない。
 
 詳細は [dflash2.md](dflash2.md) を参照。
 
 ## Prefix cache
 
-opt-in の GPU-resident prefix cache を持つ。`PrefixCache` は active とは別の KV pool と
-GDN pool を専用に所有し、checkpoint を D2D で snapshot / restore する。active KV Banker・
-sequence slot・GDN slot には影響しない。
-
-request は任意の `prefix_cache_checkpoint_position` を指定できる。指定すると scheduler は
-その位置を跨がないように prefill chunk を切り、prefix cache が有効なら chunk 実行後に
-`input_tokens[0:N]` の snapshot を保存する。この場合 terminal checkpoint は保存しない。
-指定が無い request は従来どおり terminal checkpoint を保存する。詳細は
+GPU 実装は提供しない。protocol contract のみを保有する。詳細は
 [prefix_cache.md](prefix_cache.md) を参照。
-
-## Grammar constraints
-
-GBNF grammarによるtoken制約をruntimeへ統合する。`token_constraint.h` /
-`token_constraint.cpp` がXGrammar v0.2.5を薄く包み、XGrammar型をpublic headerへ露出しない。
-
-- `TokenConstraintCompiler` はmodel lifetimeで1個。compiled grammarはcount / byte boundedな
-  cacheで共有する。同一grammar bytesは再compileしない。
-- `TokenConstraintState`（matcher）はrequestごとに1個。`RuntimeRequest.constraint` に保持し、
-  retireで破棄する。constraint stateはserver lifetime中に蓄積しない。
-- grammarは`generate` requestのoptional fieldとして受け取る。fieldが無ければunconstrained。
-- compile failure / empty allowed set / matcher accept failureはrequest terminal errorであり、
-  unconstrained fallbackしない（fail-closed）。
-- constrained requestはMTP / speculative decodeを使わない。
-
-maskは `ScheduledBatch.constraint_masks`（host, `[output_rows][ceil(vocab/32)]` uint32）と
-`ScheduledRequest.token_constraint` でexecutorへ渡す。executorはconstrained rowが存在するstepだけ
-maskをdevice bufferへ1回のbatched H2Dで転送し、`HostExecutionContext` / `DeviceBatchContext` の
-`constraint_masks` / `constraint_mask_words` 経由でsampling kernelへ渡す。unconstrained batchは
-mask生成もH2Dも行わない。
-
-mask生成直後にhost側でallowed token数を数え、`ScheduledRequest::constraint_allowed_count`
-へ入れる（unconstrained rowは `UINT32_MAX`）。executorは事前確保済みのhost vector
-`Executor::constraint_allowed_counts_host` をoutput row単位へ展開して
-`HostExecutionContext::constraint_allowed_counts` として渡す。追加のdevice buffer、
-追加のH2D / D2H、追加の同期は無い。LM Headの分岐（[qwen35.md](qwen35.md) §7.1）と
-`PHASESHIFT_CONSTRAINT_TRACE` の分布出力がこのcountを使う。

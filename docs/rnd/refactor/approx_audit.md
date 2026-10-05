@@ -1,5 +1,8 @@
 # Approx / heuristic / proxy / coarse / shadow 経路監査
 
+> Status: historical R&D record（server 簡素化・constraint / LocalAI 削除 **前** の状態を記録している。現在の仕様ではない。現在の仕様は docs/developer/ を参照）
+
+
 PhaseShift に存在する「Exact full computation を省略する経路」の全棚卸し。
 本ドキュメントは read-only 棚卸しの記録であり、実装変更は伴わない。
 

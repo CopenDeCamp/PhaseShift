@@ -1,5 +1,8 @@
 # PhaseShift 全機能インベントリ
 
+> Status: historical R&D record（server 簡素化・constraint / LocalAI 削除 **前** の状態を記録している。現在の仕様ではない。現在の仕様は docs/developer/ を参照）
+
+
 > **実行状況**: 本棚卸しの後、REMOVE CANDIDATE の主要対象を `srcTrash/` へ隔離した
 > (R&D tools / PA probe / NgramTail / GpuMcu stub / MTP runtime / LM head proxy /
 > DFlash2 INT2 / 固定語彙)。経緯・commit・検証結果は

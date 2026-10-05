@@ -1,5 +1,8 @@
 # リファクタリング候補(4段階整理)
 
+> Status: historical R&D record（server 簡素化・constraint / LocalAI 削除 **前** の状態を記録している。現在の仕様ではない。現在の仕様は docs/developer/ を参照）
+
+
 **本ドキュメントはまだ何も変更しない。** 棚卸し結果に基づく候補整理のみ。
 
 区分:

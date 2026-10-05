@@ -237,11 +237,8 @@ per-step barrier でも peer 経路をそのまま使える。
 - **sampling owner は rank0**: batcher は hook から返る rank0 の
   `sampled_tokens` のみを commit する。rank1 の sampling 結果は使われない。
   next token は batcher（global request state）を介して次の step の batch に
-  入るため、rank 間で token を持ち越さない。constraint / grammar state も
-  batcher 側で1か所だけ進む。
+  入るため、rank 間で token を持ち越さない。
 - lm_head は replicated（両 rank 同じ計算。結果は identical、消費は rank0 のみ）。
-- prefix cache は TP では使わない（rank0 だけが KV を restore すると
-  妥当性が壊れるため。distributed prefix cache は非目標）。
 
 ## 8. 失敗伝播と shutdown
 

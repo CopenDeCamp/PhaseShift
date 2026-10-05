@@ -6,7 +6,8 @@
 検証記録である。user manual にはユーザー操作として必要な範囲だけを残し、そこから
 分離した R&D 由来の知見をここへ置く。
 
-現在の reasoning contract は [../../developer/reasoning.md](../../developer/reasoning.md)、
+reasoning transport は server 簡素化で削除された。復元手段は Git history である。
+現在の server surface は [../../developer/server_status.md](../../developer/server_status.md)、
 現在の性能値は [../../perf/README.md](../../perf/README.md) を参照する。
 
 ## transport の検証
@@ -33,6 +34,5 @@
 
 ## 関連
 
-- 現在の contract: [../../developer/reasoning.md](../../developer/reasoning.md)
-- structured output の contract: [../../developer/structured_generation.md](../../developer/structured_generation.md)
+- 現在の server contract: [../../developer/server_status.md](../../developer/server_status.md)
 - user 向け操作: [../../user/server.md](../../user/server.md)

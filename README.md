@@ -34,11 +34,11 @@ performance target に Qwen3.8-27B-PSQ を使っている。
 
 ## Server
 
-Qwen3.5 の chat template / reasoning contract を持つ Server path が存在する。
+`phaseshift-server` は aiohttp による OpenAI Chat Completions adapter である。
 利用方法は [docs/user/server.md](docs/user/server.md)、Server の責務境界は
 [docs/developer/architecture.md](docs/developer/architecture.md)、developer 向け入口は
 [docs/developer/server_status.md](docs/developer/server_status.md) を参照。prefix cache の
-詳細は [docs/developer/prefix_cache.md](docs/developer/prefix_cache.md) を参照。
+protocol contract は [docs/developer/prefix_cache.md](docs/developer/prefix_cache.md) を参照。
 
 ## Entrypoints
 

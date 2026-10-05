@@ -10,29 +10,20 @@
 - CMake >= 3.24
 - Ninja
 - OpenSSL（libcrypto）
-- Go >= 1.26、make、git、curl、unzip、network access
-  （PhaseShift patched LocalAI runtime を自前で build する場合のみ。release bundle 同梱の
-  runtime を使う場合は不要）
 - Python 3（`phaseshift-cli`、`phaseshift-server`、E2E）
-  - `phaseshift-server` / backend: `transformers==5.14.1`、`grpcio`、`protobuf`、`xgrammar==0.2.5.post1`
+  - `phaseshift-server`: `aiohttp`、`transformers==5.14.1`
+  - `phaseshift-cli`: `transformers==5.14.1`
   - server test: `openai`（OpenAI Python client E2E）
-  - LocalAI v4.10.0 + PhaseShift patched runtime（`vendor/localai/patches/` の patch series）
-    （`phaseshift-server` 起動時のみ）
 
-`xgrammar==0.2.5.post1` は `phaseshift-server` の Structured Output（GBNF constrained decode）に
-必須である。native constraint engine は vendored XGrammar v0.2.5 (commit `2ea71da`) を使うが、
-TokenizerInfo sidecar の生成は Python xgrammar で行う。`phaseshift-compute` 単体は Python 非依存。
+`phaseshift-compute` 単体は Python 非依存。
 
-server dependency は次の version を required dependency として固定する。
+server runtime dependency は次の 2 package のみである。
 
 ```bash
-pip install 'transformers==5.14.1' 'grpcio' 'protobuf' 'xgrammar==0.2.5.post1'
+pip install 'aiohttp' 'transformers==5.14.1'
 ```
 
-`transformers==5.14.1` は tool parser / chat template の regression を避けるため固定する。
-LocalAI base は `v4.10.0` であり、`phaseshift-server` は PhaseShift fail-closed patch
-適用済み runtime を要求する。patched runtime は `tools/build_localai_runtime.sh` で
-LocalAI v4.10.0 の checkout から build する。
+`transformers==5.14.1` は chat template / Qwen response parser の regression を避けるため固定する。
 
 `rocm-sdk` CLIがある環境では `rocm-sdk path --root` でROCm rootを解決する。
 なければ `-DPHASESHIFT_ROCM_ROOT=<path>` か環境変数 `ROCM_PATH` を使う。
@@ -53,26 +44,6 @@ cmake --build build-${ARCH} --parallel
 
 PhaseShiftが対象とするのは `gfx1201`（AMD Radeon AI PRO R9700）のみである。
 `CMAKE_HIP_ARCHITECTURES` に他のarchを指定した場合、configureで `FATAL_ERROR` になる。
-
-## LocalAI runtime の build
-
-`phaseshift-server` は PhaseShift patch series 適用済みの LocalAI v4.10.0 runtime を要求する。
-release bundle 同梱の runtime を使う場合、この手順は不要である。自前で build する場合のみ
-Go >= 1.26 が必要である。
-
-```bash
-git clone --depth 1 --branch v4.10.0 \
-    https://github.com/mudler/LocalAI.git /path/to/LocalAI
-
-tools/build_localai_runtime.sh --source-dir /path/to/LocalAI
-# 既定の出力: build/local-ai
-```
-
-- 要件: Go >= 1.26、make、git、curl、unzip、network access。LocalAI v4.10.0 の `go.mod` は
-  `go 1.26.0` を要求する。
-- script は既定で `GOTOOLCHAIN=local` を使う。installed Go が 1.26 未満の場合は Go 1.26+ を
-  導入するか、`GOTOOLCHAIN=auto` を指定して toolchain を取得させる。
-- build した runtime は `--localai-binary`、または `PHASESHIFT_LOCALAI_BINARY` で指定する。
 
 ## options
 
@@ -104,5 +75,5 @@ build/phaseshift-quantizer
 build/phaseshift-bench
 ```
 
-`phaseshift-server` は Python launcher である。起動には LocalAI runtime が必要で、
-release bundle 内・`--localai-binary`・`PHASESHIFT_LOCALAI_BINARY` の順に探索する。
+`phaseshift-server` は Python 製の HTTP server である。起動時に model processor を load し、
+`phaseshift-compute --serve-stdio` を subprocess として起動してから HTTP port を開く。
