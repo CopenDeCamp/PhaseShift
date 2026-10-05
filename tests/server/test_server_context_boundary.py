@@ -86,7 +86,6 @@ def boundary_cases(checker, processor, url):
 
     status, body = post(url, {
         "model": "phaseshift", "temperature": 0, "max_tokens": max_tokens,
-        "reasoning_effort": "none",
         "messages": [{"role": "user", "content": FILLER * reps + TAIL}]})
     checker.check("near-limit-200", status == 200, f"{status} {repr(body)[:200]}")
     checker.check("near-limit-content", bool((message(body).get("content") or "").strip()),
@@ -95,14 +94,12 @@ def boundary_cases(checker, processor, url):
     over = max_tokens + 256
     status, body = post(url, {
         "model": "phaseshift", "temperature": 0, "max_tokens": over,
-        "reasoning_effort": "none",
         "messages": [{"role": "user", "content": FILLER * reps + TAIL}]})
     checker.check("over-limit-controlled", 400 <= status < 500,
                   f"{status} {repr(body)[:200]}")
 
     status, body = post(url, {
         "model": "phaseshift", "temperature": 0, "max_tokens": 16,
-        "reasoning_effort": "none",
         "messages": [{"role": "user", "content": "What is 2+2? Answer with only the number."}]})
     checker.check("post-over-healthy", status == 200, f"{status} {repr(body)[:200]}")
     checker.check("post-over-answer",
@@ -122,8 +119,7 @@ def concurrency_batch(checker, processor, harness):
     # the first request finish before the others are admitted.
     content = FILLER * per_request + CONTINUE
     payload = {"model": "phaseshift", "temperature": 0, "max_tokens": 96,
-               "reasoning_effort": "none",
-               "messages": [{"role": "user", "content": content}]}
+                      "messages": [{"role": "user", "content": content}]}
 
     results = {}
 
@@ -144,7 +140,7 @@ def concurrency_batch(checker, processor, harness):
                   repr({i: message(results[i][1]).get("content") for i in range(4)}))
 
     status, body = post(url, {"model": "phaseshift", "temperature": 0,
-                              "max_tokens": 16, "reasoning_effort": "none",
+                              "max_tokens": 16,
                               "messages": [{"role": "user",
                                             "content": "What is 2+2? Answer with only the number."}]})
     checker.check("concurrency-health", status == 200

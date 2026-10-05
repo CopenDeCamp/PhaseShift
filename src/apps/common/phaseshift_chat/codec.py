@@ -1,16 +1,17 @@
 """PhaseShift shared chat codec.
 
-Bridges the Hugging Face Qwen3.5 processor (tokenizer + chat template) and the
+Bridges the Hugging Face Qwen processor (tokenizer + chat template) and the
 PhaseShift compute engine's raw token-ID contract.
 
 This module is the single source of truth for:
 
 * processor loading
 * chat-template prompt construction (system / user / assistant / tool)
+* the turn-stable prefix boundary used by the prefix cache protocol contract
 * generation decoding
 * tool-call response parsing
 
-It is imported by both ``phaseshift-cli`` and the LocalAI backend so that the
+It is imported by both ``phaseshift-cli`` and ``phaseshift-server`` so that the
 token sequence sent to ``phaseshift-compute`` never diverges between the two
 entry points.
 """
@@ -18,26 +19,17 @@ entry points.
 from __future__ import annotations
 
 import json
-import os
-import sys
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 __all__ = [
     "ToolParseError",
     "ToolCallingUnavailable",
-    "ReasoningEffortError",
     "PromptRender",
-    "REASONING_EFFORTS",
     "TOOL_RESPONSE_TEMPLATE",
     "load_processor",
     "prompt_ids",
     "prompt_ids_with_cache_boundary",
-    "resolve_reasoning_policy",
-    "thinking_available",
-    "render_thinking_probe",
-    "split_reasoning_partial",
-    "split_reasoning_final",
     "decode_generated",
     "tool_calling_available",
     "streaming_tool_calling_available",
@@ -151,12 +143,6 @@ def _render(processor, messages, tools, enable_thinking, add_generation_prompt):
     return _flatten_ids(ids)
 
 
-def _trace_boundary_unavailable(reason: str) -> None:
-    if os.environ.get("PHASESHIFT_PREFIX_CACHE_TRACE") == "1":
-        print(f"PREFIX_CACHE_BOUNDARY_UNAVAILABLE {reason}",
-              file=sys.stderr, flush=True)
-
-
 def prompt_ids_with_cache_boundary(
     processor,
     messages: list[dict],
@@ -175,160 +161,11 @@ def prompt_ids_with_cache_boundary(
     full = _render(processor, messages, tools, enable_thinking, True)
     try:
         stable = _render(processor, messages, tools, enable_thinking, False)
-    except Exception as exc:  # noqa: BLE001 - boundary is an optimization only
-        _trace_boundary_unavailable(f"stable render failed: {exc}")
+    except Exception:  # noqa: BLE001 - boundary is a protocol hint only
         return PromptRender(full, 0)
     if not stable or len(stable) > len(full) or full[:len(stable)] != stable:
-        _trace_boundary_unavailable("stable render is not an exact prefix")
         return PromptRender(full, 0)
     return PromptRender(full, len(stable))
-
-
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-
-_THINK_OPEN = "<think>"
-_THINK_CLOSE = "</think>"
-
-
-class ReasoningEffortError(ValueError):
-    """Raised when a request carries an unsupported reasoning_effort value."""
-
-
-def _parse_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in ("1", "true", "yes", "on"):
-        return True
-    if text in ("0", "false", "no", "off"):
-        return False
-    raise ReasoningEffortError(f"invalid enable_thinking value: {value!r}")
-
-
-def _chat_template_kwargs(metadata) -> dict:
-    blob = (metadata or {}).get("chat_template_kwargs")
-    if not blob:
-        return {}
-    try:
-        parsed = json.loads(blob)
-    except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def resolve_reasoning_policy(metadata) -> tuple[bool, str]:
-    """Resolve (reasoning_enabled, reasoning_effort) from backend metadata.
-
-    LocalAI v4.10.0 forwards the server-derived reasoning levers and any client
-    request overrides as standalone string keys; the reserved
-    ``chat_template_kwargs`` blob is only a fallback source. Precedence:
-    an explicit ``enable_thinking`` wins, otherwise a transported
-    ``reasoning_effort`` selects the level, otherwise the server default (off).
-
-    Only ``none`` disables thinking; every other accepted level enables it.
-    PhaseShift does not invent per-level token budgets. An unknown level is
-    rejected instead of silently falling back.
-    """
-    meta = metadata or {}
-    kwargs = _chat_template_kwargs(meta)
-    effort = str(
-        meta.get("reasoning_effort") or kwargs.get("reasoning_effort") or ""
-    ).strip().lower()
-    if effort and effort not in REASONING_EFFORTS:
-        raise ReasoningEffortError(
-            f"unsupported reasoning_effort: {effort!r}; "
-            f"expected one of {', '.join(REASONING_EFFORTS)}")
-    explicit = meta.get("enable_thinking")
-    if explicit is None or explicit == "":
-        explicit = kwargs.get("enable_thinking")
-    if explicit is not None and explicit != "":
-        return _parse_bool(explicit), effort
-    if effort:
-        return effort != "none", effort
-    return False, ""
-
-
-def thinking_available(processor) -> bool:
-    """Probe whether this chat template has a real thinking mode.
-
-    Thinking is only real when the enable_thinking=True render differs from the
-    disabled render and ends on an unclosed thinking opener. Qwen3.5 qualifies;
-    the result is cached on the processor.
-    """
-    cached = getattr(processor, "_phaseshift_thinking_capability", None)
-    if cached is not None:
-        return bool(cached)
-    available = False
-    try:
-        messages = [{"role": "user", "content": "ping"}]
-        off = _render(processor, messages, None, False, True)
-        on = _render(processor, messages, None, True, True)
-        if off and on and off != on:
-            available = processor.decode(
-                on, skip_special_tokens=False).rstrip().endswith(_THINK_OPEN)
-    except Exception:  # noqa: BLE001 - capability probe reports, never raises
-        available = False
-    try:
-        processor._phaseshift_thinking_capability = available
-    except Exception:  # noqa: BLE001 - best-effort cache only
-        pass
-    return available
-
-
-def render_thinking_probe(processor) -> str:
-    """Render the enable_thinking=True template for LocalAI's probe."""
-    try:
-        return processor.apply_chat_template(
-            [{"role": "user", "content": "ping"}],
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True,
-        )
-    except Exception:  # noqa: BLE001 - probe only
-        return ""
-
-
-def _strip_think_open(text: str) -> str:
-    return text[len(_THINK_OPEN):] if text.startswith(_THINK_OPEN) else text
-
-
-def split_reasoning_final(text: str) -> tuple[str, str]:
-    """Split a completed generation into (reasoning_content, content).
-
-    The generation prompt pre-fills the thinking opener, so generated text
-    usually starts inside the thinking block. Without a closing delimiter the
-    whole generation is reasoning and content is empty (it must never leak into
-    ``content``).
-    """
-    if not text:
-        return "", ""
-    text = _strip_think_open(text)
-    close = text.find(_THINK_CLOSE)
-    if close < 0:
-        return text.strip(), ""
-    reasoning = text[:close].strip()
-    content = text[close + len(_THINK_CLOSE):]
-    return reasoning, content.lstrip("\n")
-
-
-def split_reasoning_partial(text: str) -> tuple[str, str]:
-    """Split an in-progress generation, holding back a possible delimiter tail.
-
-    A ``</think>`` that spans decode chunks must not be emitted as reasoning and
-    then retracted, so the last ``len('</think>') - 1`` characters stay buffered
-    until the delimiter resolves. The result is monotonic: reasoning grows, then
-    content grows.
-    """
-    if not text:
-        return "", ""
-    text = _strip_think_open(text)
-    close = text.find(_THINK_CLOSE)
-    if close >= 0:
-        return text[:close].lstrip("\n"), text[close + len(_THINK_CLOSE):].lstrip("\n")
-    hold = len(_THINK_CLOSE) - 1
-    if len(text) <= hold:
-        return "", ""
-    return text[:len(text) - hold].lstrip("\n"), ""
 
 
 def decode_generated(processor, generated_ids: Iterable[int]) -> str:
@@ -377,9 +214,7 @@ def new_response_parser(processor, prompt: Iterable[int], prompt_prefix: bool = 
     (and captured function names) of exactly one assistant turn.
 
     ``prompt_prefix`` passes the chat prompt as the parser's ``prefix`` so the
-    pre-filled assistant turn is truncated past its ``</think>`` anchor. The
-    reasoning-on path passes ``False`` because it already removed the reasoning
-    block and feeds only the post-delimiter text.
+    pre-filled assistant turn is truncated past its ``</think>`` anchor.
     """
     factory = _response_parser_factory(processor)
     prefix = list(prompt) if prompt_prefix else ""
@@ -485,10 +320,8 @@ def streaming_tool_calling_available(processor) -> bool:
 def _parse_tool_calls(processor, final_text: str, prefix):
     """Parse tool calls from the final (post-anchor) assistant text.
 
-    ``prefix`` is the response parser's chat-prompt token IDs for the
-    reasoning-off path (the parser truncates the pre-filled assistant turn past
-    its ``</think>`` anchor). The reasoning-on path passes ``None``: the caller
-    already removed the reasoning block, so the parser starts clean.
+    ``prefix`` is the response parser's chat-prompt token IDs; the parser
+    truncates the pre-filled assistant turn past its ``</think>`` anchor.
 
     Returns ``(tool_calls, content)``. Raises ``ToolParseError`` when tool-call
     markup is present but could not be parsed into a call.
@@ -530,7 +363,6 @@ def parse_assistant_message(
     prompt_ids_seq: Iterable[int],
     generated_ids: Iterable[int],
     tools: Optional[list[dict]] = None,
-    reasoning: bool = False,
 ) -> dict[str, Any]:
     """Decode and parse one assistant generation.
 
@@ -538,38 +370,17 @@ def parse_assistant_message(
     ``generated_ids``; it is passed to the response parser as ``prefix`` so the
     parser can discard the pre-filled assistant turn.
 
-    Returns ``{"reasoning_content": str, "content": str, "tool_calls": list}``
-    where each tool call uses the OpenAI shape
-    ``{"type": "function", "function": {"name", "arguments"}}`` and
-    ``arguments`` is a parsed mapping (the wire serialization to a JSON string
-    is the backend's responsibility).
-
-    With ``reasoning`` set the Qwen3.5 thinking block is split off first and the
-    final text is parsed on its own, so reasoning never reaches the tool parser
-    as content. Without a closing delimiter the whole generation stays reasoning
-    and no tool call is produced.
+    Returns ``{"content": str, "tool_calls": list}`` where each tool call uses
+    the OpenAI shape ``{"type": "function", "function": {"name", "arguments"}}``
+    and ``arguments`` is a parsed mapping (the wire serialization to a JSON
+    string is the server's responsibility).
 
     Raises ``ToolParseError`` when a tool request produced tool-call-like output
     that the response template could not parse. Raw markup is never silently
     promoted to ``content``.
     """
     text = decode_generated(processor, generated_ids)
-    if reasoning:
-        reasoning_content, final_text = split_reasoning_final(text)
-        if not tools:
-            return {
-                "reasoning_content": reasoning_content,
-                "content": strip_tool_markup(final_text),
-                "tool_calls": [],
-            }
-        tool_calls, content = _parse_tool_calls(processor, final_text, None)
-        return {
-            "reasoning_content": reasoning_content,
-            "content": content,
-            "tool_calls": tool_calls,
-        }
     if not tools:
-        return {"reasoning_content": "", "content": strip_tool_markup(text),
-                "tool_calls": []}
+        return {"content": strip_tool_markup(text), "tool_calls": []}
     tool_calls, content = _parse_tool_calls(processor, text, prompt_ids_seq)
-    return {"reasoning_content": "", "content": content, "tool_calls": tool_calls}
+    return {"content": content, "tool_calls": tool_calls}

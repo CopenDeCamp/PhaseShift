@@ -757,7 +757,7 @@ void emit_error_with_code(
     emit_json(ev);
 }
 
-const char* constraint_error_code(ps::Status::Code code) {
+const char* status_error_code(ps::Status::Code code) {
     switch (code) {
         case ps::Status::Code::invalid_argument:
         case ps::Status::Code::out_of_range:
@@ -779,7 +779,6 @@ struct DFlashServeSession {
     std::unique_ptr<ps::qwen35::PagedSequenceState> sequence;
     std::unique_ptr<ps::qwen35::dflash2::DFlash2ContextState> context;
     std::unique_ptr<ps::qwen35::runtime::DFlash2SpecDecoder> decoder;
-    std::unique_ptr<ps::qwen35::runtime::TokenConstraintState> constraint;
     ps::qwen35::runtime::DFlash2SpecTiming timing{};
     int32_t pending_token = 0;
     bool ready = false;
@@ -1152,8 +1151,6 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
                                      ps::app::Qwen35ComputeRuntime& runtime,
                                      ServeGeneration& generation,
                                      const std::vector<int32_t>& input_ids,
-                                     const std::string& grammar,
-                                     const std::string& structural_tag,
                                      const ps::qwen35::runtime::SamplingConfig& sampling,
                                      uint32_t prefix_cache_checkpoint_position = 0u) {
     auto& slot_pool = runtime.slot_pool();
@@ -1223,27 +1220,6 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     session->decoder->timing = &session->timing;
     ps::qwen35::runtime::dflash2_spec_decoder_set_sampling(*session->decoder, sampling);
 
-    if (!grammar.empty() || !structural_tag.empty()) {
-        auto constraint_result = runtime.create_constraint_state(grammar, structural_tag);
-        if (!constraint_result.ok()) {
-            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
-            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
-            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
-            return constraint_result.status();
-        }
-        session->constraint = constraint_result.release();
-        const auto* compiler = runtime.constraint_compiler();
-        const uint32_t mask_words = compiler != nullptr ? compiler->mask_words() : 0u;
-        const ps::Status wired = ps::qwen35::runtime::dflash2_spec_decoder_set_constraint(
-            *session->decoder, session->constraint.get(), mask_words, &arena);
-        if (!wired.ok()) {
-            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
-            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
-            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
-            return wired;
-        }
-    }
-
     auto prefill_result = ps::qwen35::runtime::dflash2_spec_prefill(
         *session->decoder, input_ids.data(), static_cast<uint32_t>(input_ids.size()),
         restored_tokens, prefix_cache_checkpoint_position);
@@ -1300,6 +1276,18 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         return false;
     }
 
+    for (const auto& entry : request.items()) {
+        const std::string& key = entry.key();
+        if (key != "op" && key != "request_id" && key != "input_ids" &&
+            key != "max_new_tokens" && key != "temperature" && key != "top_p" &&
+            key != "top_k" && key != "seed" &&
+            key != "prefix_cache_checkpoint_position") {
+            emit_error_with_code(request_id, "invalid_argument",
+                                 "unknown request field: " + key);
+            return false;
+        }
+    }
+
     if (!request.contains("input_ids") || !request["input_ids"].is_array() ||
         request["input_ids"].empty()) {
         emit_error(request_id, "input_ids must be a non-empty array");
@@ -1325,26 +1313,21 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
     const uint32_t max_new_tokens =
         static_cast<uint32_t>(request["max_new_tokens"].get<long long>());
 
-    uint32_t prefix_cache_checkpoint_position = 0;
     if (request.contains("prefix_cache_checkpoint_position")) {
         if (!request["prefix_cache_checkpoint_position"].is_number_integer()) {
-            emit_error(request_id,
-                       "prefix_cache_checkpoint_position must be an integer");
+            emit_error_with_code(
+                request_id, "invalid_argument",
+                "prefix_cache_checkpoint_position must be an integer");
             return false;
         }
         const long long checkpoint_value =
             request["prefix_cache_checkpoint_position"].get<long long>();
-        if (checkpoint_value < 0) {
-            emit_error(request_id,
-                       "prefix_cache_checkpoint_position must be >= 0");
+        if (checkpoint_value != 0) {
+            emit_error_with_code(
+                request_id, "invalid_argument",
+                "prefix cache is not available in this build");
             return false;
         }
-        if (static_cast<uint64_t>(checkpoint_value) > input_ids.size()) {
-            emit_error(request_id,
-                       "prefix_cache_checkpoint_position exceeds input_ids");
-            return false;
-        }
-        prefix_cache_checkpoint_position = static_cast<uint32_t>(checkpoint_value);
     }
 
     if (static_cast<uint64_t>(input_ids.size()) + max_new_tokens >
@@ -1388,45 +1371,6 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         return false;
     }
 
-    std::string grammar;
-    if (request.contains("grammar")) {
-        if (!request["grammar"].is_string()) {
-            emit_error(request_id, "grammar must be a string");
-            return false;
-        }
-        grammar = request["grammar"].get<std::string>();
-        if (grammar.empty()) {
-            emit_error(request_id, "grammar must not be empty");
-            return false;
-        }
-        if (grammar.size() > 1024u * 1024u) {
-            emit_error(request_id, "grammar exceeds the 1 MiB limit");
-            return false;
-        }
-    }
-
-    std::string structural_tag;
-    if (request.contains("structural_tag")) {
-        if (!request["structural_tag"].is_string()) {
-            emit_error(request_id, "structural_tag must be a string");
-            return false;
-        }
-        structural_tag = request["structural_tag"].get<std::string>();
-        if (structural_tag.empty()) {
-            emit_error(request_id, "structural_tag must not be empty");
-            return false;
-        }
-        if (structural_tag.size() > 1024u * 1024u) {
-            emit_error(request_id, "structural_tag exceeds the 1 MiB limit");
-            return false;
-        }
-    }
-    if (!grammar.empty() && !structural_tag.empty()) {
-        emit_error(request_id, "grammar and structural_tag are mutually exclusive");
-        return false;
-    }
-    const bool has_constraint = !grammar.empty() || !structural_tag.empty();
-
     ServeGeneration generation;
     generation.external_request_id = external_request_id;
     generation.emitted_tokens = 0;
@@ -1435,11 +1379,10 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
 
     if (dflash.enabled) {
         generation.dflash = true;
-        const ps::Status open_status = serve_dflash_open_session(
-            dflash, runtime, generation, input_ids, grammar, structural_tag, sampling,
-            prefix_cache_checkpoint_position);
+        const ps::Status open_status =
+            serve_dflash_open_session(dflash, runtime, generation, input_ids, sampling);
         if (!open_status.ok()) {
-            emit_error_with_code(request_id, constraint_error_code(open_status.code()),
+            emit_error_with_code(request_id, status_error_code(open_status.code()),
                                  open_status.message());
             return false;
         }
@@ -1447,35 +1390,13 @@ bool serve_parse_generate(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
         return true;
     }
 
-    const bool constraint_trace = std::getenv("PHASESHIFT_CONSTRAINT_TRACE") != nullptr;
-    std::uint64_t hits_before = 0;
-    if (constraint_trace && runtime.constraint_compiler() != nullptr) {
-        hits_before = runtime.constraint_compiler()->cache_hits();
-    }
-
     ps::Result<uint64_t> submit_result =
-        grammar.empty() && structural_tag.empty()
-            ? runtime.submit(std::move(input_ids), max_new_tokens, sampling,
-                             prefix_cache_checkpoint_position)
-            : (structural_tag.empty()
-                   ? runtime.submit(std::move(input_ids), max_new_tokens, sampling, grammar,
-                                    prefix_cache_checkpoint_position)
-                   : runtime.submit_structural_tag(std::move(input_ids), max_new_tokens,
-                                                   sampling, structural_tag,
-                                                   prefix_cache_checkpoint_position));
+        runtime.submit(std::move(input_ids), max_new_tokens, sampling);
     if (!submit_result.ok()) {
         emit_error_with_code(request_id,
-                             constraint_error_code(submit_result.status().code()),
+                             status_error_code(submit_result.status().code()),
                              submit_result.status().message());
         return false;
-    }
-    if (constraint_trace && has_constraint && runtime.constraint_compiler() != nullptr) {
-        const auto* compiler = runtime.constraint_compiler();
-        fprintf(stderr,
-                "CONSTRAINT_COMPILE_US=%llu CONSTRAINT_CACHE_HIT=%d CONSTRAINT_MASK_WORDS=%u\n",
-                static_cast<unsigned long long>(compiler->last_compile_us()),
-                compiler->cache_hits() > hits_before ? 1 : 0,
-                compiler->mask_words());
     }
     generation.internal_request_id = submit_result.release();
     state.inflight.emplace(external_request_id, std::move(generation));
@@ -1498,7 +1419,11 @@ void serve_handle_command(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
 
     const std::string op = request.value("op", std::string());
     if (op == "ping") {
-        emit_json(nlohmann::json{{"event", "pong"}});
+        emit_json(nlohmann::json{
+            {"event", "pong"},
+            {"protocol_version", 1},
+            {"capabilities", {{"prefix_cache", false}}},
+        });
         return;
     }
     if (op == "shutdown") {

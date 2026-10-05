@@ -115,12 +115,9 @@ def main() -> int:
     try:
         with ServerHarness(
                 max_seq_len=MODEL_CONTEXT, arena_gib=24,
-                prefix_cache_capacity_tokens=16384,
-                prefix_cache_max_entries=8,
                 device=int(os.environ.get("PHASESHIFT_TEST_DEVICE", "0")),
-                env={"PHASESHIFT_BACKEND_REQUEST_LOG": str(request_log),
-                     "PHASESHIFT_BACKEND_TOKEN_LOG": str(token_log),
-                     "PHASESHIFT_PREFIX_CACHE_TRACE": "1",
+                env={"PHASESHIFT_SERVER_REQUEST_LOG": str(request_log),
+                     "PHASESHIFT_SERVER_TOKEN_LOG": str(token_log),
                      "PHASESHIFT_COMPUTE_LOG": str(compute_log)}) as server:
             env = agent_env(base, server.env)
 
@@ -162,14 +159,6 @@ def main() -> int:
                 generations = sum(1 for line in token_log.read_text().splitlines() if line.strip())
             checker.check("tool-loop-multiple-generations", generations >= 2,
                           f"generations={generations}")
-
-            compute_text = (compute_log.read_text(errors="replace")
-                            if compute_log.exists() else "")
-            checker.check("prefix-cache-enabled",
-                          "PREFIX_CACHE_ENABLED=1" in compute_text,
-                          compute_text[-400:])
-            checker.check("prefix-cache-hit", "PREFIX_CACHE_HIT" in compute_text,
-                          compute_text[-600:])
     except Exception as exc:  # noqa: BLE001
         checker.check("exception", False, repr(exc))
     finally:

@@ -39,7 +39,7 @@ def main() -> int:
         return 2
 
     try:
-        with ServerHarness(env={"PHASESHIFT_BACKEND_TOKEN_LOG": str(token_log)}) as server:
+        with ServerHarness(env={"PHASESHIFT_SERVER_TOKEN_LOG": str(token_log)}) as server:
             models = http_get_json(f"{server.base_url}/models")
             checker.check(
                 "models-listed",

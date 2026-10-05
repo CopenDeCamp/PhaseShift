@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """Canonical PhaseShift server regression runner.
 
-The manifest is explicit, not a glob. `support.py`, the manual closure soak and
-the benchmark script must not be pulled into the default regression run by
-accident, so every participating test is named here.
+The manifest is explicit, not a glob. `support.py` must not be pulled into the
+default regression run by accident, so every participating test is named here.
 
 Usage:
     python3 tests/server/run_server_regression.py --all
-    python3 tests/server/run_server_regression.py --group reasoning --group agent
+    python3 tests/server/run_server_regression.py --group tools --group agent
     python3 tests/server/run_server_regression.py --list
 
 Each selected test runs as a subprocess and must exit 0. A non-zero exit is a
-failure, including a missing prerequisite (for example a missing LocalAI binary);
-nothing is silently treated as a skip.
+failure, including a missing prerequisite; nothing is silently treated as a
+skip (a test that exits 77 reports itself as skipped and is not a failure).
 
 Environment (inherited by every test):
-    PHASESHIFT_BUILD_DIR                    default: <repo>/build
-    PHASESHIFT_LOCALAI_BINARY               patched LocalAI runtime
-    PHASESHIFT_LOCALAI_VANILLA_BINARY       unpatched LocalAI v4.10.0 (capability)
-    PHASESHIFT_LOCALAI_CHAT_ONLY_BINARY     0001-only LocalAI (capability)
-    PHASESHIFT_LOCALAI_NO_TOOL_POLICY_BINARY pre-0003 LocalAI (tool handshake)
+    PHASESHIFT_BUILD_DIR       default: <repo>/build
+    PHASESHIFT_MODEL_DIR       model directory used by every server test
+    PHASESHIFT_TEST_DEVICE     GPU device index override
 """
 
 from __future__ import annotations
@@ -38,79 +35,25 @@ SERVER_DIR = Path(__file__).resolve().parent
 # Group order is the canonical `--all` order. A test appears in exactly one
 # group. Intentionally excluded from the manifest:
 #   support.py                  shared helpers, not a test
-#   test_server_closure_soak.py manual long-running soak, not a regression
 #   tools/bench_server_reasoning_constraints.py  benchmark, not a test
 GROUPS = OrderedDict([
     ("core", [
         "test_compute_service.py",
         "test_compute_dflash2.py",
         "test_server_dflash2.py",
+        "test_server_models.py",
         "test_server_chat.py",
         "test_server_stream.py",
-        "test_server_responses.py",
         "test_server_eos_contract.py",
         "test_server_unconstrained_oracle.py",
-        "test_server_public_surface.py",
-    ]),
-    ("constraints", [
-        "test_compute_constraints.py",
-        "test_compute_structural_tag.py",
-        "test_compute_composite_constraint.py",
-        "test_constraint_concurrency.py",
-        "test_constraint_dependency.py",
-        "test_constraint_graph.py",
     ]),
     ("tools", [
         "test_server_tools.py",
         "test_server_stream_tools.py",
-        "test_server_strict_tools.py",
-        "test_server_strict_tools_stream.py",
-        "test_server_responses_strict_tools.py",
-        "test_tool_constraint_builder.py",
-        "test_tool_policy_transport.py",
     ]),
-    ("structured", [
-        "test_server_structured.py",
-        "test_server_structured_stream.py",
-        "test_server_responses_structured.py",
-        "test_server_responses_structured_stream.py",
-        "test_localai_fail_closed.py",
-        "test_localai_responses_fail_closed.py",
-    ]),
-    ("composition", [
-        "test_server_structured_tools.py",
-        "test_server_structured_tools_stream.py",
-        "test_server_responses_structured_tools.py",
-        "test_server_responses_structured_tools_stream.py",
-        "test_tool_composition_builder.py",
-        "test_tool_composition_transport.py",
-    ]),
-    ("prefix-cache", [
-        "test_prefix_cache_no_host_transfer.py",
-        "test_compute_prefix_cache.py",
-        "test_compute_prefix_checkpoint.py",
-        "test_server_prefix_cache.py",
-        "test_server_agent_prefix_cache.py",
-        "test_server_responses_prefix_cache.py",
-        "test_server_prefix_cache_defaults.py",
-    ]),
-    ("reasoning", [
-        "test_reasoning_transport.py",
-        "test_server_reasoning.py",
-        "test_server_reasoning_stream.py",
-        "test_server_responses_reasoning.py",
-        "test_server_reasoning_prefix_cache.py",
-        "test_server_reasoning_concurrency.py",
-    ]),
-    ("reasoning-tools", [
-        "test_reasoning_tool_parser.py",
-        "test_server_reasoning_tools.py",
-        "test_server_reasoning_tools_stream.py",
-        "test_server_reasoning_structured.py",
-        "test_server_reasoning_composition.py",
-        "test_server_responses_reasoning_tools.py",
-        "test_server_reasoning_tool_roundtrip.py",
-        "test_compute_reasoning_constraint.py",
+    ("unsupported", [
+        "test_server_unsupported.py",
+        "test_compute_prefix_contract.py",
     ]),
     ("concurrency-cancel", [
         "test_compute_cancel.py",
@@ -118,9 +61,6 @@ GROUPS = OrderedDict([
         "test_server_concurrency.py",
         "test_server_stream_cancel.py",
         "test_server_context_boundary.py",
-    ]),
-    ("capability", [
-        "test_server_localai_capability.py",
     ]),
     ("agent", [
         "test_agent_opencode.py",
@@ -167,6 +107,9 @@ def run_test(name, env, tail):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     duration = time.monotonic() - started
     output = proc.stdout or ""
+    if proc.returncode == 77:
+        print(f"[SKIP] {name} ({duration:.1f}s)")
+        return True
     if proc.returncode != 0:
         lines = output.rstrip().splitlines()
         shown = "\n".join(lines[-tail:]) if tail > 0 else ""

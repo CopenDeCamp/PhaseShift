@@ -36,7 +36,7 @@ def main() -> int:
     token_log = Path(tempfile.mkdtemp(prefix="ps-tokenlog-")) / "tokens.txt"
 
     try:
-        with ServerHarness(env={"PHASESHIFT_BACKEND_TOKEN_LOG": str(token_log)}) as server:
+        with ServerHarness(env={"PHASESHIFT_SERVER_TOKEN_LOG": str(token_log)}) as server:
             non_stream = http_json(
                 f"{server.base_url}/chat/completions",
                 {"model": "phaseshift", "messages": MESSAGES,

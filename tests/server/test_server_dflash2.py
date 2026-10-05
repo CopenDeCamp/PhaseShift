@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""phaseshift-server の DFlash2 / psq4構成に対する E2E 検証.
+"""DFlash2 構成に対する phaseshift-server の E2E 検証.
 
-port 8001 相当の起動、chat / streaming / responses の成功、および DFlash2 でも
-structured output / tool calling / stochastic sampling / prefix cache が
-有効であることを確認する.
+通常の DFlash2 生成（chat / stream / tools / stochastic sampling）が成立し、
+削除した structured output / Responses API が fail-closed であることを確認する.
 """
 
 from __future__ import annotations
@@ -18,38 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from support import (Checker, ServerHarness, http_get_json,  # noqa: E402
-                     ensure_chat_import, http_json, http_post_status,
-                     localai_binary, model_dir)
-
-codec = ensure_chat_import()
+                     http_json, http_post_status, model_dir)
 
 DFLASH2_MODEL_DIR = os.environ.get("PHASESHIFT_DFLASH2_MODEL_DIR")
 KV_DTYPE = os.environ.get("PHASESHIFT_TEST_KV_DTYPE", "psq4")
 
-STRUCTURED = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "probe",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {"a": {"type": "string"}},
-            "required": ["a"],
-            "additionalProperties": False,
-        },
-    },
-}
-RESPONSES_STRUCTURED = {
-    "type": "json_schema",
-    "name": "probe",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {"a": {"type": "string"}},
-        "required": ["a"],
-        "additionalProperties": False,
-    },
-}
 TOOLS = [{
     "type": "function",
     "function": {
@@ -68,8 +40,6 @@ def main() -> int:
     checker = Checker("server-dflash2")
     harness = ServerHarness(max_seq_len=512, arena_gib=31, device=1,
                             max_concurrent_requests=1,
-                            prefix_cache_capacity_tokens=16384,
-                            prefix_cache_max_entries=4,
                             kv_cache_dtype=KV_DTYPE,
                             dflash2_model_dir=DFLASH2_MODEL_DIR,
                             startup_timeout=420.0)
@@ -88,16 +58,12 @@ def main() -> int:
                       "Speculative:  DFlash2" in log_text, log_text[-800:])
         checker.check("log reports kv dtype",
                       f"KV dtype:     {KV_DTYPE}" in log_text, log_text[-800:])
-        checker.check("log enables tool calling",
-                      "Tool calling: yes" in log_text, log_text[-800:])
-        checker.check("log enables structured",
-                      "Structured:   fail-closed (Chat + Responses)" in log_text,
-                      log_text[-800:])
-        checker.check("log reports prefix cache",
-                      "Prefix cache: 16384 tokens / 4 entries" in log_text,
-                      log_text[-800:])
+        checker.check("log reports prefix cache capability",
+                      "capabilities.prefix_cache=false" in log_text, log_text[-800:])
         checker.check("log concurrency is 1",
                       "Concurrency:  1" in log_text, log_text[-800:])
+        checker.check("compute reports dflash2 enabled",
+                      "DFLASH2_ENABLED=1" in log_text, log_text[-800:])
 
         models = http_get_json(f"{harness.base_url}/models")
         checker.check("model listed",
@@ -124,20 +90,17 @@ def main() -> int:
                       bool(stochastic["choices"][0]["message"]["content"]),
                       str(stochastic["choices"][0]["message"])[:200])
 
-        structured = http_json(f"{harness.base_url}/chat/completions", {
-            "model": "phaseshift",
-            "messages": [{"role": "user", "content": "Produce the JSON value."}],
-            "temperature": 0, "max_tokens": 256,
-            "response_format": STRUCTURED,
-        })
-        structured_text = structured["choices"][0]["message"]["content"]
-        try:
-            parsed = json.loads(structured_text, strict=False)
-        except ValueError:
-            parsed = None
-        checker.check("structured accepted",
-                      parsed is not None and parsed.get("a") is not None,
-                      repr(structured_text[:400]))
+        status, body = http_post_status(
+            f"{harness.base_url}/chat/completions",
+            {"model": "phaseshift",
+             "messages": [{"role": "user", "content": "Produce the JSON value."}],
+             "temperature": 0, "max_tokens": 256,
+             "response_format": {"type": "json_object"}})
+        checker.check("structured rejected", status == 400, f"{status} {body[:300]}")
+        if status == 400:
+            checker.check("structured rejection code",
+                          json.loads(body)["error"]["code"] == "unsupported_parameter",
+                          body[:300])
 
         tools = http_json(f"{harness.base_url}/chat/completions", {
             "model": "phaseshift",
@@ -152,47 +115,18 @@ def main() -> int:
             checker.check("tool call name",
                           tool_calls[0]["function"]["name"] == "get_weather",
                           str(tool_calls[0])[:300])
+            checker.check("tool arguments are a json string",
+                          isinstance(tool_calls[0]["function"]["arguments"], str),
+                          str(tool_calls[0])[:300])
             tool_content = tools["choices"][0]["message"].get("content") or ""
-            reasoning, _ = codec.split_reasoning_final(tool_content)
-            checker.check("tools content has no thinking block",
-                          not reasoning.strip(), repr(tool_content[:300]))
-            checker.check("tools content has no think markup",
-                          codec._THINK_OPEN not in tool_content,
-                          repr(tool_content[:300]))
+            checker.check("tools content has no tool markup",
+                          "<tool_call>" not in tool_content, repr(tool_content[:300]))
 
-        responses = http_json(f"{harness.base_url}/responses", {
-            "model": "phaseshift",
-            "input": "Say exactly: ok",
-            "temperature": 0,
-            "max_output_tokens": 16,
-        })
-        text = "".join(
-            item.get("content", [{}])[0].get("text", "")
-            for item in responses.get("output", []) if item.get("type") == "message")
-        checker.check("responses returns text", "ok" in text, text)
-
-        rs_status, rs_body = http_post_status(
+        status, body = http_post_status(
             f"{harness.base_url}/responses",
-            {"model": "phaseshift", "input": "Produce the JSON value.",
-             "temperature": 0,
-             "max_output_tokens": 256, "text": {"format": RESPONSES_STRUCTURED}})
-        rs_text = ""
-        if rs_status == 200:
-            rs_payload = json.loads(rs_body)
-            rs_text = "".join(
-                item.get("content", [{}])[0].get("text", "")
-                for item in rs_payload.get("output", [])
-                if item.get("type") == "message")
-            try:
-                rs_parsed = json.loads(rs_text, strict=False)
-            except ValueError:
-                rs_parsed = None
-        else:
-            rs_parsed = None
-        checker.check("responses structured accepted",
-                      rs_status == 200 and rs_parsed is not None
-                      and rs_parsed.get("a") is not None,
-                      f"status={rs_status} body={rs_body[:400]} text={rs_text[:200]}")
+            {"model": "phaseshift", "input": "Say exactly: ok",
+             "temperature": 0, "max_output_tokens": 16})
+        checker.check("responses unsupported", status == 404, f"{status} {body[:300]}")
 
         request = urllib.request.Request(
             f"{harness.base_url}/chat/completions",
@@ -204,6 +138,7 @@ def main() -> int:
             headers={"Content-Type": "application/json"},
             method="POST")
         chunks = []
+        finish = None
         with urllib.request.urlopen(request, timeout=600) as response:
             for line in response:
                 decoded = line.decode("utf-8", errors="replace").strip()
@@ -216,7 +151,10 @@ def main() -> int:
                 delta = event["choices"][0]["delta"].get("content")
                 if delta:
                     chunks.append(delta)
+                if event["choices"][0].get("finish_reason"):
+                    finish = event["choices"][0]["finish_reason"]
         checker.check("stream returns content", len(chunks) > 0, str(chunks))
+        checker.check("stream finish reason", finish == "stop", str(finish))
     finally:
         harness.close()
 
@@ -226,9 +164,6 @@ def main() -> int:
 if __name__ == "__main__":
     if not DFLASH2_MODEL_DIR:
         print("SKIP: PHASESHIFT_DFLASH2_MODEL_DIR is not set")
-        raise SystemExit(77)
-    if localai_binary() is None:
-        print("SKIP: LocalAI runtime not found")
         raise SystemExit(77)
     if not model_dir().is_dir():
         print(f"SKIP: model dir not found: {model_dir()}")

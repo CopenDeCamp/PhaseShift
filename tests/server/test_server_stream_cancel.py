@@ -16,6 +16,7 @@ from support import (  # noqa: E402
     ServerHarness,
     compute_pids,
     http_json,
+    http_post_status,
     model_dir,
 )
 
@@ -70,28 +71,11 @@ def main() -> int:
                           chat_latency < 120.0,
                           f"latency={chat_latency:.1f}s (cancelled if well below full generation)")
 
-            # Responses streaming disconnect.
-            first_r = open_stream_and_disconnect(
-                server.port, "/v1/responses", {
-                    "model": "phaseshift",
-                    "input": LONG_MESSAGE["content"],
-                    "stream": True, "temperature": 0, "max_output_tokens": STREAM_BUDGET})
-            checker.check("responses-disconnect-started",
-                          "event:" in first_r or "data:" in first_r,
-                          repr(first_r[:120]))
-
-            started = time.monotonic()
-            recovered_r = http_json(f"{server.base_url}/responses", {
-                "model": "phaseshift", "input": "Reply with exactly: hello",
-                "stream": False, "temperature": 0, "max_output_tokens": 16})
-            responses_latency = time.monotonic() - started
-            checker.check("responses-after-disconnect",
-                          any(item.get("type") == "message"
-                              for item in recovered_r.get("output", [])),
-                          repr(recovered_r.get("output")))
-            checker.check("responses-after-disconnect-latency",
-                          responses_latency < 120.0,
-                          f"latency={responses_latency:.1f}s")
+            # Responses API must stay absent; a disconnect test there is meaningless.
+            status, body = http_post_status(
+                f"http://127.0.0.1:{server.port}/v1/responses",
+                {"model": "phaseshift", "input": "hello"})
+            checker.check("responses-unsupported", status == 404, f"{status} {body[:200]}")
 
             checker.check("compute-pid-stable", compute_pids() == pids_before,
                           f"{pids_before} -> {compute_pids()}")

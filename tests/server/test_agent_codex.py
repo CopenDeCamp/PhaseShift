@@ -87,12 +87,9 @@ def main() -> int:
     try:
         with ServerHarness(
                 max_seq_len=16384, arena_gib=24,
-                prefix_cache_capacity_tokens=16384,
-                prefix_cache_max_entries=8,
                 device=int(os.environ.get("PHASESHIFT_TEST_DEVICE", "0")),
-                env={"PHASESHIFT_BACKEND_REQUEST_LOG": str(request_log),
-                     "PHASESHIFT_BACKEND_TOKEN_LOG": str(token_log),
-                     "PHASESHIFT_PREFIX_CACHE_TRACE": "1",
+                env={"PHASESHIFT_SERVER_REQUEST_LOG": str(request_log),
+                     "PHASESHIFT_SERVER_TOKEN_LOG": str(token_log),
                      "PHASESHIFT_COMPUTE_LOG": str(compute_log)}) as server:
             (codex_home / "config.toml").write_text(
                 CONFIG_TOML.format(base_url=server.base_url))
@@ -139,23 +136,13 @@ def main() -> int:
             checker.check("codex-responses-assistant-calls", assistant_with_calls, "")
             checker.check("codex-responses-multiple-requests", len(entries) >= 2,
                           f"requests={len(entries)}")
-            if entries:
-                checker.check("codex-wire-messages-not-prompt",
-                              all(not e.get("prompt_empty") for e in entries),
-                              repr([e.get("prompt_empty") for e in entries]))
 
             generations = 0
             if token_log.is_file():
                 generations = sum(1 for line in token_log.read_text().splitlines() if line.strip())
             checker.check("codex-multiple-generations", generations >= 2,
                           f"generations={generations}")
-            compute_text = (compute_log.read_text(errors="replace")
-                            if compute_log.exists() else "")
-            checker.check("prefix-cache-enabled",
-                          "PREFIX_CACHE_ENABLED=1" in compute_text,
-                          compute_text[-400:])
-            checker.check("prefix-cache-hit", "PREFIX_CACHE_HIT" in compute_text,
-                          compute_text[-600:])
+
     except Exception as exc:  # noqa: BLE001
         checker.check("exception", False, repr(exc))
     finally:

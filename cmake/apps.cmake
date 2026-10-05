@@ -45,36 +45,34 @@ add_custom_command(
 )
 add_custom_target(phaseshift-cli-stage ALL DEPENDS "${PHASESHIFT_CLI_TARGET}")
 
-# Server product: Python launcher plus the LocalAI backend, the vendored
-# LocalAI protobuf stubs, and the shared chat codec. Everything the server
-# needs lives under build/phaseshift-server-lib/; nothing is imported from the
-# source tree at runtime.
+# Server product: Python launcher plus the OpenAI protocol adapter, the async
+# compute client and the shared chat codec. Everything the server needs lives
+# under build/phaseshift-server-lib/; nothing is imported from the source tree
+# at runtime.
 set(PHASESHIFT_SERVER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/server/phaseshift_server.py")
 set(PHASESHIFT_SERVER_TARGET "${CMAKE_CURRENT_BINARY_DIR}/phaseshift-server")
 set(PHASESHIFT_SERVER_LIB "${CMAKE_CURRENT_BINARY_DIR}/phaseshift-server-lib")
-set(PHASESHIFT_SERVER_BACKEND_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/server/backend")
-set(PHASESHIFT_SERVER_PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/server/localai_proto")
+set(PHASESHIFT_SERVERLIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/server/serverlib")
 set(PHASESHIFT_CHAT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/common/phaseshift_chat")
 set(PHASESHIFT_CHAT_STAGE_DIR "${PHASESHIFT_SERVER_LIB}/common/phaseshift_chat")
 add_custom_command(
     OUTPUT "${PHASESHIFT_SERVER_TARGET}"
     COMMAND ${CMAKE_COMMAND} -E copy "${PHASESHIFT_SERVER_SCRIPT}" "${PHASESHIFT_SERVER_TARGET}"
     COMMAND /bin/sh -c "chmod +x '${PHASESHIFT_SERVER_TARGET}'"
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "${PHASESHIFT_SERVER_LIB}"
     COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${PHASESHIFT_SERVER_LIB}/backend"
-        "${PHASESHIFT_SERVER_LIB}/localai_proto"
+        "${PHASESHIFT_SERVER_LIB}/serverlib"
         "${PHASESHIFT_CHAT_STAGE_DIR}"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PHASESHIFT_SERVER_BACKEND_DIR}" "${PHASESHIFT_SERVER_LIB}/backend"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PHASESHIFT_SERVER_PROTO_DIR}" "${PHASESHIFT_SERVER_LIB}/localai_proto"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PHASESHIFT_SERVERLIB_DIR}" "${PHASESHIFT_SERVER_LIB}/serverlib"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${PHASESHIFT_CHAT_DIR}" "${PHASESHIFT_CHAT_STAGE_DIR}"
-    COMMAND /bin/sh -c "chmod +x '${PHASESHIFT_SERVER_LIB}/backend/phaseshift_backend.py'"
     DEPENDS
         "${PHASESHIFT_SERVER_SCRIPT}"
-        "${PHASESHIFT_SERVER_BACKEND_DIR}/phaseshift_backend.py"
-        "${PHASESHIFT_SERVER_BACKEND_DIR}/compute_client.py"
-        "${PHASESHIFT_SERVER_BACKEND_DIR}/message_codec.py"
+        "${PHASESHIFT_SERVERLIB_DIR}/__init__.py"
+        "${PHASESHIFT_SERVERLIB_DIR}/openai_protocol.py"
+        "${PHASESHIFT_SERVERLIB_DIR}/compute_client.py"
+        "${PHASESHIFT_SERVERLIB_DIR}/chat_service.py"
+        "${PHASESHIFT_CHAT_DIR}/__init__.py"
         "${PHASESHIFT_CHAT_DIR}/codec.py"
-        "${PHASESHIFT_CHAT_DIR}/tool_constraint.py"
     COMMENT "Staging phaseshift-server"
 )
 add_custom_target(phaseshift-server-stage ALL DEPENDS "${PHASESHIFT_SERVER_TARGET}")
