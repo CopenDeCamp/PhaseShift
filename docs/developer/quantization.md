@@ -139,5 +139,3 @@ runtime は weight を `MatrixEncoding`（`weights/matrix_weight.h`）として�
 - PSQ4 / PSQ8 は prefill / decode とも専用カーネルを持つ。長 context decode は
   BF16 と同じ KV split/reduce（flash-decoding 型 2 kernel、`max_visible >= 2048`）を使う。
 - PSQ8 の code は weight PSQ8 と同じ E4M3。block は 32 value（`kPsq8BlocksPerHead = 8`）。
-- prefix cache は全 KV dtype を cache する（`PrefixCache::create` は active pool と同じ
-  dtype の cache pool を作る）。詳細は [prefix_cache.md](prefix_cache.md) を参照。

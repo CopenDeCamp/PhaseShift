@@ -25,7 +25,6 @@ PoC・Gate・採否判断は `docs/rnd/`、現在の性能値は `docs/perf/`、
 ## server
 
 - [server_status.md](server_status.md) — Server の開発者向け入口（surface と詳細 contract へのリンク）
-- [prefix_cache.md](prefix_cache.md) — prefix cache の protocol contract
 
 ## quantization / formats
 

@@ -579,7 +579,7 @@ MCU continuous batching の永続 request state。CPU runtime の
 - CPU runtime は **Host-driven な reference / backend** として維持する。
 - GPU MCU runtime は **autonomous continuous-batching backend** であり、
   実装方式は異なる。
-- sampling / constraints / prefix reuse / chunked prefill / stop conditions /
+- sampling / chunked prefill / stop conditions /
   request cancellation / KV・生成 token の正しさ など、固定した CPU execution model
   でも実現できる機能は原則 feature parity を維持する。**MCU 実装を理由に CPU 機能を
   削除・簡略化・置換しない。**
