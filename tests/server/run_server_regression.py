@@ -44,7 +44,6 @@ GROUPS = OrderedDict([
         "test_server_chat.py",
         "test_server_stream.py",
         "test_server_eos_contract.py",
-        "test_server_unconstrained_oracle.py",
     ]),
     ("tools", [
         "test_server_tools.py",

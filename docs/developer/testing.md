@@ -60,30 +60,16 @@ ctest --test-dir build -L gpu_mcu -N
   model が無い環境では exit で返るが、required acceptance の対象外である。
   required acceptance では skip を失敗として扱う。
 
-## optional E2E
+## optional tests
 
-Qwen3.5-4B full application E2E は `PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` で有効になる。
+`PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` で external model を要する heavy test
+（DFlash2 gate、GPU-MCU acceptance、TP、MTP weight contract 等）が build される。
 manifest は `cmake/tests.cmake` が正本であり、件数は固定しない。
 
-- 外部model: `PHASESHIFT_MODEL_DIR_4B`（既定 `models/Qwen3.5-4B`）
-- Oracle: `tests/e2e/fixtures/qwen35_4b_oracle.json`
-  （Hugging Face Transformers + PyTorch FP32 eager greedy、PhaseShift非依存）
-- 契約: exact greedy token ID
-  - compute: BF16 KV / FP8 KV 双方で `GENERATED_IDS == Oracle`（3way exact）
-    + `--dump-logits`（argmax == GENERATED_IDS / NaN 0 / Inf 0）
-  - cli: single-shot / interactive multi-turn のdecoded reply exact
-  - bench: pp / tg deterministic + gemm correctness
-  - quantizer: quantize / verify / kld / imatrix / ppl（self）
-
-実行:
-
-```bash
-ctest --test-dir build -L e2e --output-on-failure
-```
-
-`cli:interactive:turn2==oracle` は **KNOWN-LOSSY**（GDN recurrence の bf16 staging による
-言い回しの差。文脈は保持。詳細 `docs/rnd/gdn/optimization_history.md` §7.15）。
-gate は通すが `[KNOWN-LOSSY]` として理由付きで出力される。
+Qwen3.5-4B full application E2E は削除済みである。外部 model が無い環境で
+skip を垂れ流さないため、実行できない suite は repository に残さない。
+`tests/fixtures/qwen35_4b_oracle.json` は generation stop token contract
+（`test_server_eos_contract.py`）の入力として残している。
 
 ## server regression
 

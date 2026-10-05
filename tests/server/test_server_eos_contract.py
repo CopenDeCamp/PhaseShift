@@ -23,7 +23,7 @@ from support import (  # noqa: E402
 
 
 def oracle_case(name: str) -> dict:
-    path = REPO_ROOT / "tests" / "e2e" / "fixtures" / "qwen35_4b_oracle.json"
+    path = REPO_ROOT / "tests" / "fixtures" / "qwen35_4b_oracle.json"
     fixture = json.loads(path.read_text())
     for case in fixture["cases"]:
         if case["name"] == name:

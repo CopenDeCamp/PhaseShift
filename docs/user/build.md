@@ -50,10 +50,10 @@ PhaseShiftが対象とするのは `gfx1201`（AMD Radeon AI PRO R9700）のみ�
 | option | 既定 | 説明 |
 |---|---|---|
 | `PHASESHIFT_BUILD_TESTS` | ON | test suite build |
-| `PHASESHIFT_BUILD_OPTIONAL_TESTS` | OFF | Qwen3.5-4B E2E（`PHASESHIFT_BUILD_BENCHMARKS=ON` 必須） |
+| `PHASESHIFT_BUILD_OPTIONAL_TESTS` | OFF | external model を要する optional / heavy test |
 | `PHASESHIFT_BUILD_BENCHMARKS` | ON | benchmark executables（bench + E2E前提） |
 | `PHASESHIFT_HIP_GRAPH` | OFF | HIP graph execution mode |
-| `PHASESHIFT_MODEL_DIR_4B` | `models/Qwen3.5-4B` | E2E用外部model directory |
+| `PHASESHIFT_MODEL_DIR_4B` | `models/Qwen3.5-4B` | optional test 用外部model directory |
 | `PHASESHIFT_LIBCXX_LLVM_ROOT` | `/usr/lib/llvm-23` | host libc++ 23 root |
 | `CMAKE_HIP_ARCHITECTURES` | 必須 | 対象GPUアーキテクチャ（`gfx1201` のみ） |
 

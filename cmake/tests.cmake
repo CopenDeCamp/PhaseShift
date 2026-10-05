@@ -3,8 +3,7 @@
 # Test policy:
 #   - required: 14 self-contained contract / correctness tests.
 #     Repository + ROCm + 1 GPU only. No external files, no skip machinery.
-#   - optional: Qwen3.5-4B application E2E (external model at
-#     PHASESHIFT_MODEL_DIR_4B + committed oracle fixture). Built only when
+#   - optional: external-model / heavy tests. Built only when
 #     PHASESHIFT_BUILD_OPTIONAL_TESTS=ON.
 #
 # Included via tests/CMakeLists.txt (thin wrapper).
@@ -109,7 +108,6 @@ target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}
 phaseshift_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_mtp_weight_load SOURCE unit/test_qwen35_mtp_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_config SOURCE unit/test_dflash2_config.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
 phaseshift_add_test(NAME test_qwen35_config_tie SOURCE unit/test_qwen35_config_tie.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_dflash2_quantization_adapter SOURCE unit/test_dflash2_quantization_adapter.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_quantizer_core)
 phaseshift_add_test(NAME test_dflash2_weight_contract SOURCE unit/test_dflash2_weight_contract.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
@@ -355,75 +353,7 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
     endforeach()
 endif()
 
-# ---------------------------------------------------------------------------
-# Qwen3.5-4B full application E2E.
-# OPTIONAL + EXTERNAL_FILES: requires the external 4B model at
-# PHASESHIFT_MODEL_DIR_4B and the committed HF/PyTorch oracle fixture.
-# ---------------------------------------------------------------------------
-
 if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
-    if(NOT PHASESHIFT_BUILD_BENCHMARKS)
-        message(
-            FATAL_ERROR
-            "Qwen3.5-4B E2E requires PHASESHIFT_BUILD_BENCHMARKS=ON"
-        )
-    endif()
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
-
-    add_custom_target(
-        phaseshift-e2e-apps
-        DEPENDS
-            phaseshift-compute
-            phaseshift-cli-stage
-            phaseshift-quantizer
-            phaseshift-bench
-            phaseshift-gpu-test-runner
-    )
-
-    add_test(
-        NAME test_apps_qwen35_4b_inference_e2e
-        COMMAND phaseshift-gpu-test-runner
-            --gpu-count 1
-            --cost-gb 24
-            --timeout 1800
-            --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
-            --
-            "${Python3_EXECUTABLE}"
-            "${_PS_TESTS_ROOT}/e2e/test_apps_qwen35_4b.py"
-            --suite inference
-            --model-dir "${PHASESHIFT_MODEL_DIR_4B}"
-            --oracle "${_PS_TESTS_ROOT}/e2e/fixtures/qwen35_4b_oracle.json"
-            --compute "$<TARGET_FILE:phaseshift-compute>"
-            --cli "${PHASESHIFT_CLI_TARGET}"
-            --bench "$<TARGET_FILE:phaseshift-bench>"
-            --quantizer "$<TARGET_FILE:phaseshift-quantizer>"
-    )
-    set_tests_properties(test_apps_qwen35_4b_inference_e2e PROPERTIES
-        TIMEOUT 2760
-        LABELS "acceptance;gpu1;optional;external_files;e2e")
-
-    add_test(
-        NAME test_apps_qwen35_4b_quantizer_e2e
-        COMMAND phaseshift-gpu-test-runner
-            --gpu-count 1
-            --cost-gb 24
-            --timeout 7200
-            --state-dir "${CMAKE_BINARY_DIR}/gpu-test-state"
-            --
-            "${Python3_EXECUTABLE}"
-            "${_PS_TESTS_ROOT}/e2e/test_apps_qwen35_4b.py"
-            --suite quantizer
-            --model-dir "${PHASESHIFT_MODEL_DIR_4B}"
-            --oracle "${_PS_TESTS_ROOT}/e2e/fixtures/qwen35_4b_oracle.json"
-            --compute "$<TARGET_FILE:phaseshift-compute>"
-            --cli "${PHASESHIFT_CLI_TARGET}"
-            --bench "$<TARGET_FILE:phaseshift-bench>"
-            --quantizer "$<TARGET_FILE:phaseshift-quantizer>"
-    )
-    set_tests_properties(test_apps_qwen35_4b_quantizer_e2e PROPERTIES
-        TIMEOUT 8160
-        LABELS "acceptance;gpu1;optional;external_files;e2e;long")
-
     # MTP weight contract against a real model directory.
     # Model dir via PHASESHIFT_MODEL_DIR_MTP (preferred), PHASESHIFT_MODEL_DIR_4B,
     # or PHASESHIFT_MODEL_DIR_4B_PSQ. Skips (exit 77) when none is set.

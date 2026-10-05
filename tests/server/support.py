@@ -50,14 +50,6 @@ def model_dir() -> Path:
     return REPO_ROOT / "models" / "Qwen3.5-4B"
 
 
-def oracle_model_dir() -> Path:
-    """Model that the committed Qwen3.5-4B oracle fixture was generated from."""
-    env = os.environ.get("PHASESHIFT_ORACLE_MODEL_DIR")
-    if env:
-        return Path(env)
-    return REPO_ROOT / "models" / "Qwen3.5-4B"
-
-
 _PROCESSOR_CACHE: dict[str, object] = {}
 
 
@@ -127,7 +119,7 @@ def generation_stop_probe() -> dict:
             return None
 
     oracle_terminal = None
-    oracle_path = REPO_ROOT / "tests" / "e2e" / "fixtures" / "qwen35_4b_oracle.json"
+    oracle_path = REPO_ROOT / "tests" / "fixtures" / "qwen35_4b_oracle.json"
     if oracle_path.is_file():
         oracle = json.loads(oracle_path.read_text())
         for case in oracle.get("cases", []):

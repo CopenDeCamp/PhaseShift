@@ -79,8 +79,8 @@ required（自己完結: repository + ROCm + 1 GPUのみ）:
 ctest --test-dir build -L required --output-on-failure
 ```
 
-optional: Qwen3.5-4B 全 application E2E（外部 model + committed oracle fixture、
-exact token match）。`PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` で build。
+optional: external model を要する heavy test（DFlash2 gate / GPU-MCU acceptance /
+TP / MTP weight contract）。`PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` で build。
 詳細: [docs/developer/testing.md](docs/developer/testing.md)。
 
 ## Documentation map
