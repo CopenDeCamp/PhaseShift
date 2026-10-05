@@ -56,7 +56,6 @@ void usage(const char* prog) {
     printf("  --kv-cache-capacity-tokens N physical KV token capacity (0 = one context)\n");
     printf("  --prefix-cache-capacity-tokens N GPU prefix cache KV token capacity (0 = disabled)\n");
     printf("  --prefix-cache-max-entries N     max cached prefixes / GDN snapshots (default 16)\n");
-    printf("  --constraint-tokenizer-info PATH  xgrammar tokenizer info sidecar path\n");
     printf("  --device N             GPU device (default 0)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)\n");
     printf("  --verify-weights 0|1      verify quantized payload CRC32 on load (default 0)\n");
@@ -1568,7 +1567,6 @@ int main(int argc, char** argv) {
     unsigned long kv_cache_capacity_tokens = 0;
     unsigned long prefix_cache_capacity_tokens = 0;
     unsigned long prefix_cache_max_entries = 16;
-    std::string constraint_tokenizer_info;
     unsigned long device = 0;
     std::string kv_cache_dtype = "bf16";
     int verify_weights = 0;
@@ -1613,8 +1611,6 @@ int main(int argc, char** argv) {
             if (!parse_uint(argv[++i], prefix_cache_max_entries)) {
                 fprintf(stderr, "bad --prefix-cache-max-entries\n"); return 2;
             }
-        } else if (std::strcmp(argv[i], "--constraint-tokenizer-info") == 0 && i + 1 < argc) {
-            constraint_tokenizer_info = argv[++i];
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], device)) { fprintf(stderr, "bad --device\n"); return 2; }
         } else if (std::strcmp(argv[i], "--kv-cache-dtype") == 0 && i + 1 < argc) {
@@ -1699,7 +1695,6 @@ int main(int argc, char** argv) {
     config.kv_cache_capacity_tokens = static_cast<uint32_t>(kv_cache_capacity_tokens);
     config.prefix_cache_capacity_tokens = static_cast<uint32_t>(prefix_cache_capacity_tokens);
     config.prefix_cache_max_entries = static_cast<uint32_t>(prefix_cache_max_entries);
-    config.constraint_tokenizer_info = constraint_tokenizer_info;
     config.arena_bytes = static_cast<std::size_t>(arena_gib) * 1024ull * 1024ull * 1024ull;
     config.page_tokens = static_cast<uint32_t>(page_tokens);
     config.device = static_cast<int>(device);

@@ -44,13 +44,4 @@ hipError_t launch_dflash2_topk_f32_optimized(
     const DFlash2TopKPlan& plan,
     hipStream_t stream);
 
-hipError_t launch_dflash2_apply_constraint_mask(
-    float* logits,
-    uint32_t rows,
-    uint32_t vocab_size,
-    uint32_t row_stride,
-    const uint32_t* mask,
-    uint32_t mask_words,
-    hipStream_t stream);
-
 }  // namespace ps::kernel

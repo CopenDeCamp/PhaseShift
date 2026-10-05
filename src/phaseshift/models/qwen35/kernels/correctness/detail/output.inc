@@ -52,20 +52,10 @@ __device__ __forceinline__ ProgramStatus exec_gather_or_sample(
     for (uint32_t row = blockIdx.x; row < outputs; row += gridDim.x) {
         const SamplingRowParams params =
             sampling_row_params(env.context->output_sampling_params[row]);
-        SamplingConstraint constraint;
-        if ((env.context->output_sampling_params[row].reserved[0] & 1u) != 0u &&
-            env.context->constraint_masks != nullptr) {
-            constraint.active = true;
-            constraint.mask = env.context->constraint_masks +
-                              static_cast<std::size_t>(row) *
-                                  env.context->constraint_mask_words;
-            constraint.allow_empty =
-                (env.context->output_sampling_params[row].reserved[0] & 2u) != 0u;
-        }
         const float* row_logits =
             logits + static_cast<size_t>(row) * in.row_stride;
         if (sampling_topk_path_enabled(env.context->output_sampling_params[row]) &&
-            params.top_k > 0u && !constraint.active && params.top_k <= kSamplingMaxTopK) {
+            params.top_k > 0u && params.top_k <= kSamplingMaxTopK) {
             __shared__ int32_t top_ids[kSamplingMaxTopK];
             __shared__ float top_values[kSamplingMaxTopK];
             sampling_topk_select_reference(row_logits, vocab, params.top_k, top_ids,
@@ -74,10 +64,10 @@ __device__ __forceinline__ ProgramStatus exec_gather_or_sample(
             view.ids = top_ids;
             view.logits = top_values;
             view.count = params.top_k;
-            sampling_topk_active_row(row_logits, vocab, params, constraint, view,
+            sampling_topk_active_row(row_logits, vocab, params, view,
                                      sampled_tokens + row, env.error_word);
         } else {
-            sampling_sample_row(row_logits, vocab, params, constraint, sampled_tokens + row,
+            sampling_sample_row(row_logits, vocab, params, sampled_tokens + row,
                                 env.error_word);
         }
     }

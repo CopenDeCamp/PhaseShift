@@ -34,7 +34,6 @@ struct GpuMcuBatchBindingTelemetry {
     uint32_t missing_decode_token = 0u;
     uint32_t missing_verify_tokens = 0u;
     uint32_t missing_sampling = 0u;
-    uint32_t unsupported_constraint = 0u;
     uint32_t output_capacity_failure = 0u;
     uint32_t invalid_geometry = 0u;
     uint32_t not_ready = 0u;
@@ -78,9 +77,6 @@ __device__ __forceinline__ bool gpu_mcu_bind_batch_io(
         return false;
     }
 
-    view.context->constraint_masks = nullptr;
-    view.context->constraint_mask_words = 0u;
-
     bool ready = true;
     uint32_t output_cursor = 0u;
     for (uint32_t i = 0; i < view.context->num_requests; ++i) {
@@ -109,11 +105,6 @@ __device__ __forceinline__ bool gpu_mcu_bind_batch_io(
             ready = false;
             continue;
         }
-        if (binding.constraint_state_handle != 0u) {
-            local.unsupported_constraint += 1u;
-            return false;
-        }
-
         uint32_t output_count = 0u;
         if (descriptor.execution_class == ExecutionClass::PREFILL) {
             const int32_t* prompt = nullptr;

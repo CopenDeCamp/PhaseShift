@@ -111,8 +111,6 @@ Result<OptimizedLaunchResult> resolve_sampling(
         sargs.outputs = outputs;
         sargs.vocab_size = vocab;
         sargs.logits_row_stride = in.row_stride;
-        sargs.constraint_masks = ctx.constraint_masks;
-        sargs.constraint_mask_words = ctx.constraint_mask_words;
         sargs.error_word = ctx.error_word;
         const hipError_t serr =
             ::ps::kernel::launch_stochastic_sampling_f32_singleblock(sargs, stream);
@@ -131,8 +129,6 @@ Result<OptimizedLaunchResult> resolve_sampling(
     args.outputs = outputs;
     args.vocab_size = vocab;
     args.logits_row_stride = in.row_stride;
-    args.constraint_masks = ctx.constraint_masks;
-    args.constraint_mask_words = ctx.constraint_mask_words;
 
     hipError_t herr = hipSuccess;
     if (choice.implementation == SamplingImplementation::SingleBlock) {

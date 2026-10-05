@@ -58,18 +58,6 @@ struct SamplingRowParams {
     uint64_t sample_index = 0u;
 };
 
-struct SamplingConstraint {
-    const uint32_t* mask = nullptr;
-    bool active = false;
-    bool allow_empty = false;
-};
-
-__device__ __forceinline__ bool sampling_token_allowed(
-    const SamplingConstraint& constraint, uint32_t token_id) {
-    if (!constraint.active || constraint.mask == nullptr) return true;
-    return ((constraint.mask[token_id >> 5u] >> (token_id & 31u)) & 1u) != 0u;
-}
-
 struct SamplingTopKView {
     const int32_t* ids = nullptr;
     const float* logits = nullptr;
@@ -172,7 +160,6 @@ __device__ __forceinline__ void sampling_sample_row(
     const float* __restrict__ row,
     uint32_t vocab_size,
     const SamplingRowParams& params,
-    const SamplingConstraint& constraint,
     int32_t* __restrict__ out_token,
     uint32_t* error_word,
     uint32_t* attempt_count = nullptr) {
@@ -194,7 +181,6 @@ __device__ __forceinline__ void sampling_sample_row(
         float best_value = kNegInf;
         uint32_t best_token = kNoToken;
         for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-            if (!sampling_token_allowed(constraint, v)) continue;
             const float val = row[v];
             if (argmax_better(val, v, best_value, best_token)) {
                 best_value = val;
@@ -206,7 +192,7 @@ __device__ __forceinline__ void sampling_sample_row(
             *out_token = best_token == kNoToken ? -1 : static_cast<int32_t>(best_token);
         }
         __syncthreads();
-        if (best_token == kNoToken && !constraint.allow_empty) {
+        if (best_token == kNoToken) {
             sampling_report_error(error_word);
         }
         return;
@@ -224,7 +210,6 @@ __device__ __forceinline__ void sampling_sample_row(
 
     float lmax = kNegInf;
     for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-        if (!sampling_token_allowed(constraint, v)) continue;
         const float val = logits[v];
         if (val > lmax) lmax = val;
     }
@@ -234,7 +219,6 @@ __device__ __forceinline__ void sampling_sample_row(
     double z = 0.0;
     if (usable) {
         for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-            if (!sampling_token_allowed(constraint, v)) continue;
             z += static_cast<double>(::expf((logits[v] - lmax) / temperature));
         }
         z = block_sum_f64(z, s_acc);
@@ -242,7 +226,7 @@ __device__ __forceinline__ void sampling_sample_row(
     }
 
     if (!usable) {
-        if (!constraint.allow_empty) sampling_report_error(error_word);
+        sampling_report_error(error_word);
         if (threadIdx.x == 0u) *out_token = -1;
         __syncthreads();
         return;
@@ -256,7 +240,6 @@ __device__ __forceinline__ void sampling_sample_row(
         float best_score = kNegInf;
         uint32_t best_token = kNoToken;
         for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-            if (!sampling_token_allowed(constraint, v)) continue;
             const float u =
                 sampling_uniform(params.seed, params.sample_index, attempt, v);
             const float score =
@@ -277,7 +260,6 @@ __device__ __forceinline__ void sampling_sample_row(
         uint32_t better_count = 0u;
         double better_mass = 0.0;
         for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-            if (!sampling_token_allowed(constraint, v)) continue;
             const float val = logits[v];
             const bool better =
                 (val > candidate_logit) || (val == candidate_logit && v < candidate);
@@ -300,7 +282,7 @@ __device__ __forceinline__ void sampling_sample_row(
         ++attempt;
     }
 
-    if (result < 0 && !constraint.allow_empty) sampling_report_error(error_word);
+    if (result < 0) sampling_report_error(error_word);
     if (threadIdx.x == 0u) {
         *out_token = result;
         if (attempt_count != nullptr) {
@@ -314,7 +296,6 @@ __device__ __forceinline__ void sampling_topk_active_row(
     const float* __restrict__ row,
     uint32_t vocab_size,
     const SamplingRowParams& params,
-    const SamplingConstraint& constraint,
     const SamplingTopKView& topk,
     int32_t* __restrict__ out_token,
     uint32_t* error_word,
@@ -339,7 +320,6 @@ __device__ __forceinline__ void sampling_topk_active_row(
         float best_value = kNegInf;
         uint32_t best_token = kNoToken;
         for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-            if (!sampling_token_allowed(constraint, v)) continue;
             const float val = row[v];
             if (argmax_better(val, v, best_value, best_token)) {
                 best_value = val;
@@ -351,7 +331,7 @@ __device__ __forceinline__ void sampling_topk_active_row(
             *out_token = best_token == kNoToken ? -1 : static_cast<int32_t>(best_token);
         }
         __syncthreads();
-        if (best_token == kNoToken && !constraint.allow_empty) {
+        if (best_token == kNoToken) {
             sampling_report_error(error_word);
         }
         return;
@@ -389,7 +369,7 @@ __device__ __forceinline__ void sampling_topk_active_row(
     }
 
     if (!usable) {
-        if (!constraint.allow_empty) sampling_report_error(error_word);
+        sampling_report_error(error_word);
         if (threadIdx.x == 0u) *out_token = -1;
         __syncthreads();
         return;
@@ -428,7 +408,7 @@ __device__ __forceinline__ void sampling_topk_active_row(
 
     const int32_t result =
         best_token == kNoToken ? -1 : static_cast<int32_t>(best_token);
-    if (result < 0 && !constraint.allow_empty) sampling_report_error(error_word);
+    if (result < 0) sampling_report_error(error_word);
     if (threadIdx.x == 0u) {
         *out_token = result;
         if (attempt_count != nullptr) {

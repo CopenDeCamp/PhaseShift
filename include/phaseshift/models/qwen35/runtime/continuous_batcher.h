@@ -34,8 +34,6 @@ struct ContinuousBatcherConfig {
     uint32_t page_tokens = 0;
     StopTokens eos_token_ids;
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
-    uint32_t constraint_mask_words = 0;
-    uint32_t constraint_vocab_size = 0;
 };
 
 struct StepResult {
@@ -64,13 +62,6 @@ class ContinuousBatcher {
         std::vector<int32_t> input_tokens,
         uint32_t max_new_tokens,
         const SamplingConfig& sampling,
-        uint32_t prefix_cache_checkpoint_position = 0);
-
-    Result<uint64_t> submit(
-        std::vector<int32_t> input_tokens,
-        uint32_t max_new_tokens,
-        const SamplingConfig& sampling,
-        std::unique_ptr<TokenConstraintState> constraint,
         uint32_t prefix_cache_checkpoint_position = 0);
 
     Status cancel(uint64_t id);
@@ -104,8 +95,6 @@ class ContinuousBatcher {
 
     KVBankerState build_kv_banker_state() const;
 
-    void constraint_allowed_count_report() const;
-
     Executor& executor_;
     SequenceSlotPool& seq_pool_;
     GdnStatePool& gdn_pool_;
@@ -122,8 +111,6 @@ class ContinuousBatcher {
     using RequestList = std::list<RuntimeRequest>;
     RequestList requests_;
     std::unordered_map<uint64_t, RequestList::iterator> request_index_;
-    std::vector<uint32_t> constraint_mask_buffer_;
-    std::vector<uint32_t> constraint_allowed_samples_;
 };
 
 }

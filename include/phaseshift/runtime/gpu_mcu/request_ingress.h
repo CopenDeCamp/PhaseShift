@@ -132,9 +132,7 @@ struct alignas(64) GpuMcuRequestDescriptor {
     uint32_t state = 0u;
     uint32_t generation = 0u;
 
-    uint64_t constraint_state_handle = 0u;
-
-    uint64_t reserved[8] = {};
+    uint64_t reserved[9] = {};
 };
 
 static_assert(sizeof(GpuMcuRequestDescriptor) == 128u);
@@ -301,8 +299,7 @@ __device__ __forceinline__ GpuMcuCommandApplyResult gpu_mcu_claim_entry(
         gpu_mcu_binding_attach(bindings[index], slots[index].handle,
                                entry.descriptor.prompt_tokens_handle,
                                entry.descriptor.sampling_params_handle,
-                               entry.descriptor.stop_conditions_handle,
-                               entry.descriptor.constraint_state_handle);
+                               entry.descriptor.stop_conditions_handle);
         __threadfence_system();
     }
     entry.state = kGpuMcuIngressClaimed;

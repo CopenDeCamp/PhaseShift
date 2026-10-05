@@ -7,7 +7,6 @@
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
-#include <phaseshift/models/qwen35/runtime/constraint_lm_head_exact.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/program/program.h>
 #include <phaseshift/runtime/tp/tp_execution.h>
@@ -47,7 +46,6 @@ struct ExecutorConfig {
     uint32_t max_scheduled_output_rows = 0;
     std::array<uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     uint32_t target_hidden_tap_count = 0;
-    uint32_t constraint_mask_words = 0;
     runtime::DecodeBackend backend = runtime::DecodeBackend::Host;
     const Qwen35TensorParallelContext* tp = nullptr;
 };
@@ -111,7 +109,6 @@ struct Executor {
     ::ps::runtime::DeviceBatchContext* batch_context = nullptr;
     ::ps::quantization::imatrix::ImatrixCollector* imatrix_collector = nullptr;
     runtime::ValueTraceSink* value_trace = nullptr;
-    runtime::ConstraintLmHeadExact constraint_lm_head;
     void* host_request_staging = nullptr;
     size_t host_staging_bytes = 0;
     void* host_pending_staging = nullptr;
@@ -163,9 +160,6 @@ struct Executor {
     gpu::Tensor sampled_tokens;
     gpu::Tensor token_hidden;
     std::array<gpu::Tensor, kMaxTargetHiddenTaps> dflash_target_hidden;
-    gpu::Tensor constraint_mask_device;
-    std::vector<uint32_t> constraint_mask_host;
-    std::vector<uint32_t> constraint_allowed_counts_host;
     gpu::Tensor stochastic_topk_ids;
     gpu::Tensor stochastic_topk_logits;
     gpu::Tensor stochastic_topk_scratch;

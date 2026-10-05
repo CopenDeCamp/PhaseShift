@@ -18,26 +18,16 @@ void check(bool cond, const char* name) {
 }
 
 void seed_host_state(::ps::qwen35::Executor& ex) {
-    ex.constraint_mask_host = {1u, 2u, 3u, 4u};
-    ex.constraint_allowed_counts_host = {7u, 8u};
     ex.stochastic_topk_partitions = 5u;
     ex.stochastic_topk_scratch_bytes = 4096u;
 }
 
 void check_moved_host_state(const ::ps::qwen35::Executor& ex, const char* tag) {
-    check(ex.constraint_mask_host.size() == 4u, tag);
-    check(ex.constraint_allowed_counts_host.size() == 2u, tag);
-    check(ex.constraint_allowed_counts_host.size() == 2u &&
-              ex.constraint_allowed_counts_host[0] == 7u &&
-              ex.constraint_allowed_counts_host[1] == 8u,
-          tag);
     check(ex.stochastic_topk_partitions == 5u, tag);
     check(ex.stochastic_topk_scratch_bytes == 4096u, tag);
 }
 
 void check_cleared_host_state(const ::ps::qwen35::Executor& ex, const char* tag) {
-    check(ex.constraint_mask_host.empty(), tag);
-    check(ex.constraint_allowed_counts_host.empty(), tag);
     check(ex.stochastic_topk_partitions == 0u, tag);
     check(ex.stochastic_topk_scratch_bytes == 0u, tag);
 }

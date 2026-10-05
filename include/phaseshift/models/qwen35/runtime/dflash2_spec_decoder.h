@@ -6,7 +6,6 @@
 #include <phaseshift/models/qwen35/dflash2/executor.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/gdn_spec_history.h>
-#include <phaseshift/models/qwen35/runtime/token_constraint.h>
 #include <phaseshift/models/qwen35/runtime/tp_batch_hook.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
@@ -95,10 +94,6 @@ struct DFlash2SpecDecoder {
     bool initialized = false;
     DFlash2SpecTiming* timing = nullptr;
 
-    TokenConstraintState* constraint = nullptr;
-    uint32_t constraint_mask_words = 0u;
-    std::vector<uint32_t> constraint_mask_host;
-    uint32_t* proposal_mask_device = nullptr;
 
     SamplingConfig sampling{};
     uint64_t sample_index = 0u;
@@ -117,11 +112,6 @@ Result<DFlash2SpecDecoder> create_dflash2_spec_decoder(
     TpBatchHook* tp_hook = nullptr);
 
 Status dflash2_spec_decoder_shutdown(DFlash2SpecDecoder& decoder) noexcept;
-
-Status dflash2_spec_decoder_set_constraint(DFlash2SpecDecoder& decoder,
-                                           TokenConstraintState* state,
-                                           uint32_t mask_words,
-                                           gpu::GpuArena* arena);
 
 void dflash2_spec_decoder_set_sampling(DFlash2SpecDecoder& decoder,
                                        const SamplingConfig& sampling);

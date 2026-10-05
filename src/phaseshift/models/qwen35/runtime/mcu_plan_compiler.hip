@@ -234,10 +234,8 @@ static_assert(offsetof(mcu::McuArgmaxF32Invocation, vocab_size) ==
               offsetof(::ps::kernel::ArgmaxF32Args, vocab_size));
 static_assert(offsetof(mcu::McuArgmaxF32Invocation, logits_row_stride) ==
               offsetof(::ps::kernel::ArgmaxF32Args, logits_row_stride));
-static_assert(offsetof(mcu::McuArgmaxF32Invocation, constraint_masks) ==
-              offsetof(::ps::kernel::ArgmaxF32Args, constraint_masks));
-static_assert(offsetof(mcu::McuArgmaxF32Invocation, constraint_mask_words) ==
-              offsetof(::ps::kernel::ArgmaxF32Args, constraint_mask_words));
+static_assert(offsetof(mcu::McuArgmaxF32Invocation, output_rows) ==
+              offsetof(::ps::kernel::ArgmaxF32Args, output_rows));
 static_assert(sizeof(mcu::McuGdnConv1dInvocation) ==
               sizeof(::ps::kernel::GdnConv1dAqlArgs));
 static_assert(offsetof(mcu::McuGdnConv1dInvocation, input) ==
@@ -1323,9 +1321,6 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.outputs = outputs;
                 inv.vocab_size = logits.feature_count;
                 inv.logits_row_stride = logits.row_stride;
-                inv.constraint_masks =
-                    reinterpret_cast<uint64_t>(bc->constraint_masks);
-                inv.constraint_mask_words = bc->constraint_mask_words;
                 inv.output_rows = reinterpret_cast<uint64_t>(bc->output_rows);
                 const uint32_t index =
                     static_cast<uint32_t>(out.argmax_f32.size());

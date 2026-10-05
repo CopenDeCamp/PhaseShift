@@ -103,26 +103,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     const uint32_t num_attn_layers = count_attention_layers(text_config);
     const auto gdn_layout = qwen35::GdnStatePoolLayout::from_text_config(text_config);
 
-    uint32_t constraint_mask_words = 0;
-    if (!config_.constraint_tokenizer_info.empty()) {
-        std::ifstream tokenizer_stream(config_.constraint_tokenizer_info, std::ios::binary);
-        if (!tokenizer_stream) {
-            return Status::invalid_argument(
-                "cannot open constraint tokenizer info sidecar", __FILE__, __LINE__);
-        }
-        std::string tokenizer_json((std::istreambuf_iterator<char>(tokenizer_stream)),
-                                   std::istreambuf_iterator<char>());
-        auto compiler_result = qwen35::runtime::TokenConstraintCompiler::create(
-            tokenizer_json,
-            static_cast<uint32_t>(text_config.vocab_size),
-            generation_stop_tokens);
-        if (!compiler_result.ok()) {
-            return compiler_result.status();
-        }
-        constraint_compiler_ = compiler_result.release();
-        constraint_mask_words = constraint_compiler_->mask_words();
-    }
-
     const uint32_t max_seq = config_.max_seq_len;
     const uint32_t max_blocks_per_sequence =
         ceil_div(max_seq + 1, config_.page_tokens) + 1;
@@ -192,7 +172,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     qwen35::ExecutorConfig exec_config;
     exec_config.max_scheduled_tokens = exec_max_tokens_;
     exec_config.max_scheduled_requests = max_concurrent;
-    exec_config.constraint_mask_words = constraint_mask_words;
     exec_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
     exec_config.target_hidden_taps = config_.target_hidden_taps;
     exec_config.target_hidden_tap_count = config_.target_hidden_tap_count;
@@ -210,11 +189,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     batcher_config.max_seq_len = max_seq;
     batcher_config.page_tokens = config_.page_tokens;
     batcher_config.eos_token_ids = text_config.stop_tokens;
-    batcher_config.constraint_mask_words = constraint_mask_words;
-    batcher_config.constraint_vocab_size =
-        constraint_compiler_ != nullptr
-            ? constraint_compiler_->vocab_size()
-            : static_cast<uint32_t>(text_config.vocab_size);
 
     batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(
         executor_, *slot_pool_, *gdn_pool_, *kv_pool_, batcher_config, stream_,
@@ -233,76 +207,6 @@ Result<uint64_t> Qwen35ComputeRuntime::submit(
     }
     return batcher_->submit(std::move(input_ids), max_new_tokens, sampling,
                             prefix_cache_checkpoint_position);
-}
-
-Result<uint64_t> Qwen35ComputeRuntime::submit(
-    std::vector<int32_t> input_ids,
-    uint32_t max_new_tokens,
-    const qwen35::runtime::SamplingConfig& sampling,
-    const std::string& grammar,
-    uint32_t prefix_cache_checkpoint_position) {
-    if (batcher_ == nullptr) {
-        return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
-    }
-    if (grammar.empty()) {
-        return batcher_->submit(std::move(input_ids), max_new_tokens, sampling,
-                                prefix_cache_checkpoint_position);
-    }
-    if (constraint_compiler_ == nullptr) {
-        return Status::unsupported(
-            "grammar constrained generation is not enabled: "
-            "--constraint-tokenizer-info was not provided",
-            __FILE__, __LINE__);
-    }
-    auto state_result = constraint_compiler_->create_gbnf_state(grammar);
-    if (!state_result.ok()) {
-        return state_result.status();
-    }
-    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling,
-                            state_result.release(),
-                            prefix_cache_checkpoint_position);
-}
-
-Result<uint64_t> Qwen35ComputeRuntime::submit_structural_tag(
-    std::vector<int32_t> input_ids,
-    uint32_t max_new_tokens,
-    const qwen35::runtime::SamplingConfig& sampling,
-    const std::string& structural_tag,
-    uint32_t prefix_cache_checkpoint_position) {
-    if (batcher_ == nullptr) {
-        return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
-    }
-    if (constraint_compiler_ == nullptr) {
-        return Status::unsupported(
-            "structural tag constrained generation is not enabled: "
-            "--constraint-tokenizer-info was not provided",
-            __FILE__, __LINE__);
-    }
-    auto state_result = constraint_compiler_->create_structural_tag_state(structural_tag);
-    if (!state_result.ok()) {
-        return state_result.status();
-    }
-    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling,
-                            state_result.release(),
-                            prefix_cache_checkpoint_position);
-}
-
-Result<std::unique_ptr<qwen35::runtime::TokenConstraintState>>
-Qwen35ComputeRuntime::create_constraint_state(const std::string& grammar,
-                                              const std::string& structural_tag) {
-    if (grammar.empty() && structural_tag.empty()) {
-        return std::unique_ptr<qwen35::runtime::TokenConstraintState>();
-    }
-    if (constraint_compiler_ == nullptr) {
-        return Status::unsupported(
-            "constrained generation is not enabled: "
-            "--constraint-tokenizer-info was not provided",
-            __FILE__, __LINE__);
-    }
-    if (grammar.empty()) {
-        return constraint_compiler_->create_structural_tag_state(structural_tag);
-    }
-    return constraint_compiler_->create_gbnf_state(grammar);
 }
 
 Result<qwen35::runtime::StepResult> Qwen35ComputeRuntime::step() {

@@ -407,35 +407,6 @@ int main() {
     }
 
     {
-        h.reset(1u);
-        mcu::GpuMcuSlotState* s = h.slot(3);
-        *s = mcu::GpuMcuSlotState{};
-        s->handle.slot = 3u;
-        s->handle.generation = 1u;
-        s->phase = static_cast<uint32_t>(mcu::GpuMcuSlotPhase::decode);
-        s->generated_tokens = 0u;
-        s->max_new_tokens = 8u;
-        s->sequence_length = 0u;
-        s->max_sequence_length = 4096u;
-        mcu::GpuMcuSlotBinding* b = h.binding(3);
-        *b = mcu::GpuMcuSlotBinding{};
-        b->handle = s->handle;
-        b->constraint_state_handle = 0xABCull;
-        b->decode_input_token = 5;
-        b->decode_input_valid = 1u;
-        rt::DeviceRequestDescriptor* d = h.descriptor(0);
-        d->request_handle = rt::RequestHandle{3u, 1u};
-        d->row_count = 1u;
-        d->execution_class = rt::ExecutionClass::DECODE;
-        const uint64_t before = *h.epoch.host_as<uint64_t>();
-        check(h.bind("constraint bind"), "constraint bind");
-        check(*h.epoch.host_as<uint64_t>() == before,
-              "a constrained request does not publish the ready epoch");
-        check(d->output_count == 0u && d->compute_logits == 0u,
-              "a constrained request binds no output");
-    }
-
-    {
         h.reset(4u);
         mcu::GpuMcuSlotBinding* ba = h.binding(0);
         mcu::GpuMcuSlotState* sa = h.slot(0);

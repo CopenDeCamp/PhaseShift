@@ -130,15 +130,10 @@ target_include_directories(test_dflash2_psq4_shapes PRIVATE "${CMAKE_SOURCE_DIR}
 phaseshift_add_test(NAME test_dflash2_radix_topn SOURCE unit/test_dflash2_radix_topn.hip LABELS "gpu1;required" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 3 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_radix_topn_perf SOURCE unit/test_dflash2_radix_topn_perf.hip LABELS "gpu1;perf" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 6 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_gpu)
 phaseshift_add_test(NAME test_dflash2_psq8_rerank SOURCE unit/test_dflash2_psq8_rerank.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
-phaseshift_add_test(NAME test_constraint_candidates SOURCE unit/test_constraint_candidates.hip LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_kernels_optimized phaseshift_quantizer_core phaseshift_gpu)
 phaseshift_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lowering.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES phaseshift_qwen35_state)
-phaseshift_add_test(NAME test_constraint_mask SOURCE unit/test_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_dflash2_constraint_mask SOURCE unit/test_dflash2_constraint_mask.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_structural_tool_constraint SOURCE unit/test_structural_tool_constraint.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_qwen35_runtime)
-phaseshift_add_test(NAME test_composite_structural_constraint SOURCE unit/test_composite_structural_constraint.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_xgrammar_cxx20 SOURCE compile/test_xgrammar_cxx20.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_xgrammar)
 phaseshift_add_test(NAME test_tensor SOURCE unit/test_tensor.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 LIBRARIES phaseshift_gpu)
 phaseshift_add_test(NAME test_correctness_primitives SOURCE kernels/common/test_correctness_primitives.hip LABELS "gpu1;required" TIMEOUT 30 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels)
@@ -257,7 +252,6 @@ add_custom_target(
         test_dflash2_psq4_shapes
         test_dflash2_radix_topn
         test_dflash2_psq8_rerank
-        test_constraint_candidates
         test_paged_types
         test_paged_attention_split_reduce_exact
         test_tensor
@@ -319,10 +313,6 @@ add_custom_target(
         test_program_block_scaled_lowering
         test_dispatch_staging_size
         test_gpu_arena_vmm
-        test_constraint_mask
-        test_dflash2_constraint_mask
-        test_structural_tool_constraint
-        test_composite_structural_constraint
         test_xgrammar_cxx20
         ${PS_GPU_MCU_REQUIRED_TESTS}
 )

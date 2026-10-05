@@ -204,9 +204,7 @@ Status dflash2_select_draft_tokens(
     uint32_t block_rows,
     int32_t anchor_token,
     int32_t* output_draft_tokens,
-    hipStream_t stream,
-    const uint32_t* constraint_mask = nullptr,
-    uint32_t constraint_mask_words = 0u);
+    hipStream_t stream);
 
 Status dflash2_forward_and_select_stateless(
     DFlash2Executor& executor,
@@ -218,9 +216,7 @@ Status dflash2_forward_and_select_stateless(
     uint32_t block_rows,
     int32_t anchor_token,
     int32_t* output_draft_tokens,
-    hipStream_t stream,
-    const uint32_t* constraint_mask = nullptr,
-    uint32_t constraint_mask_words = 0u);
+    hipStream_t stream);
 
 Status dflash2_forward_layer_cached(
     DFlash2Executor& executor,
@@ -249,9 +245,7 @@ Status dflash2_forward_and_select_cached(
     uint32_t block_rows,
     int32_t anchor_token,
     int32_t* output_draft_tokens,
-    hipStream_t stream,
-    const uint32_t* constraint_mask = nullptr,
-    uint32_t constraint_mask_words = 0u);
+    hipStream_t stream);
 
 Status dflash2_prepare_noise_embedding(
     DFlash2Executor& executor,
@@ -265,9 +259,7 @@ Status dflash2_propose_cached(
     int32_t anchor_token,
     uint32_t num_drafts,
     int32_t* output_drafts,
-    hipStream_t stream,
-    const uint32_t* constraint_mask = nullptr,
-    uint32_t constraint_mask_words = 0u);
+    hipStream_t stream);
 
 Status dflash2_append_target_taps(
     DFlash2Executor& executor,

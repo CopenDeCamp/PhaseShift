@@ -16,22 +16,13 @@ __global__ void stochastic_sampling_impl(
     int32_t* __restrict__ sampled_tokens,
     uint32_t vocab_size,
     uint32_t logits_row_stride,
-    const uint32_t* __restrict__ constraint_masks,
-    uint32_t constraint_mask_words,
     uint32_t* error_word,
     uint32_t* __restrict__ attempts_out) {
     const uint32_t row = blockIdx.x;
     const float* row_logits = logits + static_cast<std::size_t>(row) * logits_row_stride;
     const SamplingRowParams params = sampling_row_params(sampling[row]);
-    SamplingConstraint constraint;
-    if ((sampling[row].reserved[0] & 1u) != 0u && constraint_masks != nullptr) {
-        constraint.active = true;
-        constraint.mask =
-            constraint_masks + static_cast<std::size_t>(row) * constraint_mask_words;
-        constraint.allow_empty = (sampling[row].reserved[0] & 2u) != 0u;
-    }
-    sampling_sample_row(row_logits, vocab_size, params, constraint, sampled_tokens + row,
-                        error_word, attempts_out == nullptr ? nullptr : attempts_out + row);
+    sampling_sample_row(row_logits, vocab_size, params, sampled_tokens + row, error_word,
+                        attempts_out == nullptr ? nullptr : attempts_out + row);
 }
 
 }  // namespace
@@ -46,8 +37,7 @@ hipError_t launch_stochastic_sampling_f32_singleblock(
         return hipErrorInvalidValue;
     stochastic_sampling_impl<<<args.outputs, kThreads, 0, stream>>>(
         args.logits, args.sampling, args.sampled_tokens, args.vocab_size,
-        args.logits_row_stride, args.constraint_masks, args.constraint_mask_words,
-        args.error_word, args.attempts_out);
+        args.logits_row_stride, args.error_word, args.attempts_out);
     return hipGetLastError();
 }
 
@@ -68,14 +58,12 @@ __global__ void stochastic_topk_sampling_impl(
     const uint32_t row = blockIdx.x;
     const float* row_logits = logits + static_cast<std::size_t>(row) * logits_row_stride;
     const SamplingRowParams params = sampling_row_params(sampling[row]);
-    SamplingConstraint constraint;
-    constraint.allow_empty = (sampling[row].reserved[0] & 2u) != 0u;
     SamplingTopKView view;
     view.ids = top_ids + static_cast<std::size_t>(row) * top_k;
     view.logits = top_logits + static_cast<std::size_t>(row) * top_k;
     view.count = top_k;
     sampling_topk_active_row(
-        row_logits, vocab_size, params, constraint, view, sampled_tokens + row, error_word,
+        row_logits, vocab_size, params, view, sampled_tokens + row, error_word,
         attempts_out == nullptr ? nullptr : attempts_out + row,
         active_count_out == nullptr ? nullptr : active_count_out + row);
 }

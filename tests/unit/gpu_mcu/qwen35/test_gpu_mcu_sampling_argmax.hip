@@ -145,8 +145,6 @@ int main() {
     invocation.outputs = kOutputs;
     invocation.vocab_size = kVocab;
     invocation.logits_row_stride = kVocab;
-    invocation.constraint_masks = 0u;
-    invocation.constraint_mask_words = 0u;
     if (!rig.set_argmax_f32_invocations(&invocation, 1u)) return 1;
 
     mcu::GpuMcuFsmConfig config{};

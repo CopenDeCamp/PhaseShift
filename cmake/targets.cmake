@@ -111,7 +111,6 @@ set(PHASESHIFT_QWEN35_OPTIMIZED_SOURCES
     src/phaseshift/models/qwen35/kernels/optimized/gdn/conv1d.hip
     src/phaseshift/models/qwen35/kernels/optimized/sampling.hip
     src/phaseshift/models/qwen35/kernels/optimized/stochastic_sampling.hip
-    src/phaseshift/models/qwen35/kernels/optimized/constraint_candidates.hip
     src/phaseshift/models/qwen35/kernels/optimized/psq8_candidate_rerank.hip
     src/phaseshift/models/qwen35/kernels/dflash2/candidate_selector.hip
     src/phaseshift/models/qwen35/kernels/dflash2/feature_concat.hip
@@ -188,7 +187,6 @@ target_compile_options(phaseshift_qwen35 PRIVATE -Wall -Wextra -Wpedantic -Werro
 # Qwen3.5 continuous batching runtime.
 add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/runtime_request.cpp
-    src/phaseshift/models/qwen35/runtime/token_constraint.cpp
     src/phaseshift/models/qwen35/runtime/sampling_params.cpp
     src/phaseshift/models/qwen35/runtime/token_budget_scheduler.cpp
     src/phaseshift/models/qwen35/runtime/kv_capacity_manager.cpp
@@ -231,7 +229,6 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/sampling_selector.cpp
     src/phaseshift/models/qwen35/runtime/sampling_dispatch.hip
     src/phaseshift/models/qwen35/runtime/decode_perf_stats.cpp
-    src/phaseshift/models/qwen35/runtime/constraint_lm_head_exact.hip
     src/phaseshift/models/qwen35/dflash2/executor.hip
 )
 target_compile_features(phaseshift_qwen35_runtime PRIVATE cxx_std_20)

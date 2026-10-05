@@ -290,13 +290,10 @@ struct McuArgmaxF32Invocation {
     uint32_t vocab_size = 0;
     uint32_t logits_row_stride = 0;
     uint32_t reserved0 = 0;
-    uint64_t constraint_masks = 0;
-    uint32_t constraint_mask_words = 0;
-    uint32_t reserved1 = 0;
     uint64_t output_rows = 0;
 };
 
-static_assert(sizeof(McuArgmaxF32Invocation) == 64);
+static_assert(sizeof(McuArgmaxF32Invocation) == 48);
 static_assert(alignof(McuArgmaxF32Invocation) == 8);
 static_assert(offsetof(McuArgmaxF32Invocation, logits) == 0);
 static_assert(offsetof(McuArgmaxF32Invocation, sampling) == 8);
@@ -304,9 +301,7 @@ static_assert(offsetof(McuArgmaxF32Invocation, sampled_tokens) == 16);
 static_assert(offsetof(McuArgmaxF32Invocation, outputs) == 24);
 static_assert(offsetof(McuArgmaxF32Invocation, vocab_size) == 28);
 static_assert(offsetof(McuArgmaxF32Invocation, logits_row_stride) == 32);
-static_assert(offsetof(McuArgmaxF32Invocation, constraint_masks) == 40);
-static_assert(offsetof(McuArgmaxF32Invocation, constraint_mask_words) == 48);
-static_assert(offsetof(McuArgmaxF32Invocation, output_rows) == 56);
+static_assert(offsetof(McuArgmaxF32Invocation, output_rows) == 40);
 
 struct McuRmsNormInvocation {
     uint64_t input = 0;

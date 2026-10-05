@@ -16,12 +16,11 @@ struct alignas(64) GpuMcuSlotBinding {
     uint64_t prompt_tokens_handle = 0u;
     uint64_t sampling_params_handle = 0u;
     uint64_t stop_conditions_handle = 0u;
-    uint64_t constraint_state_handle = 0u;
 
     int32_t decode_input_token = -1;
     uint32_t decode_input_valid = 0u;
 
-    uint64_t reserved[10] = {};
+    uint64_t reserved[11] = {};
 };
 
 static_assert(sizeof(GpuMcuSlotBinding) == 128u);
@@ -70,13 +69,11 @@ __device__ __forceinline__ void gpu_mcu_binding_attach(
     RequestHandle handle,
     uint64_t prompt_tokens_handle,
     uint64_t sampling_params_handle,
-    uint64_t stop_conditions_handle,
-    uint64_t constraint_state_handle) noexcept {
+    uint64_t stop_conditions_handle) noexcept {
     binding.handle = handle;
     binding.prompt_tokens_handle = prompt_tokens_handle;
     binding.sampling_params_handle = sampling_params_handle;
     binding.stop_conditions_handle = stop_conditions_handle;
-    binding.constraint_state_handle = constraint_state_handle;
     binding.decode_input_token = -1;
     binding.decode_input_valid = 0u;
 }

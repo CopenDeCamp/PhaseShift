@@ -228,8 +228,6 @@ Status build_host_execution_context(
     ::ps::runtime::VerifyNumericMode numeric_mode,
     const runtime::GdnSpecHistoryDeviceView& gdn_spec_history,
     const runtime::GdnCompactLogDeviceView& gdn_compact,
-    const uint32_t* constraint_masks,
-    uint32_t constraint_mask_words,
     bool stochastic_topk_eligible,
     uint32_t stochastic_top_k,
     runtime::HostExecutionContext& ctx) {
@@ -341,12 +339,6 @@ Status build_host_execution_context(
     ctx.output_sampling_params =
         executor.batch_context_storage.output_sampling_params
             .data<::ps::runtime::DeviceSamplingParams>();
-    ctx.constraint_masks = constraint_masks;
-    ctx.constraint_mask_words = constraint_mask_words;
-    ctx.constraint_allowed_counts =
-        (!executor.constraint_allowed_counts_host.empty())
-            ? executor.constraint_allowed_counts_host.data()
-            : nullptr;
     ctx.stochastic_topk_eligible = stochastic_topk_eligible;
     ctx.stochastic_top_k = stochastic_top_k;
     ctx.stochastic_topk_ids = executor.stochastic_topk_ids.data<int32_t>();
@@ -357,8 +349,6 @@ Status build_host_execution_context(
         static_cast<uint32_t>(executor.stochastic_topk_scratch_bytes);
     ctx.stochastic_topk_active_counts =
         executor.stochastic_topk_active_counts.data<uint32_t>();
-    ctx.constraint_lm_head =
-        executor.constraint_lm_head.valid() ? &executor.constraint_lm_head : nullptr;
     ctx.min_visible_tokens = min_visible_tokens;
     ctx.max_visible_tokens = max_visible_tokens;
     return Status::make_ok();
@@ -920,9 +910,7 @@ Result<PendingBatch> submit_co_batch(
             staging[i].sampling.top_k = sampling.top_k;
             staging[i].sampling.seed = sampling.seed;
             staging[i].sampling.sample_index = sampling.sample_index;
-            staging[i].sampling.reserved[0] =
-                static_cast<uint32_t>(req.token_constraint ? 1u : 0u) |
-                static_cast<uint32_t>(req.constraint_allow_empty ? 2u : 0u);
+            staging[i].sampling.reserved[0] = 0u;
             uint32_t oc = req.num_output_rows ? req.num_output_rows : 1u;
             staging[i].output_count = static_cast<uint8_t>(oc < 255u ? oc : 255u);
             staging[i].output_index = output_count;
@@ -976,10 +964,6 @@ Result<PendingBatch> submit_co_batch(
                 ok = false;
                 break;
             }
-            if (batch.requests[i].token_constraint) {
-                ok = false;
-                break;
-            }
             if (stochastic_top_k == 0u)
                 stochastic_top_k = k;
             else if (stochastic_top_k != k) {
@@ -997,35 +981,6 @@ Result<PendingBatch> submit_co_batch(
     }
     prep.stochastic_topk_eligible = stochastic_topk_eligible;
     prep.stochastic_top_k = stochastic_top_k;
-    const bool any_constraint =
-        batch.constraint_masks != nullptr && batch.constraint_mask_words > 0u &&
-        executor.config.constraint_mask_words == batch.constraint_mask_words &&
-        executor.constraint_mask_device.data<uint32_t>() != nullptr;
-    if (any_constraint) {
-        std::memcpy(
-            executor.constraint_mask_host.data(), batch.constraint_masks,
-            static_cast<std::size_t>(output_count) * batch.constraint_mask_words *
-                sizeof(uint32_t));
-        if (!executor.constraint_allowed_counts_host.empty()) {
-            uint32_t* counts = executor.constraint_allowed_counts_host.data();
-            const uint32_t capacity =
-                static_cast<uint32_t>(executor.constraint_allowed_counts_host.size());
-            for (uint32_t r = 0; r < capacity; ++r) {
-                counts[r] = UINT32_MAX;
-            }
-            for (uint32_t i = 0; i < R; ++i) {
-                const uint32_t oc = staging[i].output_count;
-                const uint32_t base = staging[i].output_index;
-                if (oc == 0u || base >= capacity) continue;
-                const uint32_t count = batch.requests[i].constraint_allowed_count;
-                const uint32_t end = base + oc;
-                const uint32_t limit = end < capacity ? end : capacity;
-                for (uint32_t r = base; r < limit; ++r) {
-                    counts[r] = count;
-                }
-            }
-        }
-    }
     uint64_t min_vis = UINT64_MAX;
     uint64_t max_vis = 0;
     for (uint32_t i = 0; i < R; ++i) {
@@ -1109,10 +1064,6 @@ Result<PendingBatch> submit_co_batch(
     host_ctx.output_sampling_params =
         executor.batch_context_storage.output_sampling_params
             .data<::ps::runtime::DeviceSamplingParams>();
-    if (any_constraint) {
-        host_ctx.constraint_masks = executor.constraint_mask_device.data<uint32_t>();
-        host_ctx.constraint_mask_words = batch.constraint_mask_words;
-    }
     host_ctx.device_ptr = executor.batch_context;
 
     bool gpu_started = false;
@@ -1250,7 +1201,6 @@ Result<PendingBatch> submit_co_batch(
         graph_slot_idx >= 0 &&
         executor.imatrix_collector == nullptr &&
         executor.value_trace == nullptr &&
-        !any_constraint &&
         !spec_verify_without_history;
     auto stage_graph_inputs = [&]() {
         if (!token_ids_on_device) {
@@ -1286,14 +1236,6 @@ Result<PendingBatch> submit_co_batch(
         if (!stq.ok()) return stq;
         stq = upload(bctx_requests, staging, R * sizeof(::ps::runtime::DeviceRequestDescriptor));
         if (!stq.ok()) return stq;
-        if (any_constraint) {
-            stq = upload(
-                executor.constraint_mask_device.data<uint32_t>(),
-                executor.constraint_mask_host.data(),
-                static_cast<std::size_t>(output_count) * batch.constraint_mask_words *
-                    sizeof(uint32_t));
-            if (!stq.ok()) return stq;
-        }
         if (ctx_src == &host_ctx) {
             hipError_t ctx_err = hipMemcpyWithStream(
                 executor.batch_context, ctx_src, sizeof(host_ctx), hipMemcpyHostToDevice, stream);
@@ -1314,8 +1256,6 @@ Result<PendingBatch> submit_co_batch(
             prep.num_sampled_outputs, prep.num_stochastic_outputs,
             min_visible_tokens, max_visible_tokens, exec_role,
             exec_numeric_mode, options.gdn_spec_history, options.gdn_compact,
-            any_constraint ? executor.constraint_mask_device.data<uint32_t>() : nullptr,
-            any_constraint ? batch.constraint_mask_words : 0u,
             prep.stochastic_topk_eligible, prep.stochastic_top_k, ctx);
         if (!stq.ok()) return stq;
 
@@ -1597,7 +1537,6 @@ Executor::Executor(Executor&& other) noexcept
       config(other.config),
       batch_context_storage(std::move(other.batch_context_storage)),
       batch_context(nullptr),
-      constraint_lm_head(std::move(other.constraint_lm_head)),
       host_request_staging(other.host_request_staging),
       host_staging_bytes(other.host_staging_bytes),
       host_pending_staging(other.host_pending_staging),
@@ -1639,9 +1578,6 @@ Executor::Executor(Executor&& other) noexcept
       sampled_tokens(std::move(other.sampled_tokens)),
       token_hidden(std::move(other.token_hidden)),
       dflash_target_hidden(std::move(other.dflash_target_hidden)),
-      constraint_mask_device(std::move(other.constraint_mask_device)),
-      constraint_mask_host(std::move(other.constraint_mask_host)),
-      constraint_allowed_counts_host(std::move(other.constraint_allowed_counts_host)),
       stochastic_topk_ids(std::move(other.stochastic_topk_ids)),
       stochastic_topk_logits(std::move(other.stochastic_topk_logits)),
       stochastic_topk_scratch(std::move(other.stochastic_topk_scratch)),
@@ -1694,9 +1630,6 @@ Executor::Executor(Executor&& other) noexcept
     other.sampled_tokens = gpu::Tensor{};
     other.token_hidden = gpu::Tensor{};
     other.dflash_target_hidden = {};
-    other.constraint_mask_device = gpu::Tensor{};
-    other.constraint_mask_host.clear();
-    other.constraint_allowed_counts_host.clear();
     other.stochastic_topk_ids = gpu::Tensor{};
     other.stochastic_topk_logits = gpu::Tensor{};
     other.stochastic_topk_scratch = gpu::Tensor{};
@@ -1754,7 +1687,6 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.host_parameter_table = nullptr;
         host_parameter_slots = std::move(other.host_parameter_slots);
         host_model_state = other.host_model_state;
-        constraint_lm_head = std::move(other.constraint_lm_head);
         dispatch_staging = other.dispatch_staging;
         other.dispatch_staging = nullptr;
         dispatch_staging_bytes = other.dispatch_staging_bytes;
@@ -1781,9 +1713,6 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         sampled_tokens = std::move(other.sampled_tokens);
         token_hidden = std::move(other.token_hidden);
         dflash_target_hidden = std::move(other.dflash_target_hidden);
-        constraint_mask_device = std::move(other.constraint_mask_device);
-        constraint_mask_host = std::move(other.constraint_mask_host);
-        constraint_allowed_counts_host = std::move(other.constraint_allowed_counts_host);
         stochastic_topk_ids = std::move(other.stochastic_topk_ids);
         stochastic_topk_logits = std::move(other.stochastic_topk_logits);
         stochastic_topk_scratch = std::move(other.stochastic_topk_scratch);
@@ -1824,9 +1753,6 @@ Executor& Executor::operator=(Executor&& other) noexcept {
         other.sampled_tokens = gpu::Tensor{};
         other.token_hidden = gpu::Tensor{};
         other.dflash_target_hidden = {};
-        other.constraint_mask_device = gpu::Tensor{};
-        other.constraint_mask_host.clear();
-        other.constraint_allowed_counts_host.clear();
         other.stochastic_topk_ids = gpu::Tensor{};
         other.stochastic_topk_logits = gpu::Tensor{};
         other.stochastic_topk_scratch = gpu::Tensor{};
@@ -1851,10 +1777,6 @@ Status executor_shutdown(Executor& ex) noexcept {
         Status ka_status = keepalive_stop(static_cast<KeepAlive*>(ex.keepalive));
         ex.keepalive = nullptr;
         if (first_error.ok() && !ka_status.ok()) first_error = ka_status;
-    }
-    {
-        Status proxy_status = ex.constraint_lm_head.shutdown();
-        if (first_error.ok() && !proxy_status.ok()) first_error = proxy_status;
     }
     if (ex.host_sampled_staging != nullptr) {
         hipError_t err = hipHostFree(ex.host_sampled_staging);
@@ -2071,8 +1993,6 @@ Status executor_shutdown(Executor& ex) noexcept {
     ex.host_model_state = ::ps::kernel::ModelDispatchStateView{};
     ex.execution_status = gpu::Tensor{};
     ex.execution_workspace = gpu::Tensor{};
-    ex.constraint_mask_device = gpu::Tensor{};
-    ex.constraint_mask_host.clear();
     return first_error;
 }
 
@@ -2306,22 +2226,6 @@ Result<Executor> create_model_executor(
     if (MO > N) MO = N;
     ex.config.max_scheduled_output_rows = MO;
 
-    if (runtime::constraint_lm_head_exact_enabled()) {
-        const ps::weights::MatrixWeight& lm = model.weights().lm_head;
-        if (lm.encoding == ps::weights::MatrixEncoding::Psq8 && lm.preshuffled &&
-            lm.weight_scale_group == 32u) {
-            runtime::ConstraintLmHeadWeightView view{};
-            view.codes = lm.codes.data<uint8_t>();
-            view.scales = lm.scales.data<uint8_t>();
-            view.vocab = lm.rows;
-            view.cols = lm.cols;
-            view.k_padded = lm.k_padded;
-            view.scale_stride_bytes = lm.storage_scale_stride_bytes;
-            Status cst = ex.constraint_lm_head.init(view, MO, nullptr);
-            if (!cst.ok()) return cst;
-        }
-    }
-
     auto st = allocate_contiguous_tensor<int32_t>(arena, {Npad}, ex.input_ids);
     if (!st.ok()) return st;
 
@@ -2333,14 +2237,6 @@ Result<Executor> create_model_executor(
     if (!st.ok()) return st;
     st = allocate_contiguous_tensor<int32_t>(arena, {MO}, ex.sampled_tokens);
     if (!st.ok()) return st;
-    if (ex.config.constraint_mask_words > 0) {
-        st = allocate_contiguous_tensor<uint32_t>(
-            arena, {MO, ex.config.constraint_mask_words}, ex.constraint_mask_device);
-        if (!st.ok()) return st;
-        ex.constraint_mask_host.assign(
-            static_cast<std::size_t>(MO) * ex.config.constraint_mask_words, 0xFFFFFFFFu);
-        ex.constraint_allowed_counts_host.assign(MO, UINT32_MAX);
-    }
     if (V > 0u && MO > 0u) {
         ex.stochastic_topk_partitions = ps::kernel::dflash2_radix_default_partitions(V);
         const std::size_t radix_bytes = ps::kernel::dflash2_radix_topn_scratch_bytes(

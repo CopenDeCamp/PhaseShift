@@ -69,8 +69,6 @@ int main() {
               "sampling handle starts zero");
         check(host[i].stop_conditions_handle == 0u,
               "stop handle starts zero");
-        check(host[i].constraint_state_handle == 0u,
-              "constraint handle starts zero");
         check(host[i].decode_input_token == -1, "decode token starts unset");
         check(host[i].decode_input_valid == 0u, "decode token starts invalid");
     }
@@ -132,7 +130,6 @@ int main() {
         descriptor->stable_prefix_boundary = 0u;
         descriptor->sampling_params_handle = 0x2000u;
         descriptor->stop_conditions_handle = 0x3000u;
-        descriptor->constraint_state_handle = 0u;
         descriptor->max_new_tokens = 8u;
         descriptor->max_sequence_length = 256u;
         check(arena.publish(entry).ok(), "ingress publish");
@@ -178,8 +175,6 @@ int main() {
               "the binding keeps the sampling resource after recycle");
         check(bound[handle.slot].stop_conditions_handle == 0x3000u,
               "the binding keeps the stop resource after recycle");
-        check(bound[handle.slot].constraint_state_handle == 0u,
-              "the binding keeps the constraint identity");
         check(bound[handle.slot].decode_input_valid == 0u,
               "the decode token starts unset");
 

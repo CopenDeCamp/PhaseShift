@@ -4,7 +4,6 @@
 #include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
-#include <phaseshift/models/qwen35/runtime/token_constraint.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
 #include <phaseshift/models/qwen35/state/sequence_slot_pool.h>
@@ -30,7 +29,6 @@ struct Qwen35RuntimeConfig {
     uint32_t kv_cache_capacity_tokens = 0;
     uint32_t prefix_cache_capacity_tokens = 0;
     uint32_t prefix_cache_max_entries = 16;
-    std::string constraint_tokenizer_info;
     std::size_t arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
     uint32_t page_tokens = 16;
     int device = 0;
@@ -55,23 +53,6 @@ class Qwen35ComputeRuntime {
         uint32_t max_new_tokens,
         const qwen35::runtime::SamplingConfig& sampling,
         uint32_t prefix_cache_checkpoint_position = 0);
-
-    Result<uint64_t> submit(
-        std::vector<int32_t> input_ids,
-        uint32_t max_new_tokens,
-        const qwen35::runtime::SamplingConfig& sampling,
-        const std::string& grammar,
-        uint32_t prefix_cache_checkpoint_position = 0);
-
-    Result<uint64_t> submit_structural_tag(
-        std::vector<int32_t> input_ids,
-        uint32_t max_new_tokens,
-        const qwen35::runtime::SamplingConfig& sampling,
-        const std::string& structural_tag,
-        uint32_t prefix_cache_checkpoint_position = 0);
-
-    Result<std::unique_ptr<qwen35::runtime::TokenConstraintState>> create_constraint_state(
-        const std::string& grammar, const std::string& structural_tag);
 
     Result<qwen35::runtime::StepResult> step();
 
@@ -109,12 +90,6 @@ class Qwen35ComputeRuntime {
 
     uint32_t max_scheduled_tokens() const noexcept { return exec_max_tokens_; }
 
-    bool constraint_enabled() const noexcept { return constraint_compiler_ != nullptr; }
-
-    const qwen35::runtime::TokenConstraintCompiler* constraint_compiler() const noexcept {
-        return constraint_compiler_.get();
-    }
-
     bool prefix_cache_enabled() const noexcept {
         return prefix_cache_.has_value();
     }
@@ -146,7 +121,6 @@ class Qwen35ComputeRuntime {
     qwen35::Executor executor_;
     std::unique_ptr<qwen35::runtime::ContinuousBatcher> batcher_;
     std::optional<qwen35::runtime::PrefixCache> prefix_cache_;
-    std::unique_ptr<qwen35::runtime::TokenConstraintCompiler> constraint_compiler_;
 };
 
 }  // namespace app

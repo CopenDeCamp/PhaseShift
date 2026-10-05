@@ -1,7 +1,6 @@
 #include <phaseshift/core/gpu/cleanup.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
-#include <phaseshift/models/qwen35/runtime/constraint_lm_head_exact.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
 #include <phaseshift/models/qwen35/runtime/kv_calib_dump.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
@@ -476,14 +475,9 @@ Status execute_program_range(
         const uint32_t sem_seq = sem_on ? semantic_timing_start(stream) : 0xFFFFFFFFu;
         if (mode == Qwen35KernelMode::Auto) {
             OptimizedLaunchResult opt_result{};
-            auto lm_exact = try_launch_constraint_lm_head_exact(program, i, ctx, stream);
-            if (!lm_exact.ok()) return lm_exact.status();
-            opt_result = lm_exact.value();
-            if (opt_result.kind != OptimizedLaunchKind::Launched) {
-                auto optimized = try_launch_optimized(program, i, ctx, stream);
-                if (!optimized.ok()) return optimized.status();
-                opt_result = optimized.value();
-            }
+            auto optimized = try_launch_optimized(program, i, ctx, stream);
+            if (!optimized.ok()) return optimized.status();
+            opt_result = optimized.value();
             const OptimizedLaunchKind opt_kind = opt_result.kind;
             if (opt_kind == OptimizedLaunchKind::Skipped) {
                 const uint32_t consumed = opt_result.consumed_dispatches;

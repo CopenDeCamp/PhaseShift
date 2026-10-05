@@ -25,8 +25,6 @@ struct ArgmaxF32Args {
     uint32_t outputs = 0;
     uint32_t vocab_size = 0;
     uint32_t logits_row_stride = 0;
-    const uint32_t* constraint_masks = nullptr;
-    uint32_t constraint_mask_words = 0;
     const uint32_t* output_rows = nullptr;
 };
 

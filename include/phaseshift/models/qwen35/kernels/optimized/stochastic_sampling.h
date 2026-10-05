@@ -16,8 +16,6 @@ struct StochasticSamplingF32Args {
     uint32_t outputs = 0;
     uint32_t vocab_size = 0;
     uint32_t logits_row_stride = 0;
-    const uint32_t* constraint_masks = nullptr;
-    uint32_t constraint_mask_words = 0;
     uint32_t* error_word = nullptr;
     uint32_t* attempts_out = nullptr;
 };

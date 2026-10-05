@@ -31,11 +31,7 @@ struct ScheduledRequest {
     runtime::SamplingConfig sampling{};
     uint64_t sampling_index = 0;
 
-    bool token_constraint = false;
-    bool constraint_allow_empty = false;
     uint32_t num_output_rows = 1;
-
-    uint32_t constraint_allowed_count = UINT32_MAX;
 };
 
 enum class TokenIdsLocation : uint8_t {
@@ -59,9 +55,6 @@ struct ScheduledBatch {
     bool speculative_verify = false;
     ::ps::runtime::VerifyNumericMode verify_numeric_mode =
         ::ps::runtime::VerifyNumericMode::Fast;
-
-    const uint32_t* constraint_masks = nullptr;
-    uint32_t constraint_mask_words = 0;
 };
 
 Status validate_scheduled_batch(

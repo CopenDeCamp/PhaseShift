@@ -2,13 +2,11 @@
 
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
-#include <phaseshift/models/qwen35/runtime/token_constraint.h>
 #include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/core/status.h>
 #include <hip/hip_runtime.h>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <vector>
 
 namespace ps {
@@ -54,8 +52,6 @@ struct RuntimeRequest {
 
     uint32_t prefix_cache_checkpoint_position = 0;
     bool prefix_cache_checkpoint_saved = false;
-
-    std::unique_ptr<TokenConstraintState> constraint;
 };
 
 Status admit_request(

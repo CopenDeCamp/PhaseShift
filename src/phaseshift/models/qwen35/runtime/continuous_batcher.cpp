@@ -1,6 +1,5 @@
 #include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
 #include <phaseshift/models/qwen35/runtime/runtime_request.h>
-#include <phaseshift/models/qwen35/runtime/token_constraint.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/state/sequence_slot_pool.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
@@ -31,12 +30,6 @@ ContinuousBatcher::ContinuousBatcher(
       stream_(stream),
       capacity_(kv_pool.num_pages()),
       prefix_cache_(prefix_cache) {
-    if (config_.constraint_mask_words > 0u && config_.max_scheduled_requests > 0u) {
-        constraint_mask_buffer_.assign(
-            static_cast<std::size_t>(config_.max_scheduled_requests) *
-                config_.constraint_mask_words,
-            0u);
-    }
 }
 
 Result<uint64_t> ContinuousBatcher::submit(
@@ -48,16 +41,6 @@ Result<uint64_t> ContinuousBatcher::submit(
     std::vector<int32_t> input_tokens,
     uint32_t max_new_tokens,
     const SamplingConfig& sampling,
-    uint32_t prefix_cache_checkpoint_position) {
-    return submit(std::move(input_tokens), max_new_tokens, sampling, nullptr,
-                  prefix_cache_checkpoint_position);
-}
-
-Result<uint64_t> ContinuousBatcher::submit(
-    std::vector<int32_t> input_tokens,
-    uint32_t max_new_tokens,
-    const SamplingConfig& sampling,
-    std::unique_ptr<TokenConstraintState> constraint,
     uint32_t prefix_cache_checkpoint_position) {
     if (input_tokens.empty()) {
         return Status::invalid_argument("submit requires at least one input token",
@@ -94,7 +77,6 @@ Result<uint64_t> ContinuousBatcher::submit(
     request.sampling = sampling;
     request.max_kv_tokens = max_kv_tokens.value();
     request.max_kv_pages = max_kv_pages;
-    request.constraint = std::move(constraint);
     request.prefix_cache_checkpoint_position = prefix_cache_checkpoint_position;
 
     requests_.push_back(std::move(request));
@@ -260,24 +242,6 @@ KVCapacitySnapshot ContinuousBatcher::kv_capacity_snapshot() const {
     return snapshot;
 }
 
-void ContinuousBatcher::constraint_allowed_count_report() const {
-    if (constraint_allowed_samples_.empty()) {
-        return;
-    }
-    std::vector<uint32_t> sorted = constraint_allowed_samples_;
-    std::sort(sorted.begin(), sorted.end());
-    const auto at = [&](double p) -> uint32_t {
-        const std::size_t last = sorted.size() - 1u;
-        const std::size_t idx =
-            static_cast<std::size_t>(p * static_cast<double>(last) + 0.5);
-        return sorted[idx <= last ? idx : last];
-    };
-    fprintf(stderr,
-            "CONSTRAINT_ALLOWED_COUNT p10=%u p50=%u p90=%u p99=%u max=%u min=%u samples=%zu\n",
-            at(0.10), at(0.50), at(0.90), at(0.99), sorted.back(), sorted.front(),
-            sorted.size());
-}
-
 Result<StepResult> ContinuousBatcher::step() {
     const bool banker_mode = config_.admission_policy == KVAdmissionPolicy::BankerSafe;
     KVBankerState kv_state = build_kv_banker_state();
@@ -388,48 +352,6 @@ Result<StepResult> ContinuousBatcher::step() {
         return request;
     };
 
-    if (config_.constraint_mask_words > 0u && !constraint_mask_buffer_.empty()) {
-        uint32_t mask_row = 0;
-        uint32_t constrained_rows = 0;
-        bool any_constraint = false;
-        const bool constraint_trace = std::getenv("PHASESHIFT_CONSTRAINT_TRACE") != nullptr;
-        for (auto& scheduled : plan.scheduled_requests) {
-            if (!scheduled.compute_logits) continue;
-            RuntimeRequest* request = resolve(scheduled);
-            if (request != nullptr && request->constraint != nullptr && scheduled.sample) {
-                uint32_t* row = constraint_mask_buffer_.data() +
-                                static_cast<std::size_t>(mask_row) *
-                                    config_.constraint_mask_words;
-                Status mask_st = request->constraint->fill_next_mask(
-                    row, config_.constraint_mask_words);
-                if (!mask_st.ok()) {
-                    return mask_st;
-                }
-                scheduled.token_constraint = true;
-                scheduled.constraint_allowed_count =
-                    constraint_allowed_count(row, config_.constraint_mask_words,
-                                             config_.constraint_vocab_size);
-                if (constraint_trace) {
-                    constraint_allowed_samples_.push_back(
-                        scheduled.constraint_allowed_count);
-                }
-                any_constraint = true;
-                ++constrained_rows;
-            }
-            ++mask_row;
-        }
-        if (any_constraint) {
-            plan.batch.constraint_masks = constraint_mask_buffer_.data();
-            plan.batch.constraint_mask_words = config_.constraint_mask_words;
-            if (constraint_trace) {
-                fprintf(stderr, "CONSTRAINT_ROWS=%u MASK_BYTES=%zu\n", constrained_rows,
-                        static_cast<std::size_t>(constrained_rows) *
-                            config_.constraint_mask_words * sizeof(uint32_t));
-                constraint_allowed_count_report();
-            }
-        }
-    }
-
     auto exec_result = tp_batch_hook_ != nullptr
                           ? tp_batch_hook_->on_execute(plan.batch)
                           : execute_batch(executor_, plan.batch, stream_);
@@ -517,11 +439,6 @@ Result<StepResult> ContinuousBatcher::step() {
                         return Status::invalid_state(
                             "greedy sampled request returned invalid token",
                             __FILE__, __LINE__);
-                    }
-                    if (request.constraint != nullptr &&
-                        !request.constraint->accept_token(token)) {
-                        return Status::invalid_state(
-                            "grammar matcher rejected sampled token", __FILE__, __LINE__);
                     }
                     const CommitAction action =
                         commit_sampled_token(request, token, config_.eos_token_ids);

@@ -110,42 +110,7 @@ __global__ void dflash2_topk_merge_kernel(
     }
 }
 
-__global__ void dflash2_apply_constraint_mask_kernel(
-    float* logits,
-    uint32_t vocab_size,
-    uint32_t row_stride,
-    const uint32_t* mask,
-    uint32_t mask_words) {
-    const uint32_t row = blockIdx.x;
-    const uint32_t tid = threadIdx.x;
-    const uint32_t* row_mask = mask + static_cast<std::size_t>(row) * mask_words;
-    float* row_logits = logits + static_cast<std::size_t>(row) * row_stride;
-    for (uint32_t v = tid; v < vocab_size; v += kTopKThreads) {
-        if (((row_mask[v >> 5u] >> (v & 31u)) & 1u) == 0u) {
-            row_logits[v] = -INFINITY;
-        }
-    }
-}
-
 }  // namespace
-
-hipError_t launch_dflash2_apply_constraint_mask(
-    float* logits,
-    uint32_t rows,
-    uint32_t vocab_size,
-    uint32_t row_stride,
-    const uint32_t* mask,
-    uint32_t mask_words,
-    hipStream_t stream) {
-    if (logits == nullptr || mask == nullptr) return hipErrorInvalidValue;
-    if (rows == 0u) return hipSuccess;
-    if (vocab_size == 0u || row_stride < vocab_size || mask_words == 0u) {
-        return hipErrorInvalidValue;
-    }
-    dflash2_apply_constraint_mask_kernel<<<rows, kTopKThreads, 0, stream>>>(
-        logits, vocab_size, row_stride, mask, mask_words);
-    return hipGetLastError();
-}
 
 hipError_t launch_dflash2_topk_f32(
     const float* logits,

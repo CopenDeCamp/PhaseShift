@@ -1321,9 +1321,7 @@ Status dflash2_select_draft_tokens(
     uint32_t block_rows,
     int32_t anchor_token,
     int32_t* output_draft_tokens,
-    hipStream_t stream,
-    const uint32_t* constraint_mask,
-    uint32_t constraint_mask_words) {
+    hipStream_t stream) {
     if (!executor.initialized) {
         return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
     }
@@ -1373,16 +1371,6 @@ Status dflash2_select_draft_tokens(
                                executor.proposal_logits.data<float>(), vocab, stream);
     if (!st.ok()) return st;
 
-    if (constraint_mask != nullptr) {
-        hipError_t mask_err = ps::kernel::launch_dflash2_apply_constraint_mask(
-            executor.proposal_logits.data<float>(), draft, vocab, vocab, constraint_mask,
-            constraint_mask_words, stream);
-        if (mask_err != hipSuccess) {
-            return Status::hip_error("dflash2 proposal constraint mask",
-                                     hipGetErrorString(mask_err), __FILE__, __LINE__);
-        }
-    }
-
     const bool use_reference =
         topk_reference_enabled() || top_k != ps::kernel::kDflash2TopKMaxK;
     if (use_reference) {
@@ -1422,9 +1410,7 @@ Status dflash2_forward_and_select_stateless(
     uint32_t block_rows,
     int32_t anchor_token,
     int32_t* output_draft_tokens,
-    hipStream_t stream,
-    const uint32_t* constraint_mask,
-    uint32_t constraint_mask_words) {
+    hipStream_t stream) {
     if (!executor.initialized) {
         return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
     }
@@ -1436,8 +1422,7 @@ Status dflash2_forward_and_select_stateless(
         block_position_start, block_rows, executor.backbone_output.data<bf16_t>(), stream);
     if (!st.ok()) return st;
     return dflash2_select_draft_tokens(executor, executor.backbone_output.data<bf16_t>(),
-                                       block_rows, anchor_token, output_draft_tokens, stream,
-                                       constraint_mask, constraint_mask_words);
+                                       block_rows, anchor_token, output_draft_tokens, stream);
 }
 
 namespace {
@@ -1661,9 +1646,7 @@ Status dflash2_forward_and_select_cached(
     uint32_t block_rows,
     int32_t anchor_token,
     int32_t* output_draft_tokens,
-    hipStream_t stream,
-    const uint32_t* constraint_mask,
-    uint32_t constraint_mask_words) {
+    hipStream_t stream) {
     if (output_draft_tokens == nullptr) {
         return Status::invalid_argument("dflash2 cached select output is null", __FILE__,
                                         __LINE__);
@@ -1673,8 +1656,7 @@ Status dflash2_forward_and_select_cached(
         executor.backbone_output.data<bf16_t>(), stream);
     if (!st.ok()) return st;
     return dflash2_select_draft_tokens(executor, executor.backbone_output.data<bf16_t>(),
-                                       block_rows, anchor_token, output_draft_tokens, stream,
-                                       constraint_mask, constraint_mask_words);
+                                       block_rows, anchor_token, output_draft_tokens, stream);
 }
 
 Status dflash2_prepare_noise_embedding(
@@ -1750,9 +1732,7 @@ Status dflash2_propose_cached(
     int32_t anchor_token,
     uint32_t num_drafts,
     int32_t* output_drafts,
-    hipStream_t stream,
-    const uint32_t* constraint_mask,
-    uint32_t constraint_mask_words) {
+    hipStream_t stream) {
     if (!executor.initialized) {
         return Status::invalid_state("dflash2 executor not initialized", __FILE__, __LINE__);
     }
@@ -1772,8 +1752,7 @@ Status dflash2_propose_cached(
     if (!st.ok()) return st;
     return dflash2_forward_and_select_cached(
         executor, context, executor.noise_embedding.data<bf16_t>(), context.next_position,
-        block_rows, anchor_token, output_drafts, stream, constraint_mask,
-        constraint_mask_words);
+        block_rows, anchor_token, output_drafts, stream);
 }
 
 Status dflash2_append_target_taps(

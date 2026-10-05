@@ -456,7 +456,6 @@ int main() {
             mcu::gpu_mcu_encode_device_address(prompt_dev);
         table[3].sampling_params_handle =
             mcu::gpu_mcu_encode_device_address(sampling_dev);
-        table[3].constraint_state_handle = 0u;
     }
     const uint64_t committed_before_verify = persistent.batches_committed();
     prepare_verify_slot_kernel<<<1, 1, 0, work>>>(

@@ -16,8 +16,6 @@
 
 namespace ps::qwen35::runtime {
 
-class ConstraintLmHeadExact;
-
 constexpr uint64_t kDecodeAttnPartialBytes = 32u * 1024u * 1024u;
 
 struct HostResolvedValue {
@@ -68,9 +66,6 @@ struct HostExecutionContext {
     uint32_t actual_sampled_outputs = 0;
     uint32_t actual_stochastic_outputs = 0;
     const ::ps::runtime::DeviceSamplingParams* output_sampling_params = nullptr;
-    const uint32_t* constraint_masks = nullptr;
-    uint32_t constraint_mask_words = 0;
-    const uint32_t* constraint_allowed_counts = nullptr;
     bool stochastic_topk_eligible = false;
     uint32_t stochastic_top_k = 0;
     int32_t* stochastic_topk_ids = nullptr;
@@ -79,7 +74,6 @@ struct HostExecutionContext {
     uint32_t stochastic_topk_partitions = 0;
     uint32_t stochastic_topk_scratch_bytes = 0;
     uint32_t* stochastic_topk_active_counts = nullptr;
-    ConstraintLmHeadExact* constraint_lm_head = nullptr;
     DispatchStagingPool* staging_pool = nullptr;
     const ProgramStagingMeta* program_meta = nullptr;
     ::ps::quantization::imatrix::ImatrixCollector* imatrix_collector = nullptr;

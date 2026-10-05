@@ -52,7 +52,6 @@ __global__ void topk_reference_kernel(
     const float* row_logits = logits + static_cast<std::size_t>(row) * row_stride;
     const ::ps::kernel::SamplingRowParams params =
         ::ps::kernel::sampling_row_params(sampling[row]);
-    ::ps::kernel::SamplingConstraint constraint;
     __shared__ int32_t ids[::ps::kernel::kSamplingMaxTopK];
     __shared__ float values[::ps::kernel::kSamplingMaxTopK];
     ::ps::kernel::sampling_topk_select_reference(row_logits, vocab, top_k, ids, values);
@@ -60,7 +59,7 @@ __global__ void topk_reference_kernel(
     view.ids = ids;
     view.logits = values;
     view.count = top_k;
-    ::ps::kernel::sampling_topk_active_row(row_logits, vocab, params, constraint, view,
+    ::ps::kernel::sampling_topk_active_row(row_logits, vocab, params, view,
                                            tokens + row, error_word);
 }
 

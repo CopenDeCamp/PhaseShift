@@ -11,20 +11,6 @@ constexpr uint32_t kThreads = 256u;
 constexpr float kNegInf = -3.4e38f;
 constexpr uint32_t kNoToken = 0xFFFFFFFFu;
 
-__device__ __forceinline__ SamplingConstraint make_sampling_constraint(
-    const ::ps::runtime::DeviceSamplingParams& p,
-    uint32_t row,
-    const uint32_t* __restrict__ masks,
-    uint32_t words) {
-    SamplingConstraint constraint;
-    if ((p.reserved[0] & 1u) != 0u && masks != nullptr) {
-        constraint.active = true;
-        constraint.mask = masks + static_cast<std::size_t>(row) * words;
-        constraint.allow_empty = (p.reserved[0] & 2u) != 0u;
-    }
-    return constraint;
-}
-
 __device__ __forceinline__
 bool argmax_better(float cv, uint32_t ct, float bv, uint32_t bt) {
     return cv > bv || (cv == bv && ct < bt);
@@ -72,8 +58,6 @@ __device__ __forceinline__ void argmax_single_body(
                                    int32_t* __restrict__ sampled_tokens,
                                    uint32_t vocab_size,
                                    uint32_t logits_row_stride,
-                                   const uint32_t* __restrict__ constraint_masks,
-                                   uint32_t constraint_mask_words,
                                    const uint32_t* __restrict__ output_rows) {
     const uint32_t slot = blockIdx.x;
     const uint32_t row = output_rows != nullptr ? output_rows[slot] : slot;
@@ -84,13 +68,10 @@ __device__ __forceinline__ void argmax_single_body(
     }
     __syncthreads();
     if (do_sample == 0u) return;
-    const SamplingConstraint constraint = make_sampling_constraint(
-        sampling[slot], slot, constraint_masks, constraint_mask_words);
     float best_value = kNegInf;
     uint32_t best_token = kNoToken;
     const float* row_logits = logits + static_cast<size_t>(slot) * logits_row_stride;
     for (uint32_t v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-        if (!sampling_token_allowed(constraint, v)) continue;
         argmax_update(row_logits[v], v, best_value, best_token);
     }
     argmax_reduce_block(best_value, best_token);
@@ -103,35 +84,26 @@ __global__ void argmax_single_impl(const float* __restrict__ logits,
                                    const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
                                    int32_t* __restrict__ sampled_tokens,
                                    uint32_t vocab_size,
-                                   uint32_t logits_row_stride,
-                                   const uint32_t* __restrict__ constraint_masks,
-                                   uint32_t constraint_mask_words) {
+                                   uint32_t logits_row_stride) {
     argmax_single_body(logits, sampling, sampled_tokens, vocab_size,
-                       logits_row_stride, constraint_masks, constraint_mask_words,
-                       nullptr);
+                       logits_row_stride, nullptr);
 }
 
 extern "C" __global__ __launch_bounds__(kThreads)
 void phaseshift_gpu_mcu_argmax_f32(ArgmaxF32Args args) {
     argmax_single_body(args.logits, args.sampling, args.sampled_tokens,
-                       args.vocab_size, args.logits_row_stride,
-                       args.constraint_masks, args.constraint_mask_words,
-                       args.output_rows);
+                       args.vocab_size, args.logits_row_stride, args.output_rows);
 }
 
 __global__ void argmax_stage1_impl(const float* __restrict__ logits,
                                    const ::ps::runtime::DeviceSamplingParams* __restrict__ sampling,
                                    ArgMaxPair* __restrict__ partials,
                                    uint32_t vocab_size, uint32_t partitions,
-                                   uint32_t logits_row_stride,
-                                   const uint32_t* __restrict__ constraint_masks,
-                                   uint32_t constraint_mask_words) {
+                                   uint32_t logits_row_stride) {
     const uint32_t task = blockIdx.x;
     const uint32_t row = task / partitions;
     const uint32_t partition = task % partitions;
     if (sampling[row].mode == 0u) return;
-    const SamplingConstraint constraint = make_sampling_constraint(
-        sampling[row], row, constraint_masks, constraint_mask_words);
     const uint32_t begin = static_cast<uint32_t>(
         (static_cast<uint64_t>(vocab_size) * partition) / partitions);
     const uint32_t end = static_cast<uint32_t>(
@@ -140,7 +112,6 @@ __global__ void argmax_stage1_impl(const float* __restrict__ logits,
     uint32_t best_token = kNoToken;
     const float* row_logits = logits + static_cast<size_t>(row) * logits_row_stride;
     for (uint32_t v = begin + threadIdx.x; v < end; v += blockDim.x) {
-        if (!sampling_token_allowed(constraint, v)) continue;
         argmax_update(row_logits[v], v, best_value, best_token);
     }
     argmax_reduce_block(best_value, best_token);
@@ -277,7 +248,7 @@ hipError_t launch_argmax_f32_single(const ArgmaxF32Args& args,
         return hipErrorInvalidValue;
     argmax_single_impl<<<args.outputs, kThreads, 0, stream>>>(
         args.logits, args.sampling, args.sampled_tokens, args.vocab_size,
-        args.logits_row_stride, args.constraint_masks, args.constraint_mask_words);
+        args.logits_row_stride);
     return hipGetLastError();
 }
 
@@ -294,7 +265,7 @@ hipError_t launch_argmax_f32_partitioned(
     const uint32_t stage1_grid = args.outputs * partitions;
     argmax_stage1_impl<<<stage1_grid, kThreads, 0, stream>>>(
         args.logits, args.sampling, partials, args.vocab_size, partitions,
-        args.logits_row_stride, args.constraint_masks, args.constraint_mask_words);
+        args.logits_row_stride);
     argmax_stage2_impl<<<args.outputs, kThreads, 0, stream>>>(
         args.sampling, args.sampled_tokens, partials, partitions);
     return hipGetLastError();
