@@ -47,11 +47,6 @@ struct RuntimeRequest {
 
     uint32_t generated_tokens = 0;
     std::vector<int32_t> generated;
-
-    uint32_t restored_tokens = 0;
-
-    uint32_t prefix_cache_checkpoint_position = 0;
-    bool prefix_cache_checkpoint_saved = false;
 };
 
 Status admit_request(

@@ -20,16 +20,14 @@ ContinuousBatcher::ContinuousBatcher(
     GdnStatePool& gdn_pool,
     PagedKVPool& kv_pool,
     ContinuousBatcherConfig config,
-    hipStream_t stream,
-    PrefixCache* prefix_cache)
+    hipStream_t stream)
     : executor_(executor),
       seq_pool_(seq_pool),
       gdn_pool_(gdn_pool),
       kv_pool_(kv_pool),
       config_(config),
       stream_(stream),
-      capacity_(kv_pool.num_pages()),
-      prefix_cache_(prefix_cache) {
+      capacity_(kv_pool.num_pages()) {
 }
 
 Result<uint64_t> ContinuousBatcher::submit(
@@ -40,16 +38,10 @@ Result<uint64_t> ContinuousBatcher::submit(
 Result<uint64_t> ContinuousBatcher::submit(
     std::vector<int32_t> input_tokens,
     uint32_t max_new_tokens,
-    const SamplingConfig& sampling,
-    uint32_t prefix_cache_checkpoint_position) {
+    const SamplingConfig& sampling) {
     if (input_tokens.empty()) {
         return Status::invalid_argument("submit requires at least one input token",
                                         __FILE__, __LINE__);
-    }
-    if (prefix_cache_checkpoint_position > input_tokens.size()) {
-        return Status::invalid_argument(
-            "prefix cache checkpoint position exceeds input token count",
-            __FILE__, __LINE__);
     }
     const Status sampling_status = validate_sampling_config(sampling);
     if (!sampling_status.ok()) {
@@ -77,7 +69,6 @@ Result<uint64_t> ContinuousBatcher::submit(
     request.sampling = sampling;
     request.max_kv_tokens = max_kv_tokens.value();
     request.max_kv_pages = max_kv_pages;
-    request.prefix_cache_checkpoint_position = prefix_cache_checkpoint_position;
 
     requests_.push_back(std::move(request));
     request_index_[requests_.back().id] = std::prev(requests_.end());
@@ -168,26 +159,6 @@ Status ContinuousBatcher::finish_request(
     if (!request.sequence.is_allocated()) {
         return Status::make_ok();
     }
-    Status save_st = Status::make_ok();
-    const bool explicit_checkpoint = request.prefix_cache_checkpoint_position > 0;
-    const bool cacheable =
-        !explicit_checkpoint &&
-        (reason == FinishReason::Eos || reason == FinishReason::MaxNewTokens);
-    if (cacheable && prefix_cache_ != nullptr && prefix_cache_->enabled() &&
-        request.sequence.is_usable() && request.sequence.position > 0) {
-        std::vector<int32_t> tokens = request.input_tokens;
-        const std::size_t base = tokens.size();
-        if (request.sequence.position > base) {
-            const std::size_t extra = request.sequence.position - base;
-            for (std::size_t i = 0; i < extra && i < request.generated.size(); ++i) {
-                tokens.push_back(request.generated[i]);
-            }
-        }
-        if (tokens.size() == request.sequence.position) {
-            save_st = prefix_cache_->save(
-                request.sequence, gdn_pool_, kv_pool_, std::move(tokens), stream);
-        }
-    }
     Status mirror_release = Status::make_ok();
     if (tp_batch_hook_ != nullptr) {
         mirror_release = tp_batch_hook_->on_sequence_released(request.sequence);
@@ -203,7 +174,7 @@ Status ContinuousBatcher::finish_request(
     if (!claim_st.ok()) {
         return claim_st;
     }
-    return save_st;
+    return Status::make_ok();
 }
 
 KVBankerState ContinuousBatcher::build_kv_banker_state() const {
@@ -273,28 +244,6 @@ Result<StepResult> ContinuousBatcher::step() {
                 (void)release_paged_sequence_state(request.sequence, stream_);
                 request.state = RequestState::Queued;
                 return mirror_st;
-            }
-        }
-        if (prefix_cache_ != nullptr && prefix_cache_->enabled()) {
-            const PrefixCheckpoint* checkpoint =
-                prefix_cache_->find_longest(request.input_tokens, true);
-            if (checkpoint != nullptr &&
-                checkpoint->tokens.size() < request.input_tokens.size()) {
-                auto restore_st = prefix_cache_->restore(
-                    request.sequence, gdn_pool_, kv_pool_, *checkpoint, stream_);
-                if (!restore_st.ok()) {
-                    if (tp_batch_hook_ != nullptr) {
-                        (void)tp_batch_hook_->on_sequence_released(request.sequence);
-                    }
-                    (void)release_paged_sequence_state(request.sequence, stream_);
-                    request.state = RequestState::Queued;
-                    return restore_st;
-                }
-                request.restored_tokens = checkpoint->position;
-                if (request.restored_tokens >=
-                    request.prefix_cache_checkpoint_position) {
-                    request.prefix_cache_checkpoint_saved = true;
-                }
             }
         }
         auto claim_st = capacity_.register_claim(request.id, request.max_kv_pages);
@@ -400,25 +349,6 @@ Result<StepResult> ContinuousBatcher::step() {
             return Status::invalid_state("planned sequence not found", __FILE__, __LINE__);
         }
         RuntimeRequest& request = *request_ptr;
-        if (prefix_cache_ != nullptr && prefix_cache_->enabled() &&
-            request.prefix_cache_checkpoint_position > 0 &&
-            !request.prefix_cache_checkpoint_saved &&
-            scheduled.execution_class == ::ps::runtime::ExecutionClass::PREFILL &&
-            scheduled.prefix_tokens + scheduled.num_tokens ==
-                request.prefix_cache_checkpoint_position &&
-            request.sequence.position == request.prefix_cache_checkpoint_position) {
-            std::vector<int32_t> prefix_tokens(
-                request.input_tokens.begin(),
-                request.input_tokens.begin() + static_cast<std::ptrdiff_t>(
-                    request.prefix_cache_checkpoint_position));
-            auto boundary_st = prefix_cache_->save(
-                request.sequence, gdn_pool_, kv_pool_, std::move(prefix_tokens),
-                stream_, true);
-            if (!boundary_st.ok()) {
-                return boundary_st;
-            }
-            request.prefix_cache_checkpoint_saved = true;
-        }
         int32_t token = -1;
         if (scheduled.compute_logits) {
             if (row >= output.num_outputs) {

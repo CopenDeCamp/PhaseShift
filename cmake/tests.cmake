@@ -141,7 +141,6 @@ phaseshift_add_test(NAME test_program_workspace_lifetime SOURCE unit/test_progra
 phaseshift_add_test(NAME test_program_block_scaled_lowering SOURCE unit/test_program_block_scaled_lowering.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
 phaseshift_add_test(NAME test_dispatch_staging_size SOURCE unit/test_dispatch_staging_size.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
 phaseshift_add_test(NAME test_gpu_arena_vmm SOURCE unit/test_gpu_arena_vmm.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu)
-phaseshift_add_test(NAME test_qwen35_prefix_cache SOURCE unit/test_qwen35_prefix_cache.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35_state phaseshift_gpu)
 phaseshift_add_test(NAME test_qwen35_psq_kv_pool SOURCE unit/test_qwen35_psq_kv_pool.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_state phaseshift_gpu)
 phaseshift_add_test(NAME test_imatrix_collector SOURCE unit/test_imatrix_collector.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_quantizer_core phaseshift_core)
 
@@ -302,7 +301,6 @@ add_custom_target(
         test_qwen35_lowering_contract
         test_qwen35_spec_verify
         test_architecture_boundaries
-        test_qwen35_prefix_cache
         test_qwen35_psq_kv_pool
         test_imatrix_collector
         test_gemm_bf16_verify_exact

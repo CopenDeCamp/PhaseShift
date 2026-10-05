@@ -88,9 +88,6 @@ def run_suite(kv_cache_dtype: str, checker: Checker) -> None:
         checker.check(f"{label} dflash2 enabled",
                       any("DFLASH2_ENABLED=1" in line for line in harness.stderr_lines),
                       str(harness.stderr_lines[-10:]))
-        checker.check(f"{label} prefix cache disabled",
-                      any("PREFIX_CACHE_ENABLED=0" in line for line in harness.stderr_lines),
-                      str(harness.stderr_lines[-10:]))
 
         harness.send({
             "op": "generate", "request_id": 1, "input_ids": PROMPT,

@@ -123,9 +123,7 @@ struct DFlash2PrefillOutput {
 Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
-    uint32_t prompt_count,
-    uint32_t restored_tokens = 0u,
-    uint32_t checkpoint_position = 0u);
+    uint32_t prompt_count);
 
 struct DFlash2TargetSnapshot {
     uint32_t position = 0u;

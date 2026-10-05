@@ -54,8 +54,6 @@ void usage(const char* prog) {
     printf("  --page-tokens N        paged KV page size in tokens (default 16)\n");
     printf("  --max-concurrent-requests N  max in-flight requests (default 1)\n");
     printf("  --kv-cache-capacity-tokens N physical KV token capacity (0 = one context)\n");
-    printf("  --prefix-cache-capacity-tokens N GPU prefix cache KV token capacity (0 = disabled)\n");
-    printf("  --prefix-cache-max-entries N     max cached prefixes / GDN snapshots (default 16)\n");
     printf("  --device N             GPU device (default 0)\n");
     printf("  --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)\n");
     printf("  --verify-weights 0|1      verify quantized payload CRC32 on load (default 0)\n");
@@ -220,16 +218,6 @@ void dump_mem_debug(ps::app::Qwen35ComputeRuntime& runtime) {
     printf("STAGING_SHARED_PROGRAM_BYTES=%llu\n", (unsigned long long)staging_shared_program_bytes);
     printf("EXECUTION_WORKSPACE_BYTES=%zu\n", executor.execution_workspace.allocation_bytes());
     printf("GDN_STATE_BYTES=%zu\n", gdn_pool.reserved_bytes());
-    if (const auto* prefix_cache = runtime.prefix_cache(); prefix_cache != nullptr) {
-        printf("PREFIX_CACHE_ENABLED=1\n");
-        printf("PREFIX_CACHE_CAPACITY_TOKENS=%u\n", prefix_cache->capacity_tokens());
-        printf("PREFIX_CACHE_MAX_ENTRIES=%u\n", prefix_cache->max_entries());
-        printf("PREFIX_CACHE_PAGES=%u\n", prefix_cache->cache_pages());
-        printf("PREFIX_CACHE_KV_BYTES=%zu\n", prefix_cache->cache_kv_bytes());
-        printf("PREFIX_CACHE_GDN_BYTES=%zu\n", prefix_cache->cache_gdn_bytes());
-    } else {
-        printf("PREFIX_CACHE_ENABLED=0\n");
-    }
     printf("ARENA_USED_BYTES=%zu\n", runtime.arena().used());
     printf("ARENA_CAPACITY_BYTES=%zu\n", runtime.arena().capacity());
     printf("ARENA_COMMITTED_BYTES=%zu\n", runtime.arena().committed());
@@ -793,8 +781,6 @@ struct ServeGeneration {
     ps::qwen35::runtime::FinishReason finish_reason =
         ps::qwen35::runtime::FinishReason::None;
     uint32_t prompt_tokens = 0;
-    uint32_t restored_tokens = 0;
-    uint32_t cache_checkpoint_tokens = 0;
     std::vector<int32_t> generated;
     std::unique_ptr<DFlashServeSession> dflash_session;
 };
@@ -894,25 +880,16 @@ void serve_emit_done(ps::app::Qwen35ComputeRuntime& runtime, ServeState& state,
         done["generated_ids"] = generation.generated;
         done["finish_reason"] = finish_reason_name(generation.finish_reason);
         done["prompt_tokens"] = generation.prompt_tokens;
-        done["restored_tokens"] = generation.restored_tokens;
-        done["prefill_tokens"] =
-            generation.prompt_tokens >= generation.restored_tokens
-                ? generation.prompt_tokens - generation.restored_tokens
-                : 0;
-        done["cache_checkpoint_tokens"] = generation.cache_checkpoint_tokens;
+        done["restored_tokens"] = 0;
+        done["prefill_tokens"] = generation.prompt_tokens;
+        done["cache_checkpoint_tokens"] = 0;
     } else if (request != nullptr) {
         done["generated_ids"] = request->generated;
         done["finish_reason"] = finish_reason_name(request->finish_reason);
         done["prompt_tokens"] = request->input_tokens.size();
-        done["restored_tokens"] = request->restored_tokens;
-        done["prefill_tokens"] =
-            request->input_tokens.size() >= request->restored_tokens
-                ? request->input_tokens.size() - request->restored_tokens
-                : 0;
-        done["cache_checkpoint_tokens"] =
-            request->prefix_cache_checkpoint_saved
-                ? request->prefix_cache_checkpoint_position
-                : 0;
+        done["restored_tokens"] = 0;
+        done["prefill_tokens"] = request->input_tokens.size();
+        done["cache_checkpoint_tokens"] = 0;
     } else {
         done["generated_ids"] = std::vector<int32_t>{};
         done["finish_reason"] = "error";
@@ -1150,8 +1127,7 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
                                      ps::app::Qwen35ComputeRuntime& runtime,
                                      ServeGeneration& generation,
                                      const std::vector<int32_t>& input_ids,
-                                     const ps::qwen35::runtime::SamplingConfig& sampling,
-                                     uint32_t prefix_cache_checkpoint_position = 0u) {
+                                     const ps::qwen35::runtime::SamplingConfig& sampling) {
     auto& slot_pool = runtime.slot_pool();
     auto& gdn_pool = runtime.gdn_pool();
     auto& kv_pool = runtime.kv_pool();
@@ -1168,16 +1144,6 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     session->sequence =
         std::make_unique<ps::qwen35::PagedSequenceState>(sequence_result.release());
 
-    auto* prefix_cache = runtime.mutable_prefix_cache();
-    const ps::qwen35::runtime::PrefixCheckpoint* checkpoint = nullptr;
-    if (prefix_cache != nullptr && prefix_cache->enabled()) {
-        const ps::qwen35::runtime::PrefixCheckpoint* found =
-            prefix_cache->find_longest(input_ids, true);
-        if (found != nullptr && found->tokens.size() < input_ids.size()) {
-            checkpoint = found;
-        }
-    }
-
     auto context_result =
         ps::qwen35::dflash2::create_dflash2_context_state(dflash.config, arena, 0u);
     if (!context_result.ok()) {
@@ -1187,19 +1153,6 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     session->context =
         std::make_unique<ps::qwen35::dflash2::DFlash2ContextState>(
             context_result.release());
-
-    uint32_t restored_tokens = 0u;
-    if (checkpoint != nullptr) {
-        const ps::Status restore_st = prefix_cache->restore(
-            *session->sequence, gdn_pool, kv_pool, *checkpoint, stream,
-            session->context.get());
-        if (!restore_st.ok()) {
-            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
-            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
-            return restore_st;
-        }
-        restored_tokens = checkpoint->position;
-    }
 
     ps::qwen35::runtime::DFlash2SpecDecoderConfig decoder_config;
     decoder_config.num_drafts = dflash.drafts;
@@ -1220,29 +1173,13 @@ ps::Status serve_dflash_open_session(DFlashServeContext& dflash,
     ps::qwen35::runtime::dflash2_spec_decoder_set_sampling(*session->decoder, sampling);
 
     auto prefill_result = ps::qwen35::runtime::dflash2_spec_prefill(
-        *session->decoder, input_ids.data(), static_cast<uint32_t>(input_ids.size()),
-        restored_tokens, prefix_cache_checkpoint_position);
+        *session->decoder, input_ids.data(), static_cast<uint32_t>(input_ids.size()));
     if (!prefill_result.ok()) {
         (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
         (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
         (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
         return prefill_result.status();
     }
-
-    if (prefix_cache != nullptr && prefix_cache->enabled()) {
-        std::vector<int32_t> boundary(input_ids.begin(), input_ids.end());
-        const ps::Status save_st = prefix_cache->save(
-            *session->sequence, gdn_pool, kv_pool, std::move(boundary), stream, true,
-            session->context.get());
-        if (!save_st.ok()) {
-            (void)ps::qwen35::runtime::dflash2_spec_decoder_shutdown(*session->decoder);
-            (void)ps::qwen35::dflash2::dflash2_context_shutdown(*session->context);
-            (void)ps::qwen35::release_paged_sequence_state(*session->sequence, stream);
-            return save_st;
-        }
-        generation.cache_checkpoint_tokens = static_cast<uint32_t>(input_ids.size());
-    }
-    generation.restored_tokens = restored_tokens;
 
     const int32_t pending = prefill_result.value().pending_token;
     session->pending_token = pending;
@@ -1485,27 +1422,6 @@ int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
         fprintf(stderr, "DFLASH2_ENABLED=1\n");
         fprintf(stderr, "DFLASH2_DRAFTS=%u\n", dflash.drafts);
         fprintf(stderr, "DFLASH2_BLOCK_SIZE=%zu\n", dflash.config.block_size);
-        if (auto* prefix_cache = runtime.mutable_prefix_cache();
-            prefix_cache != nullptr && prefix_cache->enabled()) {
-            const ps::Status ring_st =
-                prefix_cache->enable_dflash_ring(dflash.config, runtime.arena());
-            if (!ring_st.ok()) {
-                fprintf(stderr, "dflash2 prefix cache ring failed: %s\n",
-                        ring_st.message().c_str());
-                return 1;
-            }
-            fprintf(stderr, "PREFIX_CACHE_DFLASH_RING_BYTES=%zu\n",
-                    prefix_cache->dflash_ring_bytes());
-        }
-    }
-    if (const auto* prefix_cache = runtime.prefix_cache(); prefix_cache != nullptr) {
-        fprintf(stderr, "PREFIX_CACHE_ENABLED=1\n");
-        fprintf(stderr, "PREFIX_CACHE_CAPACITY_TOKENS=%u\n", prefix_cache->capacity_tokens());
-        fprintf(stderr, "PREFIX_CACHE_MAX_ENTRIES=%u\n", prefix_cache->max_entries());
-        fprintf(stderr, "PREFIX_CACHE_KV_BYTES=%zu\n", prefix_cache->cache_kv_bytes());
-        fprintf(stderr, "PREFIX_CACHE_GDN_BYTES=%zu\n", prefix_cache->cache_gdn_bytes());
-    } else {
-        fprintf(stderr, "PREFIX_CACHE_ENABLED=0\n");
     }
     fprintf(stderr, "PHASESHIFT_SERVE_READY\n");
     fflush(stderr);
@@ -1565,8 +1481,6 @@ int main(int argc, char** argv) {
     unsigned long page_tokens = 16;
     unsigned long max_concurrent_requests = 1;
     unsigned long kv_cache_capacity_tokens = 0;
-    unsigned long prefix_cache_capacity_tokens = 0;
-    unsigned long prefix_cache_max_entries = 16;
     unsigned long device = 0;
     std::string kv_cache_dtype = "bf16";
     int verify_weights = 0;
@@ -1602,14 +1516,6 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--kv-cache-capacity-tokens") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], kv_cache_capacity_tokens)) {
                 fprintf(stderr, "bad --kv-cache-capacity-tokens\n"); return 2;
-            }
-        } else if (std::strcmp(argv[i], "--prefix-cache-capacity-tokens") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], prefix_cache_capacity_tokens)) {
-                fprintf(stderr, "bad --prefix-cache-capacity-tokens\n"); return 2;
-            }
-        } else if (std::strcmp(argv[i], "--prefix-cache-max-entries") == 0 && i + 1 < argc) {
-            if (!parse_uint(argv[++i], prefix_cache_max_entries)) {
-                fprintf(stderr, "bad --prefix-cache-max-entries\n"); return 2;
             }
         } else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
             if (!parse_uint(argv[++i], device)) { fprintf(stderr, "bad --device\n"); return 2; }
@@ -1672,12 +1578,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (prefix_cache_capacity_tokens > 0 && prefix_cache_max_entries == 0) {
-        fprintf(stderr,
-                "bad: --prefix-cache-max-entries must be > 0 when prefix cache is enabled\n");
-        return 2;
-    }
-
     {
         const ps::Status sampling_status =
             ps::qwen35::runtime::validate_sampling_config(sampling);
@@ -1693,8 +1593,6 @@ int main(int argc, char** argv) {
     config.max_seq_len = static_cast<uint32_t>(max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(max_concurrent_requests);
     config.kv_cache_capacity_tokens = static_cast<uint32_t>(kv_cache_capacity_tokens);
-    config.prefix_cache_capacity_tokens = static_cast<uint32_t>(prefix_cache_capacity_tokens);
-    config.prefix_cache_max_entries = static_cast<uint32_t>(prefix_cache_max_entries);
     config.arena_bytes = static_cast<std::size_t>(arena_gib) * 1024ull * 1024ull * 1024ull;
     config.page_tokens = static_cast<uint32_t>(page_tokens);
     config.device = static_cast<int>(device);

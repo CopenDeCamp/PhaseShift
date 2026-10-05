@@ -186,7 +186,6 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/kv_banker.cpp
     src/phaseshift/models/qwen35/runtime/continuous_batcher.cpp
     src/phaseshift/models/qwen35/runtime/tensor_parallel.cpp
-    src/phaseshift/models/qwen35/runtime/prefix_cache.cpp
     src/phaseshift/models/qwen35/runtime/program_executor.hip
     src/phaseshift/models/qwen35/runtime/executor.hip
     src/phaseshift/models/qwen35/runtime/spec_decode.cpp

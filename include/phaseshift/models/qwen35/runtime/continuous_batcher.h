@@ -5,7 +5,6 @@
 #include <phaseshift/models/qwen35/runtime/token_budget_scheduler.h>
 #include <phaseshift/models/qwen35/runtime/kv_capacity_manager.h>
 #include <phaseshift/models/qwen35/runtime/kv_banker.h>
-#include <phaseshift/models/qwen35/runtime/prefix_cache.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/tp_batch_hook.h>
 #include <phaseshift/models/qwen35/stop_tokens.h>
@@ -50,8 +49,7 @@ class ContinuousBatcher {
         GdnStatePool& gdn_pool,
         PagedKVPool& kv_pool,
         ContinuousBatcherConfig config,
-        hipStream_t stream,
-        PrefixCache* prefix_cache = nullptr);
+        hipStream_t stream);
 
     ContinuousBatcher(const ContinuousBatcher&) = delete;
     ContinuousBatcher& operator=(const ContinuousBatcher&) = delete;
@@ -61,8 +59,7 @@ class ContinuousBatcher {
     Result<uint64_t> submit(
         std::vector<int32_t> input_tokens,
         uint32_t max_new_tokens,
-        const SamplingConfig& sampling,
-        uint32_t prefix_cache_checkpoint_position = 0);
+        const SamplingConfig& sampling);
 
     Status cancel(uint64_t id);
 
@@ -103,7 +100,6 @@ class ContinuousBatcher {
     hipStream_t stream_;
 
     KVCapacityManager capacity_;
-    PrefixCache* prefix_cache_ = nullptr;
     TpBatchHook* tp_batch_hook_ = nullptr;
 
     uint64_t next_id_ = 0;

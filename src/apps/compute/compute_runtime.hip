@@ -140,22 +140,6 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     }
     kv_pool_.emplace(std::move(kv_pool_result.release()));
 
-    if (config_.prefix_cache_capacity_tokens > 0) {
-        if (config_.prefix_cache_max_entries == 0) {
-            return Status::invalid_argument(
-                "prefix_cache_max_entries must be > 0 when prefix cache is enabled",
-                __FILE__, __LINE__);
-        }
-        auto prefix_result = qwen35::runtime::PrefixCache::create(
-            *arena_, *kv_pool_, *gdn_pool_,
-            config_.prefix_cache_capacity_tokens,
-            config_.prefix_cache_max_entries);
-        if (!prefix_result.ok()) {
-            return prefix_result.status();
-        }
-        prefix_cache_.emplace(prefix_result.release());
-    }
-
     exec_max_tokens_ = config_.max_scheduled_tokens;
     if (exec_max_tokens_ == 0) {
         exec_max_tokens_ = max_seq;
@@ -191,8 +175,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     batcher_config.eos_token_ids = text_config.stop_tokens;
 
     batcher_ = std::make_unique<qwen35::runtime::ContinuousBatcher>(
-        executor_, *slot_pool_, *gdn_pool_, *kv_pool_, batcher_config, stream_,
-        prefix_cache_ ? &*prefix_cache_ : nullptr);
+        executor_, *slot_pool_, *gdn_pool_, *kv_pool_, batcher_config, stream_);
 
     return Status::make_ok();
 }
@@ -200,13 +183,11 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
 Result<uint64_t> Qwen35ComputeRuntime::submit(
     std::vector<int32_t> input_ids,
     uint32_t max_new_tokens,
-    const qwen35::runtime::SamplingConfig& sampling,
-    uint32_t prefix_cache_checkpoint_position) {
+    const qwen35::runtime::SamplingConfig& sampling) {
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
-    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling,
-                            prefix_cache_checkpoint_position);
+    return batcher_->submit(std::move(input_ids), max_new_tokens, sampling);
 }
 
 Result<qwen35::runtime::StepResult> Qwen35ComputeRuntime::step() {
@@ -261,10 +242,6 @@ Status Qwen35ComputeRuntime::shutdown() {
 
     auto exec_st = qwen35::executor_shutdown(executor_);
     if (!exec_st.ok() && first_error.ok()) first_error = exec_st;
-
-    if (prefix_cache_.has_value()) {
-        prefix_cache_->clear();
-    }
 
     if (stream_ != nullptr) {
         hipError_t herr = hipStreamDestroy(stream_);

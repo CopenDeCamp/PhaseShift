@@ -393,9 +393,7 @@ Result<BatchExecutionOutput> run_target_batch(DFlash2SpecDecoder& decoder,
 Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     DFlash2SpecDecoder& decoder,
     const int32_t* prompt_tokens,
-    uint32_t prompt_count,
-    uint32_t restored_tokens,
-    uint32_t checkpoint_position) {
+    uint32_t prompt_count) {
     if (!decoder.initialized) {
         return Status::invalid_state("dflash2_spec_prefill: not initialized", __FILE__,
                                      __LINE__);
@@ -403,14 +401,6 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
     if (prompt_tokens == nullptr || prompt_count == 0u) {
         return Status::invalid_argument("dflash2_spec_prefill: empty prompt", __FILE__,
                                         __LINE__);
-    }
-    if (restored_tokens > prompt_count) {
-        return Status::invalid_argument("dflash2_spec_prefill: restored tokens overflow",
-                                        __FILE__, __LINE__);
-    }
-    if (restored_tokens != 0u && decoder.context->next_position != restored_tokens) {
-        return Status::invalid_state("dflash2_spec_prefill: restored position mismatch",
-                                     __FILE__, __LINE__);
     }
     const uint32_t chunk_limit = decoder.target->config.max_scheduled_tokens;
     if (chunk_limit == 0u) {
@@ -425,12 +415,9 @@ Result<DFlash2PrefillOutput> dflash2_spec_prefill(
 
     DFlash2PrefillOutput out;
     std::vector<ScheduledRequest> requests;
-    uint32_t offset = restored_tokens;
+    uint32_t offset = 0u;
     while (offset < prompt_count) {
         uint32_t n = std::min(chunk_limit, prompt_count - offset);
-        if (checkpoint_position > offset && n > checkpoint_position - offset) {
-            n = checkpoint_position - offset;
-        }
         const bool final_chunk = (offset + n == prompt_count);
         ScheduledBatch batch = make_prefill_batch(
             *decoder.sequence, requests, prompt_tokens + offset, n, offset, final_chunk,

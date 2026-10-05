@@ -37,8 +37,6 @@ void usage(FILE* f) {
         "  --suffix-tokens N      per-request suffix length (default 8)\n"
         "  --max-new-tokens N     decode tokens per request (default 8)\n"
         "  --requests N           number of requests (default 4)\n"
-        "  --prefix-cache-slots N cache capacity for the warm pass (default 4)\n"
-        "  --pass cold|warm|both  run one pass or both (default both)\n"
         "  --warmup N             discarded requests before measuring (default 0)\n"
         "  --max-sched-tokens N   scheduler token budget per step (0 = prefix_tokens)\n"
         "  --same-suffix          identical suffix for every request\n");
@@ -53,11 +51,9 @@ struct BatchOptions {
     int suffix_tokens = 8;
     int max_new_tokens = 8;
     int requests = 4;
-    int prefix_cache_slots = 4;
     int warmup = 0;
     int max_sched_tokens = 0;
     bool same_suffix = false;
-    std::string pass = "both";
 };
 
 bool parse_int(const char* s, int& out) {
@@ -87,9 +83,7 @@ bool parse_args(int argc, char** argv, BatchOptions& o) {
         else if (a == "--suffix-tokens") { const char* v = next("--suffix-tokens"); if (!v || !parse_int(v, o.suffix_tokens)) return false; }
         else if (a == "--max-new-tokens") { const char* v = next("--max-new-tokens"); if (!v || !parse_int(v, o.max_new_tokens)) return false; }
         else if (a == "--requests") { const char* v = next("--requests"); if (!v || !parse_int(v, o.requests)) return false; }
-        else if (a == "--prefix-cache-slots") { const char* v = next("--prefix-cache-slots"); if (!v || !parse_int(v, o.prefix_cache_slots)) return false; }
         else if (a == "--warmup") { const char* v = next("--warmup"); if (!v || !parse_int(v, o.warmup)) return false; }
-        else if (a == "--pass") { const char* v = next("--pass"); if (!v) return false; o.pass = v; }
         else if (a == "--max-sched-tokens") { const char* v = next("--max-sched-tokens"); if (!v || !parse_int(v, o.max_sched_tokens)) return false; }
         else if (a == "--same-suffix") { o.same_suffix = true; }
         else if (a == "-h" || a == "--help") { usage(stdout); return false; }
@@ -259,86 +253,35 @@ int run_batch(int argc, char** argv) {
     cfg.page_tokens = static_cast<uint32_t>(opts.page_tokens);
     cfg.eos_token_ids = tc.stop_tokens;
 
-    auto run_one = [&](uint32_t cache_slots) -> RunResult {
+    auto run_one = [&]() -> RunResult {
         ps::qwen35::runtime::ContinuousBatcherConfig c = cfg;
-        std::optional<ps::qwen35::runtime::PrefixCache> cache;
-        if (cache_slots > 0) {
-            const uint32_t cache_tokens = static_cast<uint32_t>(
-                opts.prefix_tokens + opts.suffix_tokens + opts.max_new_tokens + 8);
-            auto pc = ps::qwen35::runtime::PrefixCache::create(
-                arena, kv_pool, gdn_pool, cache_tokens, cache_slots, 1u);
-            if (!pc.ok()) {
-                std::fprintf(stderr, "PrefixCache::create failed: %s\n",
-                             pc.status().message().c_str());
-                return RunResult{};
-            }
-            cache.emplace(pc.release());
-        }
         ps::qwen35::runtime::ContinuousBatcher batcher(
-            executor, seq_pool, gdn_pool, kv_pool, c, stream,
-            cache ? &*cache : nullptr);
+            executor, seq_pool, gdn_pool, kv_pool, c, stream);
         return run_pass(executor, seq_pool, gdn_pool, kv_pool, batcher, opts, stream);
     };
 
-    auto print_gen = [&](const char* tag, const RunResult& r) {
-        for (std::size_t i = 0; i < r.generated.size(); ++i) {
-            std::printf("GEN_%s[%zu]=", tag, i);
-            bool first = true;
-            for (int32_t t : r.generated[i]) {
-                std::printf("%s%d", first ? "" : ",", t);
-                first = false;
-            }
-            std::printf(" (n=%zu)\n", r.generated[i].size());
-        }
-    };
-
-    const bool do_cold = (opts.pass == "cold" || opts.pass == "both");
-    const bool do_warm = (opts.pass == "warm" || opts.pass == "both");
-
-    std::printf("prefix_tokens=%d suffix_tokens=%d requests=%d max_new=%d prefix_cache_slots=%d\n",
+    std::printf("prefix_tokens=%d suffix_tokens=%d requests=%d max_new=%d\n",
                 opts.prefix_tokens, opts.suffix_tokens, opts.requests,
-                opts.max_new_tokens, opts.prefix_cache_slots);
+                opts.max_new_tokens);
 
-    RunResult cold;
-    RunResult warm;
-    if (do_cold) {
-        cold = run_one(0);
-        if (!cold.ok) {
-            std::fprintf(stderr, "cold pass failed\n");
-            return 1;
+    RunResult result = run_one();
+    if (!result.ok) {
+        std::fprintf(stderr, "batch pass failed\n");
+        return 1;
+    }
+    std::printf("step_tokens=%llu steps=%llu wall_ms=%.1f\n",
+                static_cast<unsigned long long>(result.step_tokens),
+                static_cast<unsigned long long>(result.steps), result.prefill_ms);
+    for (std::size_t i = 0; i < result.generated.size(); ++i) {
+        std::printf("GEN[%zu]=", i);
+        bool first = true;
+        for (int32_t tok : result.generated[i]) {
+            std::printf("%s%d", first ? "" : ",", tok);
+            first = false;
         }
-        std::printf("cold: step_tokens=%llu steps=%llu wall_ms=%.1f\n",
-                    static_cast<unsigned long long>(cold.step_tokens),
-                    static_cast<unsigned long long>(cold.steps), cold.prefill_ms);
-        print_gen("COLD", cold);
+        std::printf(" (n=%zu)\n", result.generated[i].size());
     }
-    if (do_warm) {
-        warm = run_one(static_cast<uint32_t>(opts.prefix_cache_slots));
-        if (!warm.ok) {
-            std::fprintf(stderr, "warm pass failed\n");
-            return 1;
-        }
-        std::printf("warm: step_tokens=%llu steps=%llu wall_ms=%.1f\n",
-                    static_cast<unsigned long long>(warm.step_tokens),
-                    static_cast<unsigned long long>(warm.steps), warm.prefill_ms);
-        print_gen("WARM", warm);
-    }
-
-    if (!do_cold || !do_warm) {
-        (void)hipStreamDestroy(stream);
-        return 0;
-    }
-
-    const bool tokens_match = (cold.generated == warm.generated);
-    if (cold.step_tokens > 0) {
-        std::printf("step_tokens_saved=%lld (%.1f%%)\n",
-                    static_cast<long long>(cold.step_tokens) -
-                        static_cast<long long>(warm.step_tokens),
-                    100.0 * static_cast<double>(cold.step_tokens - warm.step_tokens) /
-                        static_cast<double>(cold.step_tokens));
-    }
-    std::printf("greedy_match=%s\n", tokens_match ? "YES" : "NO");
 
     (void)hipStreamDestroy(stream);
-    return tokens_match ? 0 : 1;
+    return 0;
 }

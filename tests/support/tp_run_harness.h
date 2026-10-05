@@ -328,7 +328,7 @@ inline RunResult run_tp1(const RunOptions& opts) {
     executor.value_trace = &result.trace.sink;
 
     ContinuousBatcher batcher(executor, seq_pool, gdn_pool, kv_pool,
-                              batcher_config(model.text_config(), opts), stream, nullptr);
+                              batcher_config(model.text_config(), opts), stream);
     auto id_result = batcher.submit(opts.prompt, opts.max_new_tokens);
     if (!id_result.ok()) {
         result.error = "tp1 submit: " + id_result.status().message();
@@ -421,8 +421,7 @@ inline RunResult run_tp2(const RunOptions& opts) {
 
     ContinuousBatcher batcher(rank0.executor(), rank0.sequence_pool(), rank0.gdn_pool(),
                               rank0.kv_pool(),
-                              batcher_config(rank0.text_config(), opts), rank0.stream(),
-                              nullptr);
+                              batcher_config(rank0.text_config(), opts), rank0.stream());
     batcher.set_tp_batch_hook(coordinator.get());
 
     result.trace.device = 0;

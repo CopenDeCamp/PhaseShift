@@ -109,12 +109,6 @@ Result<SchedulePlan> schedule_requests(
                 }
             }
         }
-        if (rp->prefix_cache_checkpoint_position > 0 &&
-            !rp->prefix_cache_checkpoint_saved &&
-            position < rp->prefix_cache_checkpoint_position &&
-            take > rp->prefix_cache_checkpoint_position - position) {
-            take = rp->prefix_cache_checkpoint_position - position;
-        }
         const uint32_t final_end = position + take;
         const bool final_chunk = final_end == static_cast<uint32_t>(rp->input_tokens.size());
         const bool sample = final_chunk && rp->max_new_tokens > 0;
