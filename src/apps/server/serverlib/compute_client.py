@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
@@ -115,11 +116,25 @@ class AsyncComputeClient:
     async def _read_stderr(self) -> None:
         assert self._proc is not None
         assert self._proc.stderr is not None
-        while True:
-            line = await self._proc.stderr.readline()
-            if not line:
-                return
-            self._log.write("[compute] " + line.decode("utf-8", errors="replace"))
+        trace_path = os.environ.get("PHASESHIFT_COMPUTE_LOG")
+        try:
+            while True:
+                line = await self._proc.stderr.readline()
+                if not line:
+                    return
+                text = line.decode("utf-8", errors="replace")
+                self._log.write("[compute] " + text)
+                self._log.flush()
+                if trace_path:
+                    try:
+                        with open(trace_path, "a", encoding="utf-8") as handle:
+                            handle.write(text)
+                    except OSError:
+                        pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - losing stderr must be visible
+            self._log.write(f"[compute] stderr reader failed: {exc}\n")
             self._log.flush()
 
     async def _broadcast_error(self, exc: Exception) -> None:

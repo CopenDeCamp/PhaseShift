@@ -384,8 +384,9 @@ class ChatService:
         yield StreamDone(map_finish_reason(
             str(done.get("finish_reason", "")), has_tool_calls=state["calls"] > 0))
 
-    def _feed_parser(self, parser, text: str, state: dict):
-        events = parser.feed(text) if text else []
+    def _feed_parser(self, parser, text: str, state: dict, events=None):
+        if events is None:
+            events = parser.feed(text) if text else []
         for event in events:
             kind = event.get("type")
             if kind == "region_chunk" and event.get("field") == "content" \

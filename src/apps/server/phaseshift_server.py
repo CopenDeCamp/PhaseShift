@@ -4,8 +4,8 @@
     ./build/phaseshift-server --model-dir /path/to/model --port 8000
 
 The server speaks an explicit subset of the OpenAI Chat Completions API and
-drives ``phaseshift-compute --serve-stdio`` directly over JSONL. There is no
-LocalAI, no gRPC and no constrained decoding in this process.
+drives ``phaseshift-compute --serve-stdio`` directly over JSONL. HTTP itself is
+served here; there is no external frontend and no constrained decoding.
 """
 
 from __future__ import annotations
@@ -197,6 +197,16 @@ async def _read_json(request: web.Request):
             f"request body is not valid JSON: {exc}") from exc
 
 
+async def _finish_stream(response: web.StreamResponse, body: dict) -> None:
+    """SSE error を送って stream を閉じる。transport が既に壊れている場合は黙って諦める。"""
+    try:
+        await response.write(openai_protocol.sse_data(body))
+        await response.write(openai_protocol.DONE)
+        await response.write_eof()
+    except (ConnectionResetError, BrokenPipeError):
+        pass
+
+
 async def handle_streaming(request: web.Request, service: ChatService,
                            chat, prepared) -> web.StreamResponse:
     completion_id = openai_protocol.new_completion_id()
@@ -230,23 +240,27 @@ async def handle_streaming(request: web.Request, service: ChatService,
             await response.write(openai_protocol.DONE)
             await response.write_eof()
         except (ConnectionResetError, BrokenPipeError):
-            raise
+            pass
         except OpenAIProtocolError as exc:
-            await response.write(openai_protocol.sse_data(
-                openai_protocol.error_body(exc.message, param=exc.param,
-                                           code=exc.code)))
-            await response.write(openai_protocol.DONE)
-            await response.write_eof()
+            await _finish_stream(
+                response, openai_protocol.error_body(
+                    exc.message, param=exc.param, code=exc.code))
         except ChatServiceError as exc:
-            await response.write(openai_protocol.sse_data(
-                openai_protocol.error_body(exc.message, code=exc.code)))
-            await response.write(openai_protocol.DONE)
-            await response.write_eof()
+            await _finish_stream(
+                response, openai_protocol.error_body(
+                    exc.message, code=exc.code))
         except ComputeError as exc:
-            await response.write(openai_protocol.sse_data(
-                openai_protocol.error_body(str(exc), code="compute_error")))
-            await response.write(openai_protocol.DONE)
-            await response.write_eof()
+            await _finish_stream(
+                response, openai_protocol.error_body(
+                    str(exc), code="compute_error"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - headers are already sent
+            _log("unhandled streaming failure:")
+            _log(traceback.format_exc())
+            await _finish_stream(
+                response, openai_protocol.error_body(
+                    f"internal error: {exc}", code="internal_error"))
     finally:
         await events.aclose()
 
