@@ -88,7 +88,7 @@ GROUPS = {
     + RESIDENT_INFRA_TESTS + TP_TESTS,
 }
 
-PROFILE_4B = "qwen35-4b"
+PROFILE_GPU_MCU = "gpu-mcu"
 PROFILE_DRAFT = "dflash2-draft"
 PROFILE_TARGET = "qwen35-target"
 PROFILE_FULL = "dflash2-full"
@@ -98,7 +98,7 @@ PROFILE_NONE = "none"
 
 def profile_for(test: str) -> str:
     if test in GPU_MCU_TESTS:
-        return PROFILE_4B
+        return PROFILE_GPU_MCU
     if test in DRAFT_ONLY_TESTS:
         return PROFILE_DRAFT
     if test in TARGET_DRAFT_TESTS:
@@ -113,15 +113,14 @@ def profile_for(test: str) -> str:
 def dirs_for_profile(profile: str) -> Tuple[List[str], List[str]]:
     from resident_session import existing_dir
 
+    if profile == PROFILE_GPU_MCU:
+        return existing_dir(os.environ.get("PHASESHIFT_MODEL_DIR")), []
     target = existing_dir(
         os.environ.get("PHASESHIFT_SERVER_MODEL_DIR"),
         os.environ.get("PHASESHIFT_MODEL_DIR_DFLASH2_TARGET"),
         os.environ.get("PHASESHIFT_MODEL_DIR"),
     )
-    four_b = existing_dir(os.environ.get("PHASESHIFT_MODEL_DIR_4B"))
     drafts = dflash2_dirs_from_env()
-    if profile == PROFILE_4B:
-        return four_b, []
     if profile == PROFILE_DRAFT:
         return [], drafts
     if profile == PROFILE_TARGET:
@@ -221,7 +220,7 @@ def main() -> int:
     tests = resolve_tests(ordered, build_dir)
 
     if not args.no_group_by_profile and not args.inject_timeout:
-        profile_order = [PROFILE_4B, PROFILE_DRAFT, PROFILE_TARGET, PROFILE_FULL,
+        profile_order = [PROFILE_GPU_MCU, PROFILE_DRAFT, PROFILE_TARGET, PROFILE_FULL,
                          PROFILE_TP, PROFILE_NONE]
         tests.sort(key=lambda name: profile_order.index(profile_for(name)))
 

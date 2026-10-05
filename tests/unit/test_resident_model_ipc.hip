@@ -28,8 +28,8 @@ void check(bool cond, const std::string& message) {
 }
 
 std::string model_dir_from_env() {
-    const char* names[] = {"PHASESHIFT_MODEL_DIR", "PHASESHIFT_MODEL_DIR_DFLASH2_TARGET",
-                           "PHASESHIFT_MODEL_DIR_4B"};
+    const char* names[] = {"PHASESHIFT_MODEL_DIR",
+                           "PHASESHIFT_MODEL_DIR_DFLASH2_TARGET"};
     for (const char* name : names) {
         const char* value = std::getenv(name);
         if (value != nullptr && value[0] != '\0') {

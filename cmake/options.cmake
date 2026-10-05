@@ -116,13 +116,6 @@ endif()
 
 message(STATUS "PhaseShift GPU architecture: ${CMAKE_HIP_ARCHITECTURES}")
 
-set(
-    PHASESHIFT_MODEL_DIR_4B
-    "${CMAKE_CURRENT_SOURCE_DIR}/models/Qwen3.5-4B"
-    CACHE PATH
-    "Model directory used by Qwen3.5-4B correctness tests"
-)
-
 list(PREPEND CMAKE_PREFIX_PATH "${PHASESHIFT_ROCM_ROOT}")
 
 function(phaseshift_set_rocm_rpath target)

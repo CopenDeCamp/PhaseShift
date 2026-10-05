@@ -375,8 +375,8 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
     phaseshift_add_test(NAME test_resident_timeout_worker SOURCE unit/test_resident_timeout_worker.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift-resident-fixture phaseshift_resident phaseshift_weights phaseshift_qwen35)
 
     # MTP weight contract against a real model directory.
-    # Model dir via PHASESHIFT_MODEL_DIR_MTP (preferred), PHASESHIFT_MODEL_DIR_4B,
-    # or PHASESHIFT_MODEL_DIR_4B_PSQ. Skips (exit 77) when none is set.
+    # Model dir via PHASESHIFT_MODEL_DIR_MTP (preferred) or PHASESHIFT_MODEL_DIR.
+    # Skips (exit 77) when none is set.
     phaseshift_add_test(NAME test_qwen35_mtp_weight_real SOURCE unit/test_qwen35_mtp_weight_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 16 LIBRARIES phaseshift_weights phaseshift_qwen35)
 
     # DFlash2 drafter weight contract against a real model directory.
@@ -470,6 +470,6 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
 
 
 
-    # Model dir via PHASESHIFT_MODEL_DIR_MTP or PHASESHIFT_MODEL_DIR_4B.
+    # Model dir via PHASESHIFT_MODEL_DIR_MTP or PHASESHIFT_MODEL_DIR.
 
 endif()

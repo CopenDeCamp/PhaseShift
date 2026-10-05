@@ -119,9 +119,19 @@ peak VRAM の差は model host の HIP context 分（約 0.3 GiB）である。
 
 ### GPU-MCU acceptance 6 本
 
-この環境には `PHASESHIFT_MODEL_DIR_4B` に該当する Qwen3.5-4B が無いため、
-変更前後とも exit 77 で skip する。resident session 内でも skip は skip のままであり、
-PASS には数えていない。
+`PHASESHIFT_MODEL_DIR_4B` を廃し、外部 model の指定を `PHASESHIFT_MODEL_DIR` に
+統一した。model size には依存しない（arena は 6 本とも 30 GiB）。
+
+この環境では `PHASESHIFT_MODEL_DIR=models/Qwen3.8-27B-PSQ` で:
+
+- PASS 3 本 — production decode、qwen one layer inventory、attention layer inventory
+  （4B 不在で全件 skip していた頃とは異なり、実行される）
+- skip 3 本 — full transformer body plan / attention one layer plan / qwen one layer plan。
+  embed_tokens が psq8 であり、GPU-MCU の plan compile が BF16 embedding のみ
+  対応しているため exit 77。GPU-MCU が bf16 と psq8 の embedding に対応すれば実行される。
+
+skip は PASS には数えていない。ctest は exit 77 を Failed として表示する
+（CTest に skip 機構を置かない repository 方針のまま）。
 
 ### TP
 

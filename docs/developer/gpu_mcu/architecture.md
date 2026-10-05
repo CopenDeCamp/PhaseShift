@@ -77,6 +77,9 @@ Qwen3.5 固有のものは plan・kernel inventory・kernarg recipe・KV address
   `GpuMcu` 要求なら error になる。persistent 準備後は prefill・verify・複数 request を
   GPU-MCU が受け、BF16 以外の KV・imatrix・value trace・hidden tap・
   body range 不備は引き続き対象外。
+- embedding storage は BF16 のみ plan compile できる。Host 経路は
+  bf16 / psq8 の両方に対応するが、psq8 embedding の model で plan を組むと
+  `Status::unsupported` になる。該当する acceptance test は exit 77 で skip する。
 
 ## target 構成
 

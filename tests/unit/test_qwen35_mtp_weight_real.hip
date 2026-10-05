@@ -147,13 +147,10 @@ bool expected_matrix_payload(
 int main() {
     const char* model_dir_env = std::getenv("PHASESHIFT_MODEL_DIR_MTP");
     if (model_dir_env == nullptr || model_dir_env[0] == '\0') {
-        model_dir_env = std::getenv("PHASESHIFT_MODEL_DIR_4B");
+        model_dir_env = std::getenv("PHASESHIFT_MODEL_DIR");
     }
     if (model_dir_env == nullptr || model_dir_env[0] == '\0') {
-        model_dir_env = std::getenv("PHASESHIFT_MODEL_DIR_4B_PSQ");
-    }
-    if (model_dir_env == nullptr || model_dir_env[0] == '\0') {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_MTP or PHASESHIFT_MODEL_DIR_4B to a "
+        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_MTP or PHASESHIFT_MODEL_DIR to a "
                     "Qwen3.5 model directory\n");
         return 77;
     }

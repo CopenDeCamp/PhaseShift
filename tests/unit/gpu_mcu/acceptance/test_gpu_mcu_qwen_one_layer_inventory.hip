@@ -39,14 +39,6 @@ bool directory_exists(const char* path) {
     return path != nullptr && stat(path, &info) == 0 && S_ISDIR(info.st_mode);
 }
 
-const char* default_model_dir() {
-#ifdef PS_MODEL_DIR_4B
-    return PS_MODEL_DIR_4B;
-#else
-    return "";
-#endif
-}
-
 uint32_t env_u32(const char* name, uint32_t fallback) {
     const char* v = std::getenv(name);
     if (v == nullptr || v[0] == '\0') return fallback;
@@ -59,12 +51,14 @@ uint32_t env_u32(const char* name, uint32_t fallback) {
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    const char* from_env = std::getenv("PHASESHIFT_MODEL_DIR_4B");
-    const std::string model_dir =
-        (from_env != nullptr && from_env[0] != '\0') ? from_env
-                                                     : default_model_dir();
+    const char* from_env = std::getenv("PHASESHIFT_MODEL_DIR");
+    if (from_env == nullptr || from_env[0] == '\0') {
+        std::printf("SKIP: set PHASESHIFT_MODEL_DIR to a Qwen3.5 model dir\n");
+        return 77;
+    }
+    const std::string model_dir(from_env);
     if (!directory_exists(model_dir.c_str())) {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_4B to a Qwen3.5 model dir\n");
+        std::printf("SKIP: model dir not found: %s\n", model_dir.c_str());
         return 77;
     }
 

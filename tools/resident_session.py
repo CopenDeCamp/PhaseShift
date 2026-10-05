@@ -59,15 +59,6 @@ def existing_dir(*values: Optional[str]) -> List[str]:
     return out
 
 
-def model_dirs_from_env() -> List[str]:
-    return existing_dir(
-        os.environ.get("PHASESHIFT_SERVER_MODEL_DIR"),
-        os.environ.get("PHASESHIFT_MODEL_DIR"),
-        os.environ.get("PHASESHIFT_MODEL_DIR_DFLASH2_TARGET"),
-        os.environ.get("PHASESHIFT_MODEL_DIR_4B"),
-    )
-
-
 def dflash2_dirs_from_env() -> List[str]:
     return existing_dir(os.environ.get("PHASESHIFT_MODEL_DIR_DFLASH2"))
 

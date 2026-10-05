@@ -57,14 +57,20 @@ ctest --test-dir build -L gpu_mcu -N
 
 - 件数は build 構成（optional / external の有無）で変わるため、ここには固定しない。
 - `optional;external_files` label の GPU-MCU テストは外部 model が必要である。
-  model が無い環境では exit で返るが、required acceptance の対象外である。
-  required acceptance では skip を失敗として扱う。
+  model directory は `PHASESHIFT_MODEL_DIR` で指定する。model size には依存せず、
+  指定が無い・directory が無い場合は exit 77 で skip する。
+  required acceptance の対象外であり、required acceptance では skip を失敗として扱う。
 
 ## optional tests
 
 `PHASESHIFT_BUILD_OPTIONAL_TESTS=ON` で external model を要する heavy test
 （DFlash2 gate、GPU-MCU acceptance、TP、MTP weight contract 等）が build される。
 manifest は `cmake/tests.cmake` が正本であり、件数は固定しない。
+
+external test の model directory はすべて環境変数で指定する。
+`PHASESHIFT_MODEL_DIR`（Qwen3.5 系の既定）、`PHASESHIFT_MODEL_DIR_MTP`、
+`PHASESHIFT_MODEL_DIR_DFLASH2`、`PHASESHIFT_MODEL_DIR_DFLASH2_TARGET`、
+`PHASESHIFT_TP_MODEL_DIR`。cmake option に model directory は持たない。
 
 Qwen3.5-4B full application E2E は削除済みである。外部 model が無い環境で
 skip を垂れ流さないため、実行できない suite は repository に残さない。

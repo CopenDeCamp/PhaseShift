@@ -56,14 +56,6 @@ bool directory_exists(const char* path) {
     return path != nullptr && stat(path, &info) == 0 && S_ISDIR(info.st_mode);
 }
 
-const char* default_model_dir() {
-#ifdef PS_MODEL_DIR_4B
-    return PS_MODEL_DIR_4B;
-#else
-    return "";
-#endif
-}
-
 bool bytes_equal(const void* a, const void* b, size_t bytes, size_t* first,
                  size_t* diffs) {
     const auto* x = static_cast<const unsigned char*>(a);
@@ -296,12 +288,14 @@ void compare_or_report(const char* what, const std::vector<uint8_t>& host,
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    const char* from_env = std::getenv("PHASESHIFT_MODEL_DIR_4B");
-    const std::string model_dir =
-        (from_env != nullptr && from_env[0] != '\0') ? from_env
-                                                     : default_model_dir();
+    const char* from_env = std::getenv("PHASESHIFT_MODEL_DIR");
+    if (from_env == nullptr || from_env[0] == '\0') {
+        std::printf("SKIP: set PHASESHIFT_MODEL_DIR to a Qwen3.5 model dir\n");
+        return 77;
+    }
+    const std::string model_dir(from_env);
     if (!directory_exists(model_dir.c_str())) {
-        std::printf("SKIP: set PHASESHIFT_MODEL_DIR_4B to a Qwen3.5 model dir\n");
+        std::printf("SKIP: model dir not found: %s\n", model_dir.c_str());
         return 77;
     }
     int device_count = 0;
@@ -331,7 +325,7 @@ int main() {
     ps::resident::ResidentTestRequest resident_request;
     resident_request.qwen_model_dir = model_dir;
     resident_request.device = 0;
-    resident_request.arena_bytes = 16ull * 1024ull * 1024ull * 1024ull;
+    resident_request.arena_bytes = 30ull * 1024ull * 1024ull * 1024ull;
     auto resident_result = ps::resident::ResidentModelFixture::acquire(resident_request);
     if (!resident_result.ok()) {
         std::printf("FAIL resident acquire: %s\n",
@@ -355,6 +349,10 @@ int main() {
         return 1;
     }
     ps::qwen35::Qwen35Model model = model_result.release();
+    if (model.weights().embed_tokens.encoding != ps::weights::MatrixEncoding::Bf16) {
+        std::printf("SKIP: mcu plan compile requires BF16 embedding storage\n");
+        return 77;
+    }
 
     auto lower_result = ps::qwen35::lower_qwen35_to_primitives(
         model.text_config(), model.weights());
@@ -725,7 +723,9 @@ int main() {
           "the plan carries one embedding invocation");
     if (plan.embedding.size() == 1u) {
         const mcu::McuEmbeddingBf16Invocation& e = plan.embedding[0];
-        check(e.rows == 1u && e.hidden_size == 2560u,
+        check(e.rows == 1u &&
+                  e.hidden_size == static_cast<std::uint32_t>(
+                                       model.text_config().hidden_size),
               "embedding invocation geometry");
         check(e.table != 0u && e.token_ids != 0u && e.output != 0u,
               "embedding invocation pointers");

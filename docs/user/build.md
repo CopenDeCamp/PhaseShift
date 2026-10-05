@@ -53,9 +53,15 @@ PhaseShiftが対象とするのは `gfx1201`（AMD Radeon AI PRO R9700）のみ�
 | `PHASESHIFT_BUILD_OPTIONAL_TESTS` | OFF | external model を要する optional / heavy test |
 | `PHASESHIFT_BUILD_BENCHMARKS` | ON | benchmark executables（bench + E2E前提） |
 | `PHASESHIFT_HIP_GRAPH` | OFF | HIP graph execution mode |
-| `PHASESHIFT_MODEL_DIR_4B` | `models/Qwen3.5-4B` | optional test 用外部model directory |
 | `PHASESHIFT_LIBCXX_LLVM_ROOT` | `/usr/lib/llvm-23` | host libc++ 23 root |
 | `CMAKE_HIP_ARCHITECTURES` | 必須 | 対象GPUアーキテクチャ（`gfx1201` のみ） |
+
+外部 model を要する optional / external test の model directory は cmake option
+ではなく環境変数で指定する。Qwen3.5 系の test は `PHASESHIFT_MODEL_DIR`、
+MTP は `PHASESHIFT_MODEL_DIR_MTP`、DFlash2 draft は
+`PHASESHIFT_MODEL_DIR_DFLASH2`、DFlash2 target は
+`PHASESHIFT_MODEL_DIR_DFLASH2_TARGET`、TP は `PHASESHIFT_TP_MODEL_DIR` を使う。
+指定が無い test は exit 77 で skip する。
 
 `PHASESHIFT_HIP_GRAPH` は graph capture / replay による execution mode である。
 有効にする場合:
