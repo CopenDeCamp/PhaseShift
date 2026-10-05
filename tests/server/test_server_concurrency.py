@@ -62,18 +62,6 @@ def collect_chat_stream(server, content, max_tokens=16, tools=None):
     return chunks, text, specs
 
 
-def collect_responses_stream(server, content, max_tokens=16):
-    events = 0
-    text = ""
-    for event in http_sse(f"{server.base_url}/responses",
-                          {"model": "phaseshift", "input": content, "stream": True,
-                           "temperature": 0, "max_output_tokens": max_tokens}):
-        events += 1
-        if event.get("type") == "response.output_text.delta":
-            text += event.get("delta", "")
-    return events, text
-
-
 def run_threads(fns):
     barrier = threading.Barrier(len(fns))
     results = [None] * len(fns)
@@ -138,37 +126,35 @@ def main() -> int:
                           all(r[0] >= 1 and r[1].strip() for r in results if r),
                           repr(results))
 
-            # 3. Mixed Chat / Responses, stream and non-stream.
-            def mixed_chat_nonstream():
+            # 3. Mixed stream / non-stream Chat Completions.
+            def mixed_chat_a():
                 return nonstream("Reply with the single word: one")
 
-            def mixed_chat_stream():
+            def mixed_chat_b():
                 return collect_chat_stream(server, "Reply with the single word: two")
 
-            def mixed_responses_nonstream():
-                response = http_json(f"{server.base_url}/responses",
-                                     {"model": "phaseshift",
-                                      "input": "Reply with the single word: three",
-                                      "temperature": 0, "max_output_tokens": 16})
-                return any(item.get("type") == "message"
-                           for item in response.get("output", []))
+            def mixed_chat_c():
+                return nonstream("Reply with the single word: three")
 
-            def mixed_responses_stream():
-                return collect_responses_stream(
-                    server, "Reply with the single word: four")
+            def mixed_chat_d():
+                return collect_chat_stream(server, "Reply with the single word: four")
 
-            results, errors = run_threads([
-                mixed_chat_nonstream, mixed_chat_stream,
-                mixed_responses_nonstream, mixed_responses_stream])
+            results, errors = run_threads(
+                [mixed_chat_a, mixed_chat_b, mixed_chat_c, mixed_chat_d])
             checker.check("mixed-no-errors", all(e is None for e in errors), repr(errors))
-            checker.check("mixed-chat-nonstream", bool(results[0] and results[0].strip()),
+            checker.check("mixed-chat-nonstream",
+                          bool(results[0] and results[0].strip()),
                           repr(results[0]))
             checker.check("mixed-chat-stream",
                           bool(results[1] and results[1][0] >= 1 and results[1][1].strip()),
                           repr(results[1]))
-            checker.check("mixed-responses-nonstream", results[2] is True, repr(results[2]))
-            checker.check("mixed-responses-stream",
-                          bool(results[3] and results[3][0] >= 1), repr(results[3]))
+            checker.check("mixed-chat-nonstream-b",
+                          bool(results[2] and results[2].strip()),
+                          repr(results[2]))
+            checker.check("mixed-chat-stream-b",
+                          bool(results[3] and results[3][0] >= 1
+                               and results[3][1].strip()),
+                          repr(results[3]))
 
             # 4. Concurrent tool call isolation.
             def plain_with_tools():

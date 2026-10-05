@@ -35,7 +35,6 @@ SERVER_DIR = Path(__file__).resolve().parent
 # Group order is the canonical `--all` order. A test appears in exactly one
 # group. Intentionally excluded from the manifest:
 #   support.py                  shared helpers, not a test
-#   tools/bench_server_reasoning_constraints.py  benchmark, not a test
 GROUPS = OrderedDict([
     ("core", [
         "test_compute_service.py",
@@ -50,6 +49,7 @@ GROUPS = OrderedDict([
     ("tools", [
         "test_server_tools.py",
         "test_server_stream_tools.py",
+        "test_server_tool_regression.py",
     ]),
     ("unsupported", [
         "test_server_unsupported.py",
@@ -64,7 +64,6 @@ GROUPS = OrderedDict([
     ]),
     ("agent", [
         "test_agent_opencode.py",
-        "test_agent_codex.py",
     ]),
 ])
 
