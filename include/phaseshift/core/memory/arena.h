@@ -41,6 +41,8 @@ public:
 
     static DeviceAllocationView make_view(void* data, std::size_t bytes, int physical_device) noexcept;
 
+    Result<DeviceAllocationView> used_prefix_view() const;
+
  private:
     GpuArena() = default;
 

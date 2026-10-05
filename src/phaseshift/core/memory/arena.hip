@@ -434,5 +434,21 @@ DeviceAllocationView GpuArena::make_view(void* data, std::size_t bytes, int phys
     return DeviceAllocationView(data, bytes, physical_device);
 }
 
+Result<DeviceAllocationView> GpuArena::used_prefix_view() const {
+    if (shutdown_ || device_ < 0) {
+        return Status::invalid_state("arena shutdown", __FILE__, __LINE__);
+    }
+    if (base_ == nullptr) {
+        return Status::invalid_state("arena has no allocation", __FILE__, __LINE__);
+    }
+    if (offset_ == 0) {
+        return Status::invalid_state("arena used prefix is empty", __FILE__, __LINE__);
+    }
+    if (vmm_ && offset_ > committed_bytes_) {
+        return Status::invalid_state("arena used prefix not committed", __FILE__, __LINE__);
+    }
+    return DeviceAllocationView(base_, offset_, device_);
+}
+
 } // namespace gpu
 } // namespace ps

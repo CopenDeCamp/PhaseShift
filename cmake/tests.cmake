@@ -15,6 +15,17 @@ add_executable(phaseshift-gpu-test-runner
 )
 target_compile_features(phaseshift-gpu-test-runner PRIVATE cxx_std_20)
 
+# Shared resident fixture used by native host backend / GPU-MCU test binaries.
+add_library(phaseshift-resident-fixture STATIC
+    "${_PS_TESTS_ROOT}/support/resident_model_fixture.cpp"
+)
+phaseshift_set_rocm_rpath(phaseshift-resident-fixture)
+target_compile_features(phaseshift-resident-fixture PRIVATE cxx_std_20)
+target_include_directories(phaseshift-resident-fixture PUBLIC "${_PS_TESTS_ROOT}")
+target_link_libraries(phaseshift-resident-fixture PUBLIC phaseshift_resident)
+target_compile_options(phaseshift-resident-fixture PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+phaseshift_set_hip_archs(phaseshift-resident-fixture)
+
 # phaseshift_add_test(
 #   NAME <test>
 #   SOURCE <relpath from tests/>
@@ -95,14 +106,14 @@ phaseshift_add_test(NAME test_qwen35_tp_context SOURCE unit/test_qwen35_tp_conte
 phaseshift_add_test(NAME test_tp_reduction SOURCE unit/test_tp_reduction.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_runtime)
 target_include_directories(test_tp_reduction PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_tp_transport SOURCE unit/test_tp_transport.cpp LABELS "gpu2;optional" TIMEOUT 120 GPU_COUNT 2 GPU_COST_GB 1 LIBRARIES phaseshift_runtime)
-phaseshift_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime)
+phaseshift_add_test(NAME test_qwen35_tp_execution SOURCE unit/test_qwen35_tp_execution.cpp LABELS "gpu2;optional" TIMEOUT 600 GPU_COUNT 2 GPU_COST_GB 2 LIBRARIES phaseshift-resident-fixture phaseshift_qwen35_runtime)
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
-phaseshift_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES phaseshift_qwen35_runtime)
+phaseshift_add_test(NAME test_qwen35_tp_e2e SOURCE unit/test_qwen35_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 2400 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES phaseshift-resident-fixture phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_qwen35_tp_weight_load SOURCE unit/test_qwen35_tp_weight_load.cpp LABELS "gpu1;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35)
 target_include_directories(test_qwen35_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
 # DFlash2 + TP: drafter は非分割、verify のみ TP2 で回す経路の E2E。
-phaseshift_add_test(NAME test_dflash2_tp_e2e SOURCE unit/test_dflash2_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+phaseshift_add_test(NAME test_dflash2_tp_e2e SOURCE unit/test_dflash2_tp_e2e.cpp LABELS "gpu2;optional;external_files" TIMEOUT 3600 GPU_COUNT 2 GPU_COST_GB 20 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 target_include_directories(test_dflash2_tp_e2e PRIVATE "${CMAKE_SOURCE_DIR}/src")
 target_include_directories(test_qwen35_tp_execution PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_weight_load SOURCE unit/test_weight_load.hip LABELS "gpu1;required" TIMEOUT 120 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_weights phaseshift_qwen35)
@@ -354,6 +365,15 @@ if(PHASESHIFT_BUILD_BENCHMARKS)
 endif()
 
 if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
+    # Resident model IPC acceptance: worker attaches the compact resident block
+    # owned by phaseshift-model-host and verifies weight bytes.
+    # Needs PHASESHIFT_TEST_RESIDENT_MODEL_SOCKET plus a real model dir.
+    phaseshift_add_test(NAME test_resident_model_ipc SOURCE unit/test_resident_model_ipc.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift-resident-fixture phaseshift_resident phaseshift_weights phaseshift_qwen35)
+
+    # Resident fault-injection worker: attaches, then sleeps until the session
+    # runner kills its process group on deadline.
+    phaseshift_add_test(NAME test_resident_timeout_worker SOURCE unit/test_resident_timeout_worker.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 4 LIBRARIES phaseshift-resident-fixture phaseshift_resident phaseshift_weights phaseshift_qwen35)
+
     # MTP weight contract against a real model directory.
     # Model dir via PHASESHIFT_MODEL_DIR_MTP (preferred), PHASESHIFT_MODEL_DIR_4B,
     # or PHASESHIFT_MODEL_DIR_4B_PSQ. Skips (exit 77) when none is set.
@@ -366,52 +386,52 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
     # DFlash2 Gate 3: target feature projection and grouped dynamic conv.
     # Fixture dir via PHASESHIFT_DFLASH2_GATE3_FIXTURE (default
     # build/dflash2-gate3-reference). Skips (exit 77) when unset or missing.
-    phaseshift_add_test(NAME test_dflash2_gate3_real SOURCE unit/test_dflash2_gate3_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate3_real SOURCE unit/test_dflash2_gate3_real.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 Gate 3 per-op timing (not a correctness gate).
-    phaseshift_add_test(NAME test_dflash2_gate3_perf SOURCE unit/test_dflash2_gate3_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate3_perf SOURCE unit/test_dflash2_gate3_perf.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_gate3_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # DFlash2 Gate 4: layer 0 standalone forward against the official reference.
     # Fixture dir via PHASESHIFT_DFLASH2_GATE4_FIXTURE (default
     # build/dflash2-gate4-reference). Skips (exit 77) when unset or missing.
-    phaseshift_add_test(NAME test_dflash2_gate4_real SOURCE unit/test_dflash2_gate4_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate4_real SOURCE unit/test_dflash2_gate4_real.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 Gate 4 per-op timing (not a correctness gate).
-    phaseshift_add_test(NAME test_dflash2_gate4_perf SOURCE unit/test_dflash2_gate4_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate4_perf SOURCE unit/test_dflash2_gate4_perf.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_gate4_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # DFlash2 Gate 5: full 5-layer stateless backbone + final norm.
     # Fixture dir via PHASESHIFT_DFLASH2_GATE5_FIXTURE (default
     # build/dflash2-gate5-reference). Skips (exit 77) when unset or missing.
-    phaseshift_add_test(NAME test_dflash2_gate5_real SOURCE unit/test_dflash2_gate5_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 1200 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate5_real SOURCE unit/test_dflash2_gate5_real.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1200 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
-    phaseshift_add_test(NAME test_dflash2_gate6_perf SOURCE unit/test_dflash2_gate6_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate6_perf SOURCE unit/test_dflash2_gate6_perf.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_gate6_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # DFlash2 Gate 6: target lm_head + top16 + candidate selector.
     # Fixture dir via PHASESHIFT_DFLASH2_GATE6_FIXTURE (default
     # build/dflash2-gate6-reference). Needs the 27B-PSQ target for lm_head.
-    phaseshift_add_test(NAME test_dflash2_gate6_real SOURCE unit/test_dflash2_gate6_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate6_real SOURCE unit/test_dflash2_gate6_real.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 Gate 7: persistent context KV ring (append / cached backbone / proposer).
     # Fixture dir via PHASESHIFT_DFLASH2_GATE7_FIXTURE (default
     # build/dflash2-gate7-reference). Needs the 27B-PSQ target for lm_head.
-    phaseshift_add_test(NAME test_dflash2_gate7_real SOURCE unit/test_dflash2_gate7_real.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    phaseshift_add_test(NAME test_dflash2_gate7_perf SOURCE unit/test_dflash2_gate7_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate7_real SOURCE unit/test_dflash2_gate7_real.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate7_perf SOURCE unit/test_dflash2_gate7_perf.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_gate7_perf PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # DFlash2 Gate 8: live target bridge (prompt prefill -> taps -> ring -> proposal).
-    phaseshift_add_test(NAME test_dflash2_gate8_live SOURCE unit/test_dflash2_gate8_live.hip LABELS "gpu1;optional;external_files" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate8_live SOURCE unit/test_dflash2_gate8_live.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 2400 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 Gate 9: greedy speculative decode E2E vs target-only greedy.
-    phaseshift_add_test(NAME test_dflash2_gate9_e2e SOURCE unit/test_dflash2_gate9_e2e.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate9_e2e SOURCE unit/test_dflash2_gate9_e2e.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 Gate 10: phaseshift-compute speculative decoding integration.
     phaseshift_add_test(NAME test_dflash2_gate10_cli SOURCE unit/test_dflash2_gate10_cli.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30)
 
     # DFlash2 Gate 11A: per-kernel profile baseline.
-    phaseshift_add_test(NAME test_dflash2_gate11_profile SOURCE unit/test_dflash2_gate11_profile.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate11_profile SOURCE unit/test_dflash2_gate11_profile.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_gate11_profile PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # DFlash2 Gate 11B: standalone top16 optimization.
@@ -419,27 +439,27 @@ if(PHASESHIFT_BUILD_OPTIONAL_TESTS)
 
     # DFlash2 Gate 11C: GDN history e2e parity and target verify capture overhead.
     phaseshift_add_test(NAME test_dflash2_gate11c_e2e SOURCE unit/test_dflash2_gate11c_e2e.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30)
-    phaseshift_add_test(NAME test_dflash2_gate11c_perf SOURCE unit/test_dflash2_gate11c_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
-    phaseshift_add_test(NAME test_dflash2_gate11d_verify_profile SOURCE unit/test_dflash2_gate11d_verify_profile.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate11c_perf SOURCE unit/test_dflash2_gate11c_perf.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate11d_verify_profile SOURCE unit/test_dflash2_gate11d_verify_profile.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 Gate 11H: target verify exact primitive ceiling profile.
-    phaseshift_add_test(NAME test_dflash2_gate11h_verify_profile SOURCE unit/test_dflash2_gate11h_verify_profile.hip LABELS "gpu1;optional;external_files" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate11h_verify_profile SOURCE unit/test_dflash2_gate11h_verify_profile.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 3600 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_gate11h_verify_profile PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # DFlash2 Gate 5.1: dump real target taps for a real-input fixture.
-    phaseshift_add_test(NAME test_dflash2_gate51_target_fixture SOURCE unit/test_dflash2_gate51_target_fixture.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate51_target_fixture SOURCE unit/test_dflash2_gate51_target_fixture.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 30 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_gate51_target_fixture PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # DFlash2 Gate 5.1 diagnostic: dump every stage buffer for all 5 layers.
-    phaseshift_add_test(NAME test_dflash2_gate51_trace SOURCE unit/test_dflash2_gate51_trace.hip LABELS "gpu1;optional;external_files" TIMEOUT 1200 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate51_trace SOURCE unit/test_dflash2_gate51_trace.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1200 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 Gate 5 per-layer / full-backbone timing (not a correctness gate).
-    phaseshift_add_test(NAME test_dflash2_gate5_perf SOURCE unit/test_dflash2_gate5_perf.hip LABELS "gpu1;optional;external_files" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_gate5_perf SOURCE unit/test_dflash2_gate5_perf.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 900 GPU_COUNT 1 GPU_COST_GB 8 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
 
     # DFlash2 target hidden taps: external tap == internal layer output.
     # Target model dir via PHASESHIFT_MODEL_DIR_DFLASH2_TARGET (skips when unset);
     # tap layer ids come from PHASESHIFT_MODEL_DIR_DFLASH2 when available.
-    phaseshift_add_test(NAME test_dflash2_target_taps SOURCE unit/test_dflash2_target_taps.hip LABELS "gpu1;optional;external_files" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
+    phaseshift_add_test(NAME test_dflash2_target_taps SOURCE unit/test_dflash2_target_taps.hip LABELS "gpu1;optional;external_files;resident" TIMEOUT 1800 GPU_COUNT 1 GPU_COST_GB 24 LIBRARIES phaseshift-resident-fixture phaseshift_weights phaseshift_qwen35 phaseshift_qwen35_runtime)
     target_include_directories(test_dflash2_target_taps PRIVATE "${CMAKE_SOURCE_DIR}/src")
 
     # Target lm_head certified proxy: real hidden probe (num_output_rows large).

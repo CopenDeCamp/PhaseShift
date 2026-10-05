@@ -15,6 +15,8 @@
 #include <phaseshift/models/qwen35/runtime/linear_selector.h>
 #include <hip/hip_runtime.h>
 
+#include "support/resident_model_fixture.h"
+
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -121,7 +123,19 @@ int main() {
     if (!config_result.ok()) return 1;
     const DFlash2Config config = config_result.value();
 
-    auto arena_result = ps::gpu::GpuArena::create(0, 8ull * 1024ull * 1024ull * 1024ull);
+    ps::resident::ResidentTestRequest resident_request;
+    resident_request.dflash2_model_dir = model_dir;
+    resident_request.device = 0;
+    resident_request.arena_bytes = 8ull * 1024ull * 1024ull * 1024ull;
+    auto resident_result = ps::resident::ResidentModelFixture::acquire(resident_request);
+    if (!resident_result.ok()) {
+        std::printf("FAIL resident acquire: %s\n",
+                    resident_result.status().message().c_str());
+        return 1;
+    }
+    ps::resident::ResidentModelFixture resident = resident_result.release();
+
+    auto arena_result = ps::gpu::GpuArena::create(0, resident.arena_bytes());
     if (!arena_result.ok()) {
         std::printf("SKIP: arena (%s)\n", arena_result.status().message().c_str());
         return 77;
@@ -133,8 +147,9 @@ int main() {
         return 1;
     }
 
-    auto weights_result =
-        ps::qwen35::dflash2::load_dflash2_weights(model_dir, config, arena, stream);
+    auto weights_result = resident.enabled()
+        ? resident.take_dflash2(nullptr)
+        : ps::qwen35::dflash2::load_dflash2_weights(model_dir, config, arena, stream);
     check(weights_result.ok(), "weight load");
     if (!weights_result.ok()) return 1;
     DFlash2Weights weights = weights_result.release();

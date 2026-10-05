@@ -96,6 +96,10 @@
 
 - [fusion/gate11j-series-progress.md](fusion/gate11j-series-progress.md) — Fusion / DeepFusion Gate 11J-11K の進捗
 
+## test infrastructure
+
+- [resident_model/resident_model.md](resident_model/resident_model.md) — resident model test infrastructure の inventory / 採否判断 / 計測
+
 ## baseline / objective / competitive audit
 
 - [primitive_baseline.md](primitive_baseline.md) — 過去の primitive / E2E baseline 断面

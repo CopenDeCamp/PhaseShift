@@ -67,6 +67,8 @@ void usage(const char* prog) {
     printf("                            speculative decoding (requires --temperature 0)\n");
     printf("  --dflash2-drafts N     speculative draft tokens per round (default 7)\n");
     printf("  --dflash2-stats 0|1    print speculative decode statistics (default 1)\n");
+    printf("  --model-host PATH      attach model weights from a resident model host\n");
+    printf("                          (default: PHASESHIFT_MODEL_HOST_SOCKET, empty = local load)\n");
     printf("  --serve-stdio          serve JSON Lines generation requests on stdin/stdout\n");
     printf("  --help                 show this help\n");
 }
@@ -504,8 +506,7 @@ int run_dflash2_shot(ps::app::Qwen35ComputeRuntime& runtime,
         dump_mem_debug(runtime);
     }
 
-    auto dflash_weights_result = ps::qwen35::dflash2::load_dflash2_weights(
-        dflash2_model_dir, dflash_config, arena, stream);
+    auto dflash_weights_result = runtime.load_dflash2_weights(dflash_config);
     if (!dflash_weights_result.ok()) {
         fprintf(stderr, "dflash2 weight load failed: %s\n",
                 dflash_weights_result.status().message().c_str());
@@ -1395,8 +1396,7 @@ void serve_handle_command(ps::app::Qwen35ComputeRuntime& runtime, ServeState& st
 int run_serve_stdio(ps::app::Qwen35ComputeRuntime& runtime,
                     DFlashServeContext& dflash) {
     if (dflash.enabled) {
-        auto weights_result = ps::qwen35::dflash2::load_dflash2_weights(
-            dflash.model_dir, dflash.config, runtime.arena(), runtime.stream());
+        auto weights_result = runtime.load_dflash2_weights(dflash.config);
         if (!weights_result.ok()) {
             fprintf(stderr, "dflash2 weight load failed: %s\n",
                     weights_result.status().message().c_str());
@@ -1489,6 +1489,7 @@ int main(int argc, char** argv) {
     ps::qwen35::runtime::SamplingConfig sampling;
     unsigned long top_k = 0;
     std::string dflash2_model_dir;
+    std::string model_host;
     unsigned long dflash2_drafts = 7;
     int dflash2_stats = 1;
 
@@ -1497,6 +1498,8 @@ int main(int argc, char** argv) {
             (argv[i][0] == '-' && argv[i][1] == 'h' && argv[i][2] == '\0')) {
             usage(argv[0]);
             return 0;
+        } else if (std::strcmp(argv[i], "--model-host") == 0 && i + 1 < argc) {
+            model_host = argv[++i];
         } else if (std::strcmp(argv[i], "--model-dir") == 0 && i + 1 < argc) {
             model_dir = argv[++i];
         } else if (std::strcmp(argv[i], "--input-ids-file") == 0 && i + 1 < argc) {
@@ -1590,6 +1593,10 @@ int main(int argc, char** argv) {
 
     ps::app::Qwen35RuntimeConfig config;
     config.model_dir = model_dir;
+    config.dflash2_model_dir = dflash_enabled ? dflash2_model_dir : std::string();
+    config.model_host_socket = model_host.empty()
+        ? ps::models::model_host_socket_from_env()
+        : std::optional<std::string>(model_host);
     config.max_seq_len = static_cast<uint32_t>(max_seq_len);
     config.max_concurrent_requests = static_cast<uint32_t>(max_concurrent_requests);
     config.kv_cache_capacity_tokens = static_cast<uint32_t>(kv_cache_capacity_tokens);

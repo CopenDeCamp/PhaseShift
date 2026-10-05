@@ -34,6 +34,10 @@ public:
         hipStream_t stream,
         const Qwen35LoadOptions& options = {});
 
+    static Result<Qwen35Model> adopt(
+        Qwen35ModelWeights&& weights,
+        Qwen35TextConfig text_config);
+
     [[nodiscard]]
     const Qwen35ModelWeights&
     weights() const noexcept {

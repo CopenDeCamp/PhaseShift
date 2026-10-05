@@ -91,14 +91,35 @@ Result<std::unique_ptr<TpRankRuntime>> TpRankRuntime::create(
                                  __FILE__, __LINE__);
     }
 
-    auto arena_result = gpu::GpuArena::create(config.device_id, config.arena_bytes);
+    Qwen35LoadOptions load_options = config.load_options;
+    ps::models::ModelLoadContext source_context;
+    source_context.qwen_model_dir = config.model_dir;
+    source_context.qwen_options = load_options;
+    source_context.device = config.device_id;
+    source_context.tp_size = config.tp_size;
+    source_context.tp_rank = config.tp_rank;
+    source_context.model_host_socket = config.model_host_socket;
+    auto source_result = ps::models::ModelSource::create(source_context);
+    if (!source_result.ok()) return source_result.status();
+    rank->source_ = source_result.release();
+
+    const std::size_t persistent = rank->source_->persistent_bytes();
+    if (persistent > 0 && config.arena_bytes <= persistent) {
+        return Status::insufficient_memory(
+            "resident tp rank weights exceed the arena budget", __FILE__, __LINE__);
+    }
+    if (persistent > 0) {
+        std::fprintf(stderr, "model source: resident rank_bytes=%zu arena_bytes=%zu\n",
+                     persistent, config.arena_bytes - persistent);
+    }
+
+    auto arena_result = gpu::GpuArena::create(
+        config.device_id, rank->source_->ephemeral_bytes(config.arena_bytes));
     if (!arena_result.ok()) return arena_result.status();
     rank->arena_.emplace(arena_result.release());
 
-    Qwen35LoadOptions load_options = config.load_options;
-    auto model_result = Qwen35Model::load_tensor_parallel_from_safetensors(
-        config.model_dir, config.tp_size, config.tp_rank, rank->arena_.value(),
-        rank->stream_, load_options);
+    auto model_result = rank->source_->load_qwen35(
+        rank->arena_.value(), rank->stream_, load_options);
     if (!model_result.ok()) return model_result.status();
     rank->model_.emplace(model_result.release());
 

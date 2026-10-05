@@ -14,6 +14,8 @@
 
 #include <hip/hip_runtime.h>
 
+#include "support/resident_model_fixture.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -84,16 +86,28 @@ int main() {
         std::printf("FAIL: stream\n");
         return 1;
     }
-    auto arena_result = ps::gpu::GpuArena::create(
-        0, 30ull * 1024ull * 1024ull * 1024ull);
+    ps::resident::ResidentTestRequest resident_request;
+    resident_request.qwen_model_dir = model_dir;
+    resident_request.device = 0;
+    resident_request.arena_bytes = 30ull * 1024ull * 1024ull * 1024ull;
+    auto resident_result = ps::resident::ResidentModelFixture::acquire(resident_request);
+    if (!resident_result.ok()) {
+        std::printf("FAIL resident acquire: %s\n",
+                    resident_result.status().message().c_str());
+        return 1;
+    }
+    ps::resident::ResidentModelFixture resident = resident_result.release();
+
+    auto arena_result = ps::gpu::GpuArena::create(0, resident.arena_bytes());
     if (!arena_result.ok()) {
         std::printf("FAIL: arena: %s\n", arena_result.status().message().c_str());
         return 1;
     }
     ps::gpu::GpuArena arena = arena_result.release();
 
-    auto model_result =
-        ps::qwen35::Qwen35Model::load_from_safetensors(model_dir, arena, stream);
+    auto model_result = resident.enabled()
+        ? resident.take_qwen35()
+        : ps::qwen35::Qwen35Model::load_from_safetensors(model_dir, arena, stream);
     if (!model_result.ok()) {
         std::printf("FAIL: model load: %s\n",
                     model_result.status().message().c_str());

@@ -10,6 +10,7 @@
 #include <phaseshift/models/qwen35/state/sequence_slot_pool.h>
 #include <phaseshift/runtime/tp/tp_barrier_group.h>
 #include <phaseshift/runtime/tp/tp_transports.h>
+#include <phaseshift/models/model_source.h>
 
 #include <hip/hip_runtime.h>
 
@@ -44,6 +45,7 @@ struct TpRankRuntimeConfig {
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
     Qwen35LoadOptions load_options;
+    std::optional<std::string> model_host_socket;
 };
 
 class TpRankRuntime {
@@ -76,6 +78,7 @@ private:
     int device_id_ = -1;
     hipStream_t stream_ = nullptr;
     std::optional<gpu::GpuArena> arena_;
+    std::unique_ptr<ps::models::ModelSource> source_;
     std::optional<Qwen35Model> model_;
     std::optional<Qwen35TensorParallelContext> context_;
     std::optional<SequenceSlotPool> seq_pool_;
@@ -99,6 +102,7 @@ struct TpCoordinatorConfig {
     std::array<std::uint32_t, kMaxTargetHiddenTaps> target_hidden_taps{};
     std::uint32_t target_hidden_tap_count = 0;
     Qwen35LoadOptions load_options;
+    std::optional<std::string> model_host_socket;
 };
 
 class TpCoordinator final : public TpBatchHook {

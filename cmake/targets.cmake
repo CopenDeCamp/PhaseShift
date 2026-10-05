@@ -226,7 +226,7 @@ add_library(phaseshift_qwen35_runtime STATIC
 target_compile_features(phaseshift_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(phaseshift_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(phaseshift_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_gpu_mcu phaseshift_qwen35_gpu_mcu)
+target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_gpu_mcu phaseshift_qwen35_gpu_mcu phaseshift_resident phaseshift_model_source)
 target_compile_options(phaseshift_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 phaseshift_set_hip_archs(phaseshift_qwen35_runtime)
 if(PHASESHIFT_HIP_GRAPH)
@@ -236,6 +236,39 @@ if(PHASESHIFT_HIP_GRAPH)
         PROPERTIES COMPILE_DEFINITIONS "PHASESHIFT_HIP_GRAPH")
 endif()
 
+
+# Resident model host / client: test-only persistent weight transport.
+# Linked into phaseshift-compute and the GPU test executables; the resident
+# path activates only when PHASESHIFT_TEST_RESIDENT_MODEL_SOCKET is set.
+add_library(phaseshift_resident STATIC
+    src/phaseshift/resident/resident_model_key.cpp
+    src/phaseshift/resident/resident_format.cpp
+    src/phaseshift/resident/resident_protocol.cpp
+    src/phaseshift/resident/resident_client.cpp
+    src/phaseshift/resident/resident_host.cpp
+)
+target_compile_features(phaseshift_resident PRIVATE cxx_std_20)
+target_include_directories(phaseshift_resident PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(phaseshift_resident PUBLIC
+    phaseshift_core
+    phaseshift_gpu
+    phaseshift_weights
+    phaseshift_qwen35
+)
+target_compile_options(phaseshift_resident PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
+
+# Model source selection: local safetensors load or resident model host attach.
+# Startup path only; the choice is resolved once per process.
+add_library(phaseshift_model_source STATIC
+    src/phaseshift/models/model_source.cpp
+)
+target_compile_features(phaseshift_model_source PRIVATE cxx_std_20)
+target_include_directories(phaseshift_model_source PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(phaseshift_model_source PUBLIC
+    phaseshift_qwen35
+    phaseshift_resident
+)
+target_compile_options(phaseshift_model_source PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 
 # Aggregate INTERFACE target. Tests and benchmarks link against this.
 add_library(phaseshift INTERFACE)
@@ -252,6 +285,7 @@ target_link_libraries(
         phaseshift_qwen35_state
         phaseshift_qwen35
         phaseshift_qwen35_runtime
+        phaseshift_resident
 )
 
 # FPX format definitions (enum/profile/layout/bundle). Linked into the Qwen3.5

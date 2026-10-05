@@ -73,6 +73,7 @@ build/phaseshift-server
 build/phaseshift-server-lib/
 build/phaseshift-quantizer
 build/phaseshift-bench
+build/phaseshift-model-host
 ```
 
 `phaseshift-server` は Python 製の HTTP server である。起動時に model processor を load し、

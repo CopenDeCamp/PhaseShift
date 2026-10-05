@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -76,7 +77,25 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         return Status::hip_error("hipStreamCreate", hipGetErrorString(herr), __FILE__, __LINE__);
     }
 
-    auto arena_result = ps::gpu::GpuArena::create(config_.device, config_.arena_bytes);
+    ps::models::ModelLoadContext source_context;
+    source_context.qwen_model_dir = config_.model_dir;
+    source_context.dflash2_model_dir = config_.dflash2_model_dir;
+    source_context.qwen_options.verify_quantized_payload_crc = config_.verify_weights;
+    source_context.device = config_.device;
+    source_context.model_host_socket = config_.model_host_socket;
+    auto source_result = ps::models::ModelSource::create(source_context);
+    if (!source_result.ok()) {
+        return source_result.status();
+    }
+    source_ = source_result.release();
+
+    const std::size_t resident = resident_bytes();
+    if (resident > 0 && config_.arena_bytes <= resident) {
+        return Status::insufficient_memory(
+            "resident model weights exceed the --arena-gib budget", __FILE__, __LINE__);
+    }
+    auto arena_result = ps::gpu::GpuArena::create(
+        config_.device, source_->ephemeral_bytes(config_.arena_bytes));
     if (!arena_result.ok()) {
         return arena_result.status();
     }
@@ -86,8 +105,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     options.verify_quantized_payload_crc = config_.verify_weights;
 
     const auto t_load_start = std::chrono::steady_clock::now();
-    auto model_result = qwen35::Qwen35Model::load_from_safetensors(
-        config_.model_dir, *arena_, stream_, options);
+    auto model_result = source_->load_qwen35(*arena_, stream_, options);
     if (!model_result.ok()) {
         return model_result.status();
     }
@@ -227,6 +245,18 @@ Status Qwen35ComputeRuntime::retire(uint64_t id) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
     return batcher_->retire(id);
+}
+
+Result<qwen35::dflash2::DFlash2Weights> Qwen35ComputeRuntime::load_dflash2_weights(
+    const qwen35::dflash2::DFlash2Config& config,
+    const ps::weights::WeightLoadOptions& options) {
+    if (source_ == nullptr) {
+        return Status::invalid_state("runtime model source missing", __FILE__, __LINE__);
+    }
+    if (!arena_.has_value()) {
+        return Status::invalid_state("runtime arena missing", __FILE__, __LINE__);
+    }
+    return source_->load_dflash2(config, arena_.value(), stream_, options);
 }
 
 Status Qwen35ComputeRuntime::shutdown() {

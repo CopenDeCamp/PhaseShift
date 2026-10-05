@@ -26,6 +26,8 @@
 --dflash2-model-dir PATH  DFlash2 draft model directory（指定で DFlash mode）
 --dflash2-drafts N     speculative draft tokens per round (default 7)
 --dflash2-stats 0|1    print speculative decode statistics (default 1)
+--model-host PATH      attach model weights from a resident model host
+                       (default PHASESHIFT_MODEL_HOST_SOCKET)
 --serve-stdio          serve JSON Lines generation requests on stdin/stdout
 --help                 show this help
 ```
@@ -34,6 +36,16 @@
 （`248041, 77091`）を使用。
 
 `--kv-cache-dtype psq4` / `psq8` は `head_dim == 256` を要求する。
+
+### resident model host
+
+`--model-host`（または `PHASESHIFT_MODEL_HOST_SOCKET`）を指定すると、model weight は
+`phaseshift-model-host` が GPU 上に保持しており、compute process は HIP IPC で
+attach する。compute が crash / timeout / hang しても weight は残り、
+次 の compute process は attach で即座に再開できる。
+
+指定が無ければ従来どおり自分で safetensors を load する。
+`PHASESHIFT_DISABLE_RESIDENT_MODEL=1` で environment 経由の指定を無効化できる。
 
 ### DFlash2 speculative decoding
 

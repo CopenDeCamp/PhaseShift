@@ -129,6 +129,17 @@ Result<Qwen35Model> Qwen35Model::load_tensor_parallel_from_safetensors(
     return Qwen35Model(std::move(weights), text_config);
 }
 
+Result<Qwen35Model> Qwen35Model::adopt(
+    Qwen35ModelWeights&& weights,
+    Qwen35TextConfig text_config)
+{
+    auto validation = validate_qwen35_weights(weights, text_config);
+    if (!validation.ok()) {
+        return validation;
+    }
+    return Qwen35Model(std::move(weights), text_config);
+}
+
 Qwen35Model::Qwen35Model(
     Qwen35ModelWeights&& weights,
     Qwen35TextConfig text_config)
