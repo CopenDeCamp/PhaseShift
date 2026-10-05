@@ -3,7 +3,7 @@
 # The five user-facing executables:
 #   phaseshift-compute   raw token ID in/out inference engine
 #   phaseshift-cli       chat UI (Python, tokenizer + chat template)
-#   phaseshift-server    OpenAI-compatible serving product (LocalAI frontend)
+#   phaseshift-server    OpenAI-compatible serving product (aiohttp adapter)
 #   phaseshift-quantizer quantize / verify / convert / validate
 #   phaseshift-bench     E2E benchmark (pp / tg) + GEMM kernel micro-benchmark
 
