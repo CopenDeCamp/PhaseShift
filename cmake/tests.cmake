@@ -134,7 +134,6 @@ phaseshift_add_test(NAME test_qwen35_mtp_lowering SOURCE unit/test_qwen35_mtp_lo
 phaseshift_add_test(NAME test_qwen35_lowering_contract SOURCE unit/test_qwen35_lowering_contract.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35)
 phaseshift_add_test(NAME test_qwen35_spec_verify SOURCE unit/test_qwen35_spec_verify.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_qwen35_runtime)
 phaseshift_add_test(NAME test_paged_types SOURCE unit/test_paged_types.cpp LABELS "cpu;required" LIBRARIES phaseshift_qwen35_state)
-phaseshift_add_test(NAME test_xgrammar_cxx20 SOURCE compile/test_xgrammar_cxx20.cpp LABELS "cpu;required" TIMEOUT 30 LIBRARIES phaseshift_xgrammar)
 phaseshift_add_test(NAME test_tensor SOURCE unit/test_tensor.hip LABELS "gpu1;required" TIMEOUT 60 GPU_COUNT 1 LIBRARIES phaseshift_gpu)
 phaseshift_add_test(NAME test_correctness_primitives SOURCE kernels/common/test_correctness_primitives.hip LABELS "gpu1;required" TIMEOUT 30 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_qwen35_kernels)
 phaseshift_add_test(NAME test_architecture_boundaries SOURCE unit/test_architecture_boundaries.cpp LABELS "cpu;required" TIMEOUT 60 LIBRARIES phaseshift_core DEFS PHASESHIFT_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
@@ -313,7 +312,6 @@ add_custom_target(
         test_program_block_scaled_lowering
         test_dispatch_staging_size
         test_gpu_arena_vmm
-        test_xgrammar_cxx20
         ${PS_GPU_MCU_REQUIRED_TESTS}
 )
 

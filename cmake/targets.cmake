@@ -3,13 +3,6 @@
 # Included from root CMakeLists.txt. Defines the library targets and their
 # dependency graph.
 
-# Vendored XGrammar v0.2.5 (pinned, see vendor/xgrammar/VERSION). Built as a
-# native C++ static library without Python bindings or CUDA kernels.
-add_subdirectory(
-    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/xgrammar"
-    "${CMAKE_CURRENT_BINARY_DIR}/xgrammar"
-)
-
 # Base INTERFACE target: public include root.
 add_library(phaseshift_core INTERFACE)
 target_compile_features(phaseshift_core INTERFACE cxx_std_20)
@@ -234,7 +227,7 @@ add_library(phaseshift_qwen35_runtime STATIC
 target_compile_features(phaseshift_qwen35_runtime PRIVATE cxx_std_20)
 target_include_directories(phaseshift_qwen35_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(phaseshift_qwen35_runtime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_gpu_mcu phaseshift_qwen35_gpu_mcu phaseshift_xgrammar)
+target_link_libraries(phaseshift_qwen35_runtime PUBLIC phaseshift_qwen35 phaseshift_qwen35_state phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_runtime phaseshift_gpu phaseshift_gpu_mcu phaseshift_qwen35_gpu_mcu)
 target_compile_options(phaseshift_qwen35_runtime PRIVATE -Wall -Wextra -Wpedantic -Werror=return-type)
 phaseshift_set_hip_archs(phaseshift_qwen35_runtime)
 if(PHASESHIFT_HIP_GRAPH)

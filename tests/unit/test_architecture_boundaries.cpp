@@ -117,6 +117,7 @@ void check_no_server_deps(const fs::path& root) {
     const std::vector<const char*> forbidden = {
         "LocalAI", "localai", "protobuf", "Protobuf",
         "gRPC", "grpc", "OpenAI", "openai",
+        "xgrammar", "XGrammar",
     };
     scan_clean(root / "src/phaseshift", forbidden);
     scan_clean(root / "include/phaseshift", forbidden);
