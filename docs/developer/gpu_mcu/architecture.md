@@ -58,7 +58,7 @@ Qwen3.5 kernel の standalone HSACO。
 | KV addressing の接続 | `mcu_kv_binding.h` |
 | body range | `mcu_layer_range.h`, `mcu_plan_value.h` |
 | backend 選択 policy | `decode_backend.h/.cpp` |
-| host 側の MCU 起動・供給 | `executor.hip`（`ensure_mcu_state` / `execute_mcu_hybrid` / `stage_mcu_commit_slots`） |
+| host 側の MCU 起動・供給 | `executor.hip`（`ensure_mcu_state` / `preflight_mcu_plan` / `execute_mcu_hybrid` / `stage_mcu_commit_slots`） |
 
 backend は substrate の AQL / FSM / persistent controller をそのまま使い、
 Qwen3.5 固有のものは plan・kernel inventory・kernarg recipe・KV addressing に限られる。
@@ -71,15 +71,26 @@ Qwen3.5 固有のものは plan・kernel inventory・kernarg recipe・KV address
   経路の入口。`decide_decode_backend()` が eligibility と `DecodeBackendReason` を返し、
   `GpuMcu` 要求で成立しない場合は `decode_backend_execution_error()` が
   `Status::unsupported` を返す。Host 経路へは落ちない。
-- 判定材料は request 数・token 数・prefill 有無・KV dtype・speculative verify・
+- 判定材料は request 数・token 数・prefill 有無・KV dtype・Tensor Parallel・
+  stochastic sampling の有無・speculative verify・
   imatrix / value trace / hidden tap の有無・stream wait 支援・`mcu_body_range` の有効性。
+- capability 判定は preflight で行う。`create_model_executor()` が config 段
+  （TP・hidden tap・KV dtype）を、`submit_co_batch()` が batch 段
+  （`decide_decode_backend()` → `preflight_mcu_plan()`）を担当し、
+  どちらもこの batch の program dispatch より前に `Status::unsupported` を返す。
+  `preflight_mcu_plan()` は unsupported kernel / physical variant を
+  plan compile で検出し、`execute_mcu_hybrid()` は preflight 済み plan を consume するだけ。
+  plan compile は batch の device staging（request upload と `DeviceBatchContext` の H2D）
+  の後ろに置く。`gdn_conv_dispatch` / `gdn_recurrence_dispatch` が host から
+  `batch_context->requests[r]` を読むため、staging より前には置けない。
 - persistent 準備前は prefill・verify・複数 request・単一 token 以外が対象外で、
   `GpuMcu` 要求なら error になる。persistent 準備後は prefill・verify・複数 request を
-  GPU-MCU が受け、BF16 以外の KV・imatrix・value trace・hidden tap・
-  body range 不備は引き続き対象外。
-- embedding storage は BF16 のみ plan compile できる。Host 経路は
-  bf16 / psq8 の両方に対応するが、psq8 embedding の model で plan を組むと
-  `Status::unsupported` になる。該当する acceptance test は exit 77 で skip する。
+  GPU-MCU が受け、BF16 以外の KV・Tensor Parallel・stochastic sampling・
+  imatrix・value trace・hidden tap・body range 不備は引き続き対象外。
+- embedding storage は BF16 / PSQ8 両方を plan compile できる。Host resolver と
+  selector を共有し、recipe は `kMcuKernargRecipeEmbeddingBf16` /
+  `kMcuKernargRecipeEmbeddingPsq8` を選ぶ。selector 非対象 shape のみ
+  Host prefix に残る。
 
 ## target 構成
 
@@ -202,14 +213,18 @@ src/phaseshift/models/qwen35/kernels/optimized/*.hip
 ```text
 ContinuousBatcher -> ScheduledBatch
   -> Executor::execute
+  -> ensure_mcu_state()                    GpuMcu 要求時の最初の submit で作成
   -> decide_decode_backend()                 Host / GpuMcu
        decode_backend_execution_error()      GpuMcu + eligibility NG -> Status::unsupported
-  -> execute_mcu_hybrid()
-       ensure_mcu_state()                    GpuMcuPersistentMcu の作成と設定
+  -> batch staging                           token / request / DeviceBatchContext の H2D
+  -> preflight_mcu_plan()
        compile_mcu_plan()                    Program -> McuCompiledPlan
+                                             （unsupported kernel / variant はここで確定）
+  -> execute_mcu_hybrid()
        mcu_plan_fingerprint() / plan cache   upload は fingerprint 不一致時のみ
        stage_mcu_commit_slots()              slot / binding を device へ用意
-       McuDecodeRuntime::enqueue_run(stream, epoch)   batch ready epoch を公開して供給
+       configure_batch_plan / configure_execution / configure_commit_slots
+       GpuMcuPersistentMcu::start()          batch ready epoch を公開して供給
   -> persistent loop（control WGP 常駐）
        admission -> plan 解釈 -> kernarg 生成 -> AQL stage/commit
        -> worker（worker CU）が実行 -> completion marker

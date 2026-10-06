@@ -482,11 +482,63 @@ Result<PhysicalResolveStatus> resolve_psq8_physical(
         ::ps::kernel::psq8_decode1_supported(rows, e.rows, wkp);
     out.unroll = out.use_decode1 ? ::ps::kernel::psq8_decode1_unroll(e.rows, wkp)
                                  : 0u;
-    out.grid = out.use_decode1 ? ::ps::kernel::psq8_decode1_grid(e.rows) : 0u;
-    out.workgroup = out.use_decode1 ? ::ps::kernel::psq8_decode1_block_size() : 0u;
-    out.variant =
-        (out.use_decode1 && out_bf16) ? PhysicalPsq8Variant::Decode1Bf16
-                                      : PhysicalPsq8Variant::Unsupported;
+    if (out.use_decode1 && out_bf16) {
+        out.variant = PhysicalPsq8Variant::Decode1Bf16;
+        out.grid = ::ps::kernel::psq8_decode1_grid(e.rows);
+        out.workgroup = ::ps::kernel::psq8_decode1_block_size();
+    } else {
+        const uint32_t out_tiles = ::ps::kernel::psq8_rowblock_grid_x(e.rows);
+        switch (out.config_id) {
+            case ::ps::kernel::Psq8GemmConfigId::RowBlock1:
+                out.variant = PhysicalPsq8Variant::RowBlock1Bf16;
+                out.grid = out_tiles;
+                out.grid_y = ::ps::kernel::psq8_rowblock_grid_y(rows, 1u);
+                out.workgroup = 32u;
+                break;
+            case ::ps::kernel::Psq8GemmConfigId::RowBlock2:
+                out.variant = PhysicalPsq8Variant::RowBlock2Bf16;
+                out.grid = out_tiles;
+                out.grid_y = ::ps::kernel::psq8_rowblock_grid_y(rows, 2u);
+                out.workgroup = 32u;
+                break;
+            case ::ps::kernel::Psq8GemmConfigId::RowBlock4:
+                out.variant = PhysicalPsq8Variant::RowBlock4Bf16;
+                out.grid = out_tiles;
+                out.grid_y = ::ps::kernel::psq8_rowblock_grid_y(rows, 4u);
+                out.workgroup = 32u;
+                break;
+            case ::ps::kernel::Psq8GemmConfigId::RowBlock8:
+                out.variant = PhysicalPsq8Variant::RowBlock8Bf16;
+                out.grid = out_tiles;
+                out.grid_y = ::ps::kernel::psq8_rowblock_grid_y(rows, 8u);
+                out.workgroup = 32u;
+                break;
+            case ::ps::kernel::Psq8GemmConfigId::Prefill2D:
+                out.variant = PhysicalPsq8Variant::Prefill2DN64K64;
+                out.grid = ::ps::kernel::psq8_prefill2d_grid_x(
+                    e.rows, ::ps::kernel::kPsq8GemmPrefill2dBlock64);
+                out.grid_y = ::ps::kernel::psq8_prefill2d_grid_y(rows);
+                out.workgroup = ::ps::kernel::kPsq8Prefill2DThreads;
+                break;
+            case ::ps::kernel::Psq8GemmConfigId::Prefill2D_K64N128:
+                out.variant = PhysicalPsq8Variant::Prefill2DN128K64;
+                out.grid = ::ps::kernel::psq8_prefill2d_grid_x(
+                    e.rows, ::ps::kernel::kPsq8GemmPrefill2dBlock128);
+                out.grid_y = ::ps::kernel::psq8_prefill2d_grid_y(rows);
+                out.workgroup = ::ps::kernel::kPsq8Prefill2DThreads;
+                break;
+            case ::ps::kernel::Psq8GemmConfigId::Prefill2D_K128N128:
+                out.variant = PhysicalPsq8Variant::Prefill2DN128K128;
+                out.grid = ::ps::kernel::psq8_prefill2d_grid_x(
+                    e.rows, ::ps::kernel::kPsq8GemmPrefill2dBlock128);
+                out.grid_y = ::ps::kernel::psq8_prefill2d_grid_y(rows);
+                out.workgroup = ::ps::kernel::kPsq8Prefill2DThreads;
+                break;
+            default:
+                out.variant = PhysicalPsq8Variant::Unsupported;
+                break;
+        }
+    }
     return PhysicalResolveStatus::Applicable;
 }
 

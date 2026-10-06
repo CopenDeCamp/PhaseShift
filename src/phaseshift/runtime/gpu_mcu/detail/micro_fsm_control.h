@@ -53,6 +53,13 @@ __device__ __forceinline__ bool gpu_mcu_execution_step(
         return false;
     }
     if (context->actual_rows == 0u) {
+        if (state->execution_fsm != nullptr) {
+            mcu_log_event(state->execution_fsm, McuLogEvent::ExecutionSkip,
+                          0u, 0u, 0u, ready,
+                          static_cast<uint64_t>(
+                              state->active_batch_ready_epoch),
+                          /*reason actual_rows_zero*/ 1u);
+        }
         state->active_batch_ready_epoch = ready;
         return false;
     }
@@ -60,14 +67,30 @@ __device__ __forceinline__ bool gpu_mcu_execution_step(
         state->execution_wrap_faulted = 1u;
         return false;
     }
-    const uint64_t epoch = state->execution_epoch + 1u;
+    const uint64_t consumed = state->execution_fsm->run_ctx.run_consumed;
+    uint64_t epoch = state->execution_epoch + 1u;
+    if (epoch <= consumed) epoch = consumed + 1u;
     gpu_mcu_bind_execution_plan(context, state->execution_patches,
                                 state->execution_patch_count);
     state->execution_fsm->batch_input =
         reinterpret_cast<uint64_t>(context->token_ids);
+    if (state->execution_fsm != nullptr) {
+        mcu_log_event(state->execution_fsm, McuLogEvent::ExecutionEpoch,
+                      0u, 0u, 0u, epoch,
+                      static_cast<uint64_t>(
+                          state->execution_fsm->run_ctx.run_consumed),
+                      static_cast<uint64_t>(state->execution_fsm->run_request));
+    }
     __scoped_atomic_store_n(&state->execution_fsm->run_request, epoch,
                             __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
     const bool ran = mcu_run_once(state->execution_fsm, nullptr);
+    if (state->execution_fsm != nullptr) {
+        mcu_log_event(state->execution_fsm, McuLogEvent::ExecutionEpoch,
+                      1u, ran ? 1u : 0u, 0u, epoch,
+                      static_cast<uint64_t>(
+                          state->execution_fsm->run_ctx.run_consumed),
+                      static_cast<uint64_t>(state->execution_epoch));
+    }
     state->active_batch_ready_epoch = ready;
     if (!ran) {
         return false;

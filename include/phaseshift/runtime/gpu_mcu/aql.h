@@ -574,6 +574,7 @@ public:
     Result<GpuMcuKernargRegion> allocate_kernarg(
         std::size_t slot_bytes,
         uint32_t slot_count);
+    Result<GpuMcuKernargRegion> allocate_log_region(std::size_t bytes);
     Result<std::size_t> kernarg_granule() const;
 
     Status submit_host(const GpuAqlPacketTemplate* packets, uint32_t count);

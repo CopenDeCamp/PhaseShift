@@ -45,6 +45,20 @@ const char* mcu_kernel_variant_kind_name(McuCompiledVariantKind kind) {
             return "Psq4Decode1Bf16U8";
         case McuCompiledVariantKind::Psq8Decode1Bf16U8:
             return "Psq8Decode1Bf16U8";
+        case McuCompiledVariantKind::Psq8RowBlock1Bf16:
+            return "Psq8RowBlock1Bf16";
+        case McuCompiledVariantKind::Psq8RowBlock2Bf16:
+            return "Psq8RowBlock2Bf16";
+        case McuCompiledVariantKind::Psq8RowBlock4Bf16:
+            return "Psq8RowBlock4Bf16";
+        case McuCompiledVariantKind::Psq8RowBlock8Bf16:
+            return "Psq8RowBlock8Bf16";
+        case McuCompiledVariantKind::Psq8Prefill2DN64K64:
+            return "Psq8Prefill2DN64K64";
+        case McuCompiledVariantKind::Psq8Prefill2DN128K64:
+            return "Psq8Prefill2DN128K64";
+        case McuCompiledVariantKind::Psq8Prefill2DN128K128:
+            return "Psq8Prefill2DN128K128";
         case McuCompiledVariantKind::Psq4RowBlock1Bf16:
             return "Psq4RowBlock1Bf16";
         case McuCompiledVariantKind::Psq4RowBlock2Bf16:
@@ -61,6 +75,8 @@ const char* mcu_kernel_variant_kind_name(McuCompiledVariantKind kind) {
             return "SamplingArgmaxF32";
         case McuCompiledVariantKind::EmbeddingBf16:
             return "EmbeddingBf16";
+        case McuCompiledVariantKind::EmbeddingPsq8:
+            return "EmbeddingPsq8";
         case McuCompiledVariantKind::OutputGatherBf16:
             return "OutputGatherBf16";
         case McuCompiledVariantKind::VerifyAcceptBatch:
@@ -83,6 +99,12 @@ const char* mcu_kernel_variant_kind_name(McuCompiledVariantKind kind) {
             return "ElementwiseSiluF32ToBf16";
         case McuCompiledVariantKind::Bf16ExactRows:
             return "Bf16ExactRows";
+        case McuCompiledVariantKind::Bf16Wmma:
+            return "Bf16Wmma";
+        case McuCompiledVariantKind::Bf16WmmaWide:
+            return "Bf16WmmaWide";
+        case McuCompiledVariantKind::Bf16SplitKWmma:
+            return "Bf16SplitKWmma";
         case McuCompiledVariantKind::Bf16ExactRows2:
             return "Bf16ExactRows2";
         case McuCompiledVariantKind::Bf16ExactRows3:
@@ -119,6 +141,16 @@ const char* mcu_kernel_variant_kind_name(McuCompiledVariantKind kind) {
             return "GdnConv1dBf16F32";
         case McuCompiledVariantKind::GdnRecurrenceWmmaDecode1:
             return "GdnRecurrenceWmmaDecode1";
+        case McuCompiledVariantKind::GdnRecurrenceDecodeRowsExactR2:
+            return "GdnRecurrenceDecodeRowsExactR2";
+        case McuCompiledVariantKind::GdnRecurrenceDecodeRowsExactR4:
+            return "GdnRecurrenceDecodeRowsExactR4";
+        case McuCompiledVariantKind::GdnRecurrenceDecodeRowsExactR8:
+            return "GdnRecurrenceDecodeRowsExactR8";
+        case McuCompiledVariantKind::GdnRecurrenceWmmaSerialLossy:
+            return "GdnRecurrenceWmmaSerialLossy";
+        case McuCompiledVariantKind::GdnRecurrenceWmmaSerialExact:
+            return "GdnRecurrenceWmmaSerialExact";
         case McuCompiledVariantKind::GdnRecurrenceWmmaLossy:
             return "GdnRecurrenceWmmaLossy";
         case McuCompiledVariantKind::GdnRecurrenceWmmaExact:
@@ -217,6 +249,21 @@ Result<McuKernelCodeObject> mcu_kernel_code_object(McuCompiledVariantKind kind) 
             blob_name = "bf16";
             out.symbol = kernel::kBf16ExactRowsSymbol;
             out.kernarg_recipe = mcu::kMcuKernargRecipeBf16ExactRows;
+            break;
+        case McuCompiledVariantKind::Bf16Wmma:
+            blob_name = "bf16";
+            out.symbol = kernel::kBf16WmmaSymbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeBf16Wmma;
+            break;
+        case McuCompiledVariantKind::Bf16WmmaWide:
+            blob_name = "bf16";
+            out.symbol = kernel::kBf16WmmaWideSymbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeBf16Wmma;
+            break;
+        case McuCompiledVariantKind::Bf16SplitKWmma:
+            blob_name = "bf16";
+            out.symbol = kernel::kBf16SplitKWmmaSymbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeBf16Wmma;
             break;
         case McuCompiledVariantKind::Bf16ExactRows2:
             blob_name = "bf16";
@@ -318,6 +365,31 @@ Result<McuKernelCodeObject> mcu_kernel_code_object(McuCompiledVariantKind kind) 
             out.symbol = kernel::kGdnRecurrenceWmmaExactSymbol;
             out.kernarg_recipe = mcu::kMcuKernargRecipeGdnRecurrence;
             break;
+        case McuCompiledVariantKind::GdnRecurrenceDecodeRowsExactR2:
+            blob_name = "gdn_recurrence";
+            out.symbol = kernel::kGdnRecurrenceDecodeRowsExactR2Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeGdnRecurrence;
+            break;
+        case McuCompiledVariantKind::GdnRecurrenceDecodeRowsExactR4:
+            blob_name = "gdn_recurrence";
+            out.symbol = kernel::kGdnRecurrenceDecodeRowsExactR4Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeGdnRecurrence;
+            break;
+        case McuCompiledVariantKind::GdnRecurrenceDecodeRowsExactR8:
+            blob_name = "gdn_recurrence";
+            out.symbol = kernel::kGdnRecurrenceDecodeRowsExactR8Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeGdnRecurrence;
+            break;
+        case McuCompiledVariantKind::GdnRecurrenceWmmaSerialLossy:
+            blob_name = "gdn_recurrence";
+            out.symbol = kernel::kGdnRecurrenceWmmaSerialLossySymbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeGdnRecurrence;
+            break;
+        case McuCompiledVariantKind::GdnRecurrenceWmmaSerialExact:
+            blob_name = "gdn_recurrence";
+            out.symbol = kernel::kGdnRecurrenceWmmaSerialExactSymbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeGdnRecurrence;
+            break;
         case McuCompiledVariantKind::GdnResetZero:
             blob_name = "gdn_reset";
             out.symbol = mcu::kGdnResetSymbol;
@@ -406,6 +478,41 @@ Result<McuKernelCodeObject> mcu_kernel_code_object(McuCompiledVariantKind kind) 
             out.symbol = kernel::kPsq8Decode1Bf16U8Symbol;
             out.kernarg_recipe = mcu::kMcuKernargRecipePsq8Decode1Bf16U8;
             break;
+        case McuCompiledVariantKind::Psq8RowBlock1Bf16:
+            blob_name = "psq8";
+            out.symbol = kernel::kPsq8RowBlock1Bf16Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq8RowBlock2Bf16:
+            blob_name = "psq8";
+            out.symbol = kernel::kPsq8RowBlock2Bf16Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq8RowBlock4Bf16:
+            blob_name = "psq8";
+            out.symbol = kernel::kPsq8RowBlock4Bf16Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq8RowBlock8Bf16:
+            blob_name = "psq8";
+            out.symbol = kernel::kPsq8RowBlock8Bf16Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq8Prefill2DN64K64:
+            blob_name = "psq8";
+            out.symbol = kernel::kPsq8Prefill2DN64K64Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq8Prefill2DN128K64:
+            blob_name = "psq8";
+            out.symbol = kernel::kPsq8Prefill2DN128K64Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq8Prefill2DN128K128:
+            blob_name = "psq8";
+            out.symbol = kernel::kPsq8Prefill2DN128K128Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
         case McuCompiledVariantKind::Psq4RowBlock1Bf16:
             blob_name = "psq4";
             out.symbol = kernel::kPsq4RowBlock1Bf16Symbol;
@@ -445,6 +552,11 @@ Result<McuKernelCodeObject> mcu_kernel_code_object(McuCompiledVariantKind kind) 
             blob_name = "embedding";
             out.symbol = kernel::kEmbeddingBf16Symbol;
             out.kernarg_recipe = mcu::kMcuKernargRecipeEmbeddingBf16;
+            break;
+        case McuCompiledVariantKind::EmbeddingPsq8:
+            blob_name = "embedding";
+            out.symbol = kernel::kEmbeddingPsq8Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipeEmbeddingPsq8;
             break;
         case McuCompiledVariantKind::OutputGatherBf16:
             blob_name = "output_gather";

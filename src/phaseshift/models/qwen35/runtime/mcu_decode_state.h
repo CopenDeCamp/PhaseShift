@@ -28,6 +28,9 @@ struct McuDecodeState {
     uint32_t commit_max_requests = 0;
     bool persistent_configured = false;
     bool full_plan = false;
+    uint32_t plan_begin = 0;
+    uint32_t plan_end = 0;
+    uint32_t plan_total = 0;
     uint64_t commits_before_run = 0;
 };
 

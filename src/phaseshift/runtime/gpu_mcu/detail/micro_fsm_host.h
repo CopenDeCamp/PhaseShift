@@ -245,6 +245,15 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
         return Status::invalid_argument("null bf16 invocation table", __FILE__,
                                         __LINE__);
     }
+    if (config.bf16_wmma_invocation_count > kMcuMaxBf16Invocations) {
+        return Status::invalid_argument("invalid bf16 wmma invocation count",
+                                        __FILE__, __LINE__);
+    }
+    if (config.bf16_wmma_invocation_count != 0u &&
+        config.bf16_wmma_invocations == nullptr) {
+        return Status::invalid_argument("null bf16 wmma invocation table",
+                                        __FILE__, __LINE__);
+    }
     if (config.l2_invocation_count > kMcuMaxL2Invocations) {
         return Status::invalid_argument("invalid l2 invocation count", __FILE__,
                                         __LINE__);
@@ -260,6 +269,15 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
     if (config.embedding_invocation_count != 0u &&
         config.embedding_invocations == nullptr) {
         return Status::invalid_argument("null embedding invocation table",
+                                        __FILE__, __LINE__);
+    }
+    if (config.embedding_psq8_invocation_count > kMcuMaxEmbeddingInvocations) {
+        return Status::invalid_argument("invalid psq8 embedding invocation count",
+                                        __FILE__, __LINE__);
+    }
+    if (config.embedding_psq8_invocation_count != 0u &&
+        config.embedding_psq8_invocations == nullptr) {
+        return Status::invalid_argument("null psq8 embedding invocation table",
                                         __FILE__, __LINE__);
     }
     if (config.output_gather_invocation_count > kMcuMaxOutputGatherInvocations) {
@@ -394,12 +412,19 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
     s->external_start_signal = config.start_signal;
     s->external_done_signal = config.done_signal;
     s->external_result_code = config.result_code;
+    s->log_base = config.log_base;
+    s->log_head = 0u;
+    s->log_enabled = config.log_base != 0ull ? 1u : 0u;
     s->bf16_invocations = config.bf16_invocations;
     s->bf16_invocation_count = config.bf16_invocation_count;
+    s->bf16_wmma_invocations = config.bf16_wmma_invocations;
+    s->bf16_wmma_invocation_count = config.bf16_wmma_invocation_count;
     s->l2_invocations = config.l2_invocations;
     s->l2_invocation_count = config.l2_invocation_count;
     s->embedding_invocations = config.embedding_invocations;
     s->embedding_invocation_count = config.embedding_invocation_count;
+    s->embedding_psq8_invocations = config.embedding_psq8_invocations;
+    s->embedding_psq8_invocation_count = config.embedding_psq8_invocation_count;
     s->output_gather_invocations = config.output_gather_invocations;
     s->output_gather_invocation_count = config.output_gather_invocation_count;
     s->gdn_conv1d_invocations = config.gdn_conv1d_invocations;
@@ -512,6 +537,19 @@ McuFaultCode GpuMcuFsm::fault_code() const noexcept {
 uint32_t GpuMcuFsm::fault_pc() const noexcept {
     if (host_state_ == nullptr) return 0;
     return load_u32(&host_state_->fault_pc);
+}
+
+uint32_t GpuMcuFsm::log_head() const noexcept {
+    if (host_state_ == nullptr) return 0u;
+    return load_u32(&host_state_->log_head);
+}
+
+const McuLogRecord* GpuMcuFsm::log_record(uint32_t slot) const noexcept {
+    if (host_state_ == nullptr || host_state_->log_base == 0ull) return nullptr;
+    if (slot >= kMcuLogLineCount) return nullptr;
+    return reinterpret_cast<const McuLogRecord*>(
+        host_state_->log_base +
+        static_cast<uint64_t>(slot) * kMcuLogLineBytes);
 }
 
 uint64_t GpuMcuFsm::plans_started() const noexcept {

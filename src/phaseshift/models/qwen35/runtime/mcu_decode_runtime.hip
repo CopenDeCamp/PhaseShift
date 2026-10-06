@@ -1,6 +1,8 @@
 #include <phaseshift/models/qwen35/runtime/mcu_decode_runtime.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 
@@ -213,9 +215,13 @@ Status McuDecodeRuntime::release_invocations() noexcept {
     if (!s.ok()) status = s;
     s = free_table(&bf16_, &bf16_count_);
     if (!s.ok()) status = s;
+    s = free_table(&bf16_wmma_, &bf16_wmma_count_);
+    if (!s.ok()) status = s;
     s = free_table(&l2_, &l2_count_);
     if (!s.ok()) status = s;
     s = free_table(&embedding_, &embedding_count_);
+    if (!s.ok()) status = s;
+    s = free_table(&embedding_psq8_, &embedding_psq8_count_);
     if (!s.ok()) status = s;
     s = free_table(&output_gather_, &output_gather_count_);
     if (!s.ok()) status = s;
@@ -252,24 +258,14 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
         row_global_patches_ = nullptr;
         row_global_patch_count_ = 0u;
     }
-    const uint32_t count = psq4_multi_count_ + 2u * gdn_conv_count_ +
-                           gdn_recur_count_ + argmax_f32_count_ +
-                           output_gather_count_ + verify_accept_count_ +
+    const uint32_t count = 2u * gdn_conv_count_ + gdn_recur_count_ +
+                           argmax_f32_count_ + output_gather_count_ +
+                           verify_accept_count_ +
                            static_cast<uint32_t>(attention_regions_.size()) +
                            static_cast<uint32_t>(bf16_catalogs_.size());
     if (count == 0u) return Status::make_ok();
     std::vector<mcu::McuInvocationPatch> patches(count);
     uint32_t index = 0u;
-    auto* psq4_base = static_cast<unsigned char*>(psq4_multi_);
-    for (uint32_t i = 0u; i < psq4_multi_count_; ++i) {
-        patches[index].target = reinterpret_cast<uint64_t>(
-            psq4_base +
-            static_cast<size_t>(i) * sizeof(mcu::McuPsq4MultiRowInvocation) +
-            offsetof(mcu::McuPsq4MultiRowInvocation, rows));
-        patches[index].source =
-            static_cast<uint8_t>(mcu::McuInvocationPatchSource::ActualRows);
-        ++index;
-    }
     auto* gdn_base = static_cast<unsigned char*>(gdn_conv_);
     for (uint32_t i = 0u; i < gdn_conv_count_; ++i) {
         patches[index].target = reinterpret_cast<uint64_t>(
@@ -375,6 +371,10 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
             mcu::McuInvocationPatchSource::Bf16ExactRowsVariant);
         patches[index].param = catalog.variant_base;
         ++index;
+    }
+    if (index != count) {
+        return Status::invalid_state("row global patch count mismatch",
+                                     __FILE__, __LINE__);
     }
     if (hipMalloc(reinterpret_cast<void**>(&row_global_patches_),
                   patches.size() * sizeof(mcu::McuInvocationPatch)) !=
@@ -519,9 +519,14 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
         status = upload_table(&paged_reduce_, &paged_reduce_count_,
                               plan.attention_paged_reduce);
     if (status.ok()) status = upload_table(&bf16_, &bf16_count_, plan.bf16);
+    if (status.ok())
+        status = upload_table(&bf16_wmma_, &bf16_wmma_count_, plan.bf16_wmma);
     if (status.ok()) status = upload_table(&l2_, &l2_count_, plan.l2);
     if (status.ok())
         status = upload_table(&embedding_, &embedding_count_, plan.embedding);
+    if (status.ok())
+        status = upload_table(&embedding_psq8_, &embedding_psq8_count_,
+                              plan.embedding_psq8);
     if (status.ok())
         status = upload_table(&output_gather_, &output_gather_count_,
                               plan.output_gather);
@@ -576,6 +581,14 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     auto region = queue_.allocate_kernarg(slot_bytes, plan_node_count_ + 1u);
     if (!region.ok()) return region.status();
     kernarg_ = region.release();
+
+    if (log_region_.base == nullptr) {
+        const char* log_env = std::getenv("PHASESHIFT_MCU_LOG");
+        if (log_env != nullptr && log_env[0] == '1') {
+            auto log_res = queue_.allocate_log_region(mcu::kMcuLogBytes);
+            if (log_res.ok()) log_region_ = log_res.release();
+        }
+    }
 
     mcu::GpuMcuFsmConfig config{};
     config.queue = queue_.device_queue_view();
@@ -636,11 +649,17 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     config.bf16_invocations =
         static_cast<const mcu::McuBf16ExactRowsInvocation*>(bf16_);
     config.bf16_invocation_count = bf16_count_;
+    config.bf16_wmma_invocations =
+        static_cast<const mcu::McuBf16WmmaInvocation*>(bf16_wmma_);
+    config.bf16_wmma_invocation_count = bf16_wmma_count_;
     config.l2_invocations = static_cast<const mcu::McuL2NormalizeInvocation*>(l2_);
     config.l2_invocation_count = l2_count_;
     config.embedding_invocations =
         static_cast<const mcu::McuEmbeddingBf16Invocation*>(embedding_);
     config.embedding_invocation_count = embedding_count_;
+    config.embedding_psq8_invocations =
+        static_cast<const mcu::McuEmbeddingPsq8Invocation*>(embedding_psq8_);
+    config.embedding_psq8_invocation_count = embedding_psq8_count_;
     config.output_gather_invocations =
         static_cast<const mcu::McuOutputGatherBf16Invocation*>(output_gather_);
     config.output_gather_invocation_count = output_gather_count_;
@@ -661,6 +680,7 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     config.dynamic_node_bindings =
         static_cast<const mcu::McuDynamicNodeBinding*>(dynamic_bindings_);
     config.dynamic_node_binding_count = dynamic_binding_count_;
+    config.log_base = reinterpret_cast<uint64_t>(log_region_.base);
     config.output_base = reinterpret_cast<uint64_t>(plan_output_);
     config.timestamps_base = reinterpret_cast<uint64_t>(plan_timestamps_);
     config.completions = completions_;
@@ -719,6 +739,47 @@ Status McuDecodeRuntime::enqueue_wait(hipStream_t stream, uint32_t epoch) const 
     return ::ps::runtime::stream_wait_value32(stream, done_signal_, epoch);
 }
 
+void McuDecodeRuntime::dump_log(std::FILE* out) const noexcept {
+    if (out == nullptr) return;
+    static const char* const kEventNames[] = {
+        "None",          "PlanBegin",          "DispatchPrepare",
+        "DispatchPublish", "DispatchDoorbell", "WaitBegin",
+        "WaitComplete",  "WaitSpinTimeout",    "CompletionSlotMismatch",
+        "KernargBuildFailed", "Fault", "PlanEnd", "ExecutionSkip",
+        "ExecutionEpoch"};
+    const uint32_t used = fsm_.log_head();
+    if (used == 0u) {
+        std::fprintf(out, "[mcu-log] no records\n");
+        return;
+    }
+    const uint64_t lo =
+        used > mcu::kMcuLogLineCount
+            ? static_cast<uint64_t>(used) - mcu::kMcuLogLineCount
+            : 0ull;
+    const uint32_t show = used < 64u ? used : 64u;
+    std::fprintf(out, "[mcu-log] records=%u newest=%u\n", used, used - 1u);
+    for (uint32_t i = 0u; i < show; ++i) {
+        const uint32_t slot = (used - 1u - i) & (mcu::kMcuLogLineCount - 1u);
+        const mcu::McuLogRecord* rec = fsm_.log_record(slot);
+        if (rec == nullptr) continue;
+        if (rec->sequence < lo ||
+            rec->sequence >= static_cast<uint64_t>(used))
+            continue;
+        const uint32_t ev = rec->event;
+        const char* name =
+            ev < sizeof(kEventNames) / sizeof(kEventNames[0]) ? kEventNames[ev]
+                                                              : "?";
+        std::fprintf(out,
+                     "  seq=%llu ev=%s pc=%u var=%u cslot=%u gen=%llu "
+                     "v0=%llu v1=%llu\n",
+                     static_cast<unsigned long long>(rec->sequence), name,
+                     rec->pc, rec->variant, rec->completion_slot,
+                     static_cast<unsigned long long>(rec->generation),
+                     static_cast<unsigned long long>(rec->value0),
+                     static_cast<unsigned long long>(rec->value1));
+    }
+}
+
 uint32_t McuDecodeRuntime::result_code() const noexcept {
     return ::ps::runtime::stream_signal_load(result_signal_);
 }
@@ -761,9 +822,13 @@ Status McuDecodeRuntime::shutdown() noexcept {
     if (!s.ok()) status = s;
     s = free_table(&bf16_, &bf16_count_);
     if (!s.ok()) status = s;
+    s = free_table(&bf16_wmma_, &bf16_wmma_count_);
+    if (!s.ok()) status = s;
     s = free_table(&l2_, &l2_count_);
     if (!s.ok()) status = s;
     s = free_table(&embedding_, &embedding_count_);
+    if (!s.ok()) status = s;
+    s = free_table(&embedding_psq8_, &embedding_psq8_count_);
     if (!s.ok()) status = s;
     s = free_table(&output_gather_, &output_gather_count_);
     if (!s.ok()) status = s;
@@ -884,6 +949,7 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     queue_ = std::move(other.queue_);
     fsm_ = std::move(other.fsm_);
     kernarg_ = std::move(other.kernarg_);
+    log_region_ = std::move(other.log_region_);
     probe_code_ = std::move(other.probe_code_);
     probe_meta_ = other.probe_meta_;
     code_objects_ = std::move(other.code_objects_);
@@ -933,10 +999,14 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     paged_reduce_count_ = other.paged_reduce_count_;
     bf16_ = other.bf16_;
     bf16_count_ = other.bf16_count_;
+    bf16_wmma_ = other.bf16_wmma_;
+    bf16_wmma_count_ = other.bf16_wmma_count_;
     l2_ = other.l2_;
     l2_count_ = other.l2_count_;
     embedding_ = other.embedding_;
     embedding_count_ = other.embedding_count_;
+    embedding_psq8_ = other.embedding_psq8_;
+    embedding_psq8_count_ = other.embedding_psq8_count_;
     output_gather_ = other.output_gather_;
     output_gather_count_ = other.output_gather_count_;
     gdn_conv_ = other.gdn_conv_;
@@ -986,8 +1056,12 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     other.paged_split_ = nullptr;
     other.paged_reduce_ = nullptr;
     other.bf16_ = nullptr;
+    other.bf16_wmma_ = nullptr;
+    other.bf16_wmma_count_ = 0u;
     other.l2_ = nullptr;
     other.embedding_ = nullptr;
+    other.embedding_psq8_ = nullptr;
+    other.embedding_psq8_count_ = 0u;
     other.output_gather_ = nullptr;
     other.gdn_conv_ = nullptr;
     other.gdn_recur_ = nullptr;

@@ -85,6 +85,18 @@ inline constexpr const char* kGdnRecurrenceWmmaExactSymbol =
 inline constexpr const char* kGdnRecurrenceWmmaDecode1Symbol =
     "phaseshift_qwen35_gdn_recurrence_wmma_decode1";
 
+inline constexpr const char* kGdnRecurrenceDecodeRowsExactR2Symbol =
+    "phaseshift_qwen35_gdn_recurrence_decode_rows_exact_r2";
+inline constexpr const char* kGdnRecurrenceDecodeRowsExactR4Symbol =
+    "phaseshift_qwen35_gdn_recurrence_decode_rows_exact_r4";
+inline constexpr const char* kGdnRecurrenceDecodeRowsExactR8Symbol =
+    "phaseshift_qwen35_gdn_recurrence_decode_rows_exact_r8";
+
+inline constexpr const char* kGdnRecurrenceWmmaSerialLossySymbol =
+    "phaseshift_qwen35_gdn_recurrence_wmma_serial_lossy";
+inline constexpr const char* kGdnRecurrenceWmmaSerialExactSymbol =
+    "phaseshift_qwen35_gdn_recurrence_wmma_serial_exact";
+
 inline constexpr uint32_t kGdnRecurrenceWmmaDecode1Threads = 256u;
 inline constexpr uint32_t kGdnRecurrenceWmmaK = 128u;
 inline constexpr uint32_t kGdnRecurrenceWmmaDecode1VGroup = 64u;

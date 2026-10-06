@@ -25,9 +25,10 @@ enum class DecodeBackendReason : uint8_t {
     KvDtypeNotBf16 = 8,
     ImatrixCollector = 9,
     ValueTrace = 10,
-    TargetHiddenTaps = 11,
     StreamWaitUnsupported = 12,
     McuBodyRangeUnavailable = 13,
+    TensorParallel = 14,
+    StochasticSampling = 15,
 };
 
 struct DecodeBackendInputs {
@@ -39,9 +40,10 @@ struct DecodeBackendInputs {
     bool speculative_verify = false;
     bool prefill_present = false;
     bool kv_dtype_is_bf16 = true;
+    bool tensor_parallel_configured = false;
+    uint32_t stochastic_output_count = 0u;
     bool imatrix_collector_present = false;
     bool value_trace_present = false;
-    uint32_t target_hidden_tap_count = 0u;
     bool stream_wait_value_supported = true;
     bool mcu_body_range_valid = true;
     bool persistent_ready = false;
@@ -53,6 +55,12 @@ struct DecodeBackendDecision {
     bool eligible = false;
 };
 
+struct DecodeBackendConfigInputs {
+    DecodeBackend requested = DecodeBackend::Host;
+    bool kv_dtype_is_bf16 = true;
+    bool tensor_parallel_configured = false;
+};
+
 struct DecodeRuntimeCounters {
     uint64_t plan_compile_count = 0;
     uint64_t plan_upload_count = 0;
@@ -62,6 +70,9 @@ struct DecodeRuntimeCounters {
 };
 
 DecodeBackendDecision decide_decode_backend(const DecodeBackendInputs& inputs);
+
+DecodeBackendDecision decide_decode_backend_config(
+    const DecodeBackendConfigInputs& inputs);
 
 Status decode_backend_execution_error(const DecodeBackendDecision& decision);
 

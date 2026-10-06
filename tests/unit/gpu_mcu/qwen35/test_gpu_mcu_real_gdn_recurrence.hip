@@ -32,7 +32,7 @@ constexpr uint32_t kKeyHeads = 16u;
 constexpr uint32_t kHeadK = 128u;
 constexpr uint32_t kHeadV = 128u;
 constexpr uint32_t kNReq = 1u;
-constexpr uint32_t kRows = 1u;
+constexpr uint32_t kRows = 8u;
 constexpr uint32_t kGuardBytes = 64u;
 constexpr uint32_t kMaxNumVHeads = 48u;
 
@@ -40,11 +40,14 @@ struct RecCase {
     const char* name;
     uint32_t num_v_heads;
     bool decode1;
+    bool decode_rows;
+    uint32_t rows;
 };
 
 const RecCase kCases[] = {
-    {"decode1", 48u, true},
-    {"wmma-model-shape", 32u, false},
+    {"decode1", 48u, true, false, kRows},
+    {"wmma-model-shape", 32u, false, false, kRows},
+    {"decode-rows-r8", 48u, false, true, 8u},
 };
 constexpr uint32_t kCaseCount =
     static_cast<uint32_t>(sizeof(kCases) / sizeof(kCases[0]));
@@ -74,7 +77,7 @@ kernel::GdnRecurrenceArgs make_args(const RecCase& c, const void* q,
     a.requests =
         static_cast<const ::ps::runtime::DeviceRequestDescriptor*>(requests);
     a.num_requests = kNReq;
-    a.actual_rows = kRows;
+    a.actual_rows = c.rows;
     a.q_row_stride = qk();
     a.k_row_stride = qk();
     a.v_row_stride = vdim(c.num_v_heads);
@@ -124,11 +127,12 @@ int main() {
 
     const size_t max_vdim = vdim(kMaxNumVHeads);
     const size_t max_slot = slot_stride(kMaxNumVHeads);
-    const size_t qk_bytes = (size_t)kNReq * qk() * 4u;
-    const size_t v_bytes = (size_t)kNReq * max_vdim * 2u;
-    const size_t gate_bytes = (size_t)kNReq * kMaxNumVHeads * 2u;
+    const size_t qk_bytes = (size_t)kNReq * kRows * qk() * 4u;
+    const size_t v_bytes = (size_t)kNReq * kRows * max_vdim * 2u;
+    const size_t gate_bytes = (size_t)kNReq * kRows * kMaxNumVHeads * 2u;
     const size_t bias_bytes = (size_t)kMaxNumVHeads * 2u;
-    const size_t out_bytes = (size_t)kNReq * max_vdim * 4u + kGuardBytes;
+    const size_t out_bytes =
+        (size_t)kNReq * kRows * max_vdim * 4u + kGuardBytes;
     const size_t state_bytes = (size_t)kNReq * max_slot * 4u;
 
     void* q = nullptr;
@@ -169,10 +173,11 @@ int main() {
         }
     }
 
-    std::vector<float> h_q((size_t)kNReq * qk()), h_k((size_t)kNReq * qk());
-    std::vector<uint16_t> h_v((size_t)kNReq * max_vdim);
-    std::vector<uint16_t> h_ga((size_t)kNReq * kMaxNumVHeads);
-    std::vector<uint16_t> h_gb((size_t)kNReq * kMaxNumVHeads);
+    std::vector<float> h_q((size_t)kNReq * kRows * qk()),
+        h_k((size_t)kNReq * kRows * qk());
+    std::vector<uint16_t> h_v((size_t)kNReq * kRows * max_vdim);
+    std::vector<uint16_t> h_ga((size_t)kNReq * kRows * kMaxNumVHeads);
+    std::vector<uint16_t> h_gb((size_t)kNReq * kRows * kMaxNumVHeads);
     std::vector<uint16_t> h_dt(kMaxNumVHeads), h_al(kMaxNumVHeads);
     for (size_t i = 0; i < h_q.size(); ++i)
         h_q[i] = static_cast<float>(static_cast<int>((i * 37u) % 201u) - 100) / 64.0f;
@@ -218,6 +223,11 @@ int main() {
     const bool lossy = kernel::gdn_recurrence_lossy_enabled();
     auto case_symbol = [&](const RecCase& c) -> const char* {
         if (c.decode1) return kernel::kGdnRecurrenceWmmaDecode1Symbol;
+        if (c.decode_rows) {
+            if (c.rows == 2u) return kernel::kGdnRecurrenceDecodeRowsExactR2Symbol;
+            if (c.rows == 4u) return kernel::kGdnRecurrenceDecodeRowsExactR4Symbol;
+            return kernel::kGdnRecurrenceDecodeRowsExactR8Symbol;
+        }
         return lossy ? kernel::kGdnRecurrenceWmmaLossySymbol
                      : kernel::kGdnRecurrenceWmmaExactSymbol;
     };
@@ -271,7 +281,8 @@ int main() {
 
     for (uint32_t i = 0; i < kCaseCount; ++i) {
         const RecCase& c = kCases[i];
-        const size_t out_elems = (size_t)kNReq * vdim(c.num_v_heads);
+        const size_t out_elems =
+            (size_t)kNReq * c.rows * vdim(c.num_v_heads);
         const size_t state_elems = (size_t)kNReq * slot_stride(c.num_v_heads);
         for (void* p : {st_ref, st_aql})
             (void)hipMemset(p, 0x5A, state_elems * 4u);
@@ -280,9 +291,14 @@ int main() {
 
         kernel::GdnRecurrenceArgs href =
             make_args(c, q, k, v, ga, gb, dt_bias, a_log, st_ref, out_ref, requests);
-        const hipError_t herr = c.decode1
-            ? kernel::launch_gdn_recurrence_f32_wmma_decode1(href, stream)
-            : kernel::launch_gdn_recurrence_f32_wmma(href, stream);
+        const hipError_t herr =
+            c.decode_rows
+                ? kernel::launch_gdn_recurrence_f32_wmma_decode_rows_exact(href,
+                                                                          stream)
+                : (c.decode1
+                       ? kernel::launch_gdn_recurrence_f32_wmma_decode1(href,
+                                                                      stream)
+                       : kernel::launch_gdn_recurrence_f32_wmma(href, stream));
         check(herr == hipSuccess, "host recurrence launch");
         check(hipStreamSynchronize(stream) == hipSuccess, "host launch sync");
 
@@ -383,6 +399,7 @@ int main() {
         std::printf("FAIL: rig open\n");
         return 1;
     }
+    rig.log_enabled = true;
     std::vector<mcu::GpuAqlKernelMetadata> mcu_metas(kCaseCount);
     for (uint32_t i = 0; i < kCaseCount; ++i) {
         if (!rig.load_extra_code(PHASESHIFT_GPU_MCU_GDN_RECURRENCE_HSACO,
@@ -424,7 +441,6 @@ int main() {
     nodes[kCaseCount + 1u].next = static_cast<uint16_t>(kCaseCount + 2u);
     nodes[kCaseCount + 2u].flags = mcu::kMcuNodeEnd;
     if (!rig.upload(nodes, variants)) return 1;
-
     std::vector<mcu::McuGdnRecurrenceInvocation> invocations(kCaseCount);
     for (uint32_t i = 0; i < kCaseCount; ++i) {
         const RecCase& c = kCases[i];
@@ -453,7 +469,20 @@ int main() {
         return 1;
     }
     check(rig.fsm.request_run().ok(), "mcu plan requested");
-    check(rig.fsm.wait_plans(1u, 60000).ok(), "mcu plan completed");
+    if (!rig.fsm.wait_plans(1u, 60000).ok()) {
+        const mcu::GpuMcuFsmState* fstate = rig.fsm.host_state();
+        std::printf("FAIL: mcu plan completed fault=%u pc=%u variant=%u "
+                    "gen=%llu dispatches=%llu\n",
+                    static_cast<uint32_t>(rig.fsm.fault_code()),
+                    rig.fsm.fault_pc(),
+                    fstate != nullptr ? fstate->fault_variant : 0u,
+                    fstate != nullptr
+                        ? static_cast<unsigned long long>(
+                              fstate->fault_generation)
+                        : 0ull,
+                    static_cast<unsigned long long>(rig.fsm.dispatches()));
+        ++g_failed;
+    }
     check(rig.drain_queue(60000), "queue drained");
     check(rig.fsm.fault_code() == mcu::McuFaultCode::none, "no fault");
     check(rig.fsm.dispatches() == static_cast<uint64_t>(kCaseCount) + 1u,
@@ -461,7 +490,8 @@ int main() {
 
     for (uint32_t i = 0; i < kCaseCount; ++i) {
         const RecCase& c = kCases[i];
-        const size_t out_elems = (size_t)kNReq * vdim(c.num_v_heads);
+        const size_t out_elems =
+            (size_t)kNReq * c.rows * vdim(c.num_v_heads);
         const size_t state_elems = (size_t)kNReq * slot_stride(c.num_v_heads);
         std::vector<uint32_t> mcu_out(out_elems), mcu_guard(kGuardBytes / 4u);
         std::vector<uint32_t> st_mcu_h(state_elems);
@@ -487,6 +517,26 @@ int main() {
                     static_cast<int>(diffs == 0u), static_cast<int>(sdiffs == 0u));
     }
 
+    {
+        const uint32_t used = rig.fsm.log_head();
+        uint32_t hist[16] = {};
+        for (uint32_t i = 0u; i < used && i < mcu::kMcuLogLineCount; ++i) {
+            const mcu::McuLogRecord* rec = rig.fsm.log_record(i);
+            if (rec == nullptr || rec->event >= 16u) continue;
+            if (rec->sequence >= static_cast<uint64_t>(used)) continue;
+            hist[rec->event] += 1u;
+        }
+        std::printf("  mcu log records=%u", used);
+        for (uint32_t e = 1u; e < 16u; ++e) {
+            if (hist[e] != 0u) std::printf(" ev%u=%u", e, hist[e]);
+        }
+        std::printf("\n");
+        check(hist[static_cast<uint32_t>(mcu::McuLogEvent::PlanBegin)] >= 1u &&
+                  hist[static_cast<uint32_t>(mcu::McuLogEvent::
+                                                 DispatchPublish)] >=
+                      static_cast<uint32_t>(kCaseCount),
+              "mcu log captured plan and dispatch publish events");
+    }
     check(rig.close(), "rig teardown");
 
     (void)hipStreamDestroy(stream);

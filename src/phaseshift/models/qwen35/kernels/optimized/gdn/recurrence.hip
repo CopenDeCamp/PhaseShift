@@ -538,6 +538,18 @@ void phaseshift_qwen35_gdn_recurrence_wmma_exact(GdnRecurrenceArgs a) {
     gdn_recurrence_wmma_body<false, false>(a);
 }
 
+extern "C" __global__ __launch_bounds__(256)
+__attribute__((amdgpu_num_vgpr(240)))
+void phaseshift_qwen35_gdn_recurrence_wmma_serial_lossy(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<true, true>(a);
+}
+
+extern "C" __global__ __launch_bounds__(256)
+__attribute__((amdgpu_num_vgpr(240)))
+void phaseshift_qwen35_gdn_recurrence_wmma_serial_exact(GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_body<false, true>(a);
+}
+
 struct Decode1Smem {
     float S[gdngfx12::kWk][gdngfx12::kSp];
     float delta[gdngfx12::kWv];
@@ -920,8 +932,8 @@ void phaseshift_qwen35_gdn_recurrence_wmma_commit(GdnRecurrenceArgs a) {
 }
 
 template <uint32_t kRows>
-__global__ __launch_bounds__(gdngfx12::kWthreads, 1u) void
-gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
+__device__ __forceinline__ void gdn_recurrence_wmma_decode_rows_exact_body(
+    const GdnRecurrenceArgs a) {
     namespace g = gdngfx12;
     using g::f32x8_t;
     using g::Frag2;
@@ -1185,6 +1197,30 @@ gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
                 }
         }
     }
+}
+
+template <uint32_t kRows>
+__global__ __launch_bounds__(gdngfx12::kWthreads, 1u) void
+gdn_recurrence_wmma_decode_rows_exact_impl(const GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_decode_rows_exact_body<kRows>(a);
+}
+
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void phaseshift_qwen35_gdn_recurrence_decode_rows_exact_r2(
+    GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_decode_rows_exact_body<2u>(a);
+}
+
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void phaseshift_qwen35_gdn_recurrence_decode_rows_exact_r4(
+    GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_decode_rows_exact_body<4u>(a);
+}
+
+extern "C" __global__ __launch_bounds__(gdngfx12::kWthreads, 1u)
+void phaseshift_qwen35_gdn_recurrence_decode_rows_exact_r8(
+    GdnRecurrenceArgs a) {
+    gdn_recurrence_wmma_decode_rows_exact_body<8u>(a);
 }
 
 bool gdn_recurrence_lossy_enabled() {

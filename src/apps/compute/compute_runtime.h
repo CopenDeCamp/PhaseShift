@@ -2,6 +2,7 @@
 
 #include <phaseshift/models/qwen35/model/qwen35_model.h>
 #include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
+#include <phaseshift/models/qwen35/runtime/decode_backend.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
@@ -38,6 +39,8 @@ struct Qwen35RuntimeConfig {
     uint32_t max_scheduled_output_rows = 0;
     std::array<uint32_t, qwen35::kMaxTargetHiddenTaps> target_hidden_taps{};
     uint32_t target_hidden_tap_count = 0;
+    qwen35::runtime::DecodeBackend decode_backend =
+        qwen35::runtime::DecodeBackend::Host;
 };
 
 class Qwen35ComputeRuntime {

@@ -119,6 +119,13 @@ struct PhysicalPsq4Launch {
 enum class PhysicalPsq8Variant : uint8_t {
     Decode1Bf16 = 0,
     Unsupported = 1,
+    RowBlock1Bf16 = 2,
+    RowBlock2Bf16 = 3,
+    RowBlock4Bf16 = 4,
+    RowBlock8Bf16 = 5,
+    Prefill2DN64K64 = 6,
+    Prefill2DN128K64 = 7,
+    Prefill2DN128K128 = 8,
 };
 
 struct PhysicalPsq8Launch {
@@ -142,6 +149,7 @@ struct PhysicalPsq8Launch {
     bool use_decode1 = false;
     uint32_t unroll = 0;
     uint32_t grid = 0;
+    uint32_t grid_y = 1;
     uint32_t workgroup = 0;
 };
 

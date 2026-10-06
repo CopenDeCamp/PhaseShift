@@ -148,7 +148,7 @@ bool run_prefill_then_decode(
     ps::qwen35::runtime::DecodeBackend backend,
     const char* label,
     DecodeResult* out) {
-    executor.config.backend = ps::qwen35::runtime::DecodeBackend::Host;
+    executor.config.backend = backend;
 
     auto seq_result = ps::qwen35::create_paged_sequence_state(
         seq_pool, gdn_pool, kv_pool,
@@ -222,7 +222,7 @@ bool run_mixed_decode_prefill(
     ps::qwen35::runtime::DecodeBackend backend,
     const char* label,
     DecodeResult* out) {
-    executor.config.backend = ps::qwen35::runtime::DecodeBackend::Host;
+    executor.config.backend = backend;
 
     auto decode_seq_result = ps::qwen35::create_paged_sequence_state(
         seq_pool, gdn_pool, kv_pool,
@@ -601,6 +601,13 @@ int main() {
                 static_cast<unsigned long long>(counters.plan_switch_count),
                 static_cast<unsigned long long>(counters.mcu_run_count),
                 static_cast<unsigned long long>(counters.host_fallback_count));
+            std::printf(
+                "production decode: full_plan=%d plan=[%u,%u) of %u "
+                "host_prefix=%u host_suffix=%u\n",
+                executor.mcu_state->full_plan ? 1 : 0,
+                executor.mcu_state->plan_begin, executor.mcu_state->plan_end,
+                executor.mcu_state->plan_total, executor.mcu_state->plan_begin,
+                executor.mcu_state->plan_total - executor.mcu_state->plan_end);
             check(counters.mcu_run_count >= 1u, "mcu hybrid path actually ran");
             check(counters.plan_upload_count >= 1u,
                   "mcu plan was uploaded to the fsm");

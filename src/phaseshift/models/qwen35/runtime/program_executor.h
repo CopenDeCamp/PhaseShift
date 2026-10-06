@@ -18,6 +18,8 @@ namespace ps::qwen35::runtime {
 
 constexpr uint64_t kDecodeAttnPartialBytes = 32u * 1024u * 1024u;
 
+inline constexpr uint32_t kHostExternalValueCapacity = 16u;
+
 struct HostResolvedValue {
     void* ptr = nullptr;
     uint32_t row_stride = 0;
@@ -50,6 +52,8 @@ struct HostExecutionContext {
     uint32_t external_input_count = 0;
     void* const* external_outputs = nullptr;
     uint32_t external_output_count = 0;
+    const void* external_input_storage[kHostExternalValueCapacity] = {};
+    void* external_output_storage[kHostExternalValueCapacity] = {};
     uint8_t* workspace = nullptr;
     uint64_t workspace_bytes = 0;
     float* scratch = nullptr;
@@ -81,6 +85,9 @@ struct HostExecutionContext {
     ::ps::runtime::ExecutionRole role = ::ps::runtime::ExecutionRole::Decode;
     ::ps::runtime::VerifyNumericMode numeric_mode =
         ::ps::runtime::VerifyNumericMode::Fast;
+    const ::ps::runtime::DeviceRequestDescriptor* staged_requests = nullptr;
+    uint32_t staged_request_count = 0;
+    uint32_t staged_verify_request_count = 0;
     GdnSpecHistoryDeviceView gdn_spec_history{};
     GdnCompactLogDeviceView gdn_compact{};
 };

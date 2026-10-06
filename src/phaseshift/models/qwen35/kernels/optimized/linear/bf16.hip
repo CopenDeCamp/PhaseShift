@@ -25,6 +25,11 @@ constexpr uint32_t kSplitThreadsPerBlock = 32u * kSplitWarps;
 
 constexpr uint32_t kExactRowsThreads = 256u;
 static_assert(kExactRowsThreads == kBf16GemmExactRowsThreads);
+static_assert(kTileOut == kBf16WmmaOutTile);
+static_assert(kTileRow == kBf16WmmaRowTile);
+static_assert(kWideRowTiles == kBf16WmmaWideRowTiles);
+static_assert(kThreadsPerBlock == kBf16WmmaThreads);
+static_assert(kSplitThreadsPerBlock == kBf16SplitKWmmaThreads);
 
 __device__ __forceinline__ uint64_t load_bf16x4_masked(
     const ps::bf16_t* base, uint32_t start_k, uint32_t logical_k) {
@@ -100,7 +105,7 @@ __device__ __forceinline__ void gemm_bf16_wmma_ktiles(
 }
 
 template <uint32_t kRowTiles>
-__global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
+__device__ __forceinline__ void bf16_wmma_body(
     const ps::bf16_t* __restrict__ weight,
     const ps::bf16_t* __restrict__ input,
     void* __restrict__ output,
@@ -187,7 +192,23 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
     }
 }
 
-__global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_kernel(
+template <uint32_t kRowTiles>
+__global__ void __launch_bounds__(kThreadsPerBlock) gemm_bf16_wmma_kernel(
+    const ps::bf16_t* __restrict__ weight,
+    const ps::bf16_t* __restrict__ input,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k,
+    const uint32_t input_row_stride,
+    const uint32_t output_row_stride) {
+    bf16_wmma_body<kRowTiles>(weight, input, output, output_dtype, rows,
+                              out_features, k, input_row_stride,
+                              output_row_stride);
+}
+
+__device__ __forceinline__ void bf16_splitk_wmma_body(
     const ps::bf16_t* __restrict__ weight,
     const ps::bf16_t* __restrict__ input,
     void* __restrict__ output,
@@ -268,6 +289,20 @@ __global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_k
             }
         }
     }
+}
+
+__global__ void __launch_bounds__(kSplitThreadsPerBlock) gemm_bf16_splitk_wmma_kernel(
+    const ps::bf16_t* __restrict__ weight,
+    const ps::bf16_t* __restrict__ input,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k,
+    const uint32_t input_row_stride,
+    const uint32_t output_row_stride) {
+    bf16_splitk_wmma_body(weight, input, output, output_dtype, rows,
+                          out_features, k, input_row_stride, output_row_stride);
 }
 
 template <uint32_t kRows>
@@ -463,6 +498,33 @@ PS_BF16_EXACT_ROWS_ENTRY(16)
 
 #undef PS_BF16_EXACT_ROWS_ENTRY
 
+extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
+void phaseshift_qwen35_gemm_bf16_wmma(Bf16GemmWmmaArgs args) {
+    bf16_wmma_body<1u>(
+        static_cast<const ps::bf16_t*>(args.weight),
+        static_cast<const ps::bf16_t*>(args.input), args.output,
+        args.output_dtype, args.rows, args.out_features, args.k,
+        args.input_row_stride, args.output_row_stride);
+}
+
+extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
+void phaseshift_qwen35_gemm_bf16_wmma_wide(Bf16GemmWmmaArgs args) {
+    bf16_wmma_body<kWideRowTiles>(
+        static_cast<const ps::bf16_t*>(args.weight),
+        static_cast<const ps::bf16_t*>(args.input), args.output,
+        args.output_dtype, args.rows, args.out_features, args.k,
+        args.input_row_stride, args.output_row_stride);
+}
+
+extern "C" __global__ __launch_bounds__(kSplitThreadsPerBlock)
+void phaseshift_qwen35_gemm_bf16_splitk_wmma(Bf16GemmWmmaArgs args) {
+    bf16_splitk_wmma_body(
+        static_cast<const ps::bf16_t*>(args.weight),
+        static_cast<const ps::bf16_t*>(args.input), args.output,
+        args.output_dtype, args.rows, args.out_features, args.k,
+        args.input_row_stride, args.output_row_stride);
+}
+
 hipError_t launch_gemm_bf16(
     const Bf16GemmConfig& config,
     const bf16_t* weight,
@@ -478,7 +540,7 @@ hipError_t launch_gemm_bf16(
     if (rows == 0 || out_features == 0 || k == 0)
         return hipSuccess;
 
-    const uint32_t out_tiles = (out_features + kTileOut - 1u) / kTileOut;
+    const uint32_t out_tiles = bf16_wmma_grid_x(out_features);
 
     switch (config.id) {
     case Bf16GemmConfigId::ExactRows: {
@@ -490,7 +552,7 @@ hipError_t launch_gemm_bf16(
             input_row_stride, output_row_stride, stream);
     }
     case Bf16GemmConfigId::WmmaKPartition: {
-        const dim3 grid(out_tiles, (rows + kTileRow - 1u) / kTileRow, 1);
+        const dim3 grid(out_tiles, bf16_wmma_grid_y(rows, 1u), 1);
         gemm_bf16_splitk_wmma_kernel<<<grid, kSplitThreadsPerBlock, 0, stream>>>(
             weight, input, output,
             static_cast<uint32_t>(output_dtype), rows, out_features, k,
@@ -498,8 +560,7 @@ hipError_t launch_gemm_bf16(
         return hipGetLastError();
     }
     case Bf16GemmConfigId::WmmaWide: {
-        const dim3 grid(out_tiles,
-                        (rows + kWideRowTiles * kTileRow - 1u) / (kWideRowTiles * kTileRow), 1);
+        const dim3 grid(out_tiles, bf16_wmma_grid_y(rows, kWideRowTiles), 1);
         gemm_bf16_wmma_kernel<kWideRowTiles><<<grid, kThreadsPerBlock, 0, stream>>>(
             weight, input, output,
             static_cast<uint32_t>(output_dtype), rows, out_features, k,
@@ -508,7 +569,7 @@ hipError_t launch_gemm_bf16(
     }
     case Bf16GemmConfigId::Wmma:
     default: {
-        const dim3 grid(out_tiles, (rows + kTileRow - 1u) / kTileRow, 1);
+        const dim3 grid(out_tiles, bf16_wmma_grid_y(rows, 1u), 1);
         gemm_bf16_wmma_kernel<1u><<<grid, kThreadsPerBlock, 0, stream>>>(
             weight, input, output,
             static_cast<uint32_t>(output_dtype), rows, out_features, k,

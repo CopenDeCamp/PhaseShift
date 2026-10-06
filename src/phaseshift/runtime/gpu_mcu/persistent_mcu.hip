@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <thread>
 #include <utility>
 
@@ -460,6 +461,54 @@ uint64_t GpuMcuPersistentMcu::batches_committed() const noexcept {
     return host_state_ != nullptr
                ? host_state_->execution_telemetry.batches_committed
                : 0u;
+}
+
+GpuMcuBatchCommitTelemetry GpuMcuPersistentMcu::commit_telemetry()
+    const noexcept {
+    return host_state_ != nullptr ? host_state_->commit_telemetry
+                                  : GpuMcuBatchCommitTelemetry{};
+}
+
+void GpuMcuPersistentMcu::dump_state(std::FILE* out) const noexcept {
+    if (out == nullptr || host_state_ == nullptr) return;
+    std::fprintf(out,
+                 "[mcu-persistent] started=%u iterations=%llu heartbeat=%llu "
+                 "stop=%u execution_enabled=%u execution_fsm=%p "
+                 "batch_context=%p batch_ready_epoch=%p "
+                 "ready=%llu active=%llu epoch=%llu wrap_faulted=%u "
+                 "dispatched=%llu completed=%llu committed=%llu failed=%llu\n",
+                 static_cast<uint32_t>(host_state_->started),
+                 static_cast<unsigned long long>(host_state_->iterations),
+                 static_cast<unsigned long long>(host_state_->heartbeat),
+                 static_cast<uint32_t>(
+                     __atomic_load_n(&host_state_->stop_requested,
+                                     __ATOMIC_ACQUIRE)),
+                 host_state_->execution_enabled,
+                 static_cast<const void*>(host_state_->execution_fsm),
+                 static_cast<const void*>(host_state_->batch_context),
+                 static_cast<const void*>(host_state_->batch_ready_epoch),
+                 host_state_->batch_ready_epoch != nullptr
+                     ? static_cast<unsigned long long>(
+                           *host_state_->batch_ready_epoch)
+                     : 0ull,
+                 static_cast<unsigned long long>(
+                     host_state_->active_batch_ready_epoch),
+                 static_cast<unsigned long long>(
+                     host_state_->execution_epoch),
+                 host_state_->execution_wrap_faulted,
+                 static_cast<unsigned long long>(
+                     host_state_->execution_telemetry.batches_dispatched),
+                 static_cast<unsigned long long>(
+                     host_state_->execution_telemetry.batches_completed),
+                 static_cast<unsigned long long>(
+                     host_state_->execution_telemetry.batches_committed),
+                 static_cast<unsigned long long>(
+                     host_state_->execution_telemetry.batches_failed));
+    if (host_state_->batch_context != nullptr) {
+        std::fprintf(out, "[mcu-persistent] actual_rows=%u num_requests=%u\n",
+                     host_state_->batch_context->actual_rows,
+                     host_state_->batch_context->num_requests);
+    }
 }
 
 uint64_t GpuMcuPersistentMcu::committed_tokens() const noexcept {

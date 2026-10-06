@@ -25,7 +25,7 @@ __device__ __forceinline__ size_t fp4_act_off(uint32_t r, uint32_t code_stride) 
 }
 
 template <int MB>
-__global__ void __launch_bounds__(kThreadsPerBlock) gemm_psq8_w8a8_wmma_kernel(
+__device__ __forceinline__ void psq8_mb_body(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
     const uint8_t* __restrict__ activation_codes,
@@ -158,9 +158,30 @@ __global__ void __launch_bounds__(kThreadsPerBlock) gemm_psq8_w8a8_wmma_kernel(
     }
 }
 
+template <int MB>
+__global__ void __launch_bounds__(kThreadsPerBlock) gemm_psq8_w8a8_wmma_kernel(
+    const uint8_t* __restrict__ weight_codes,
+    const uint8_t* __restrict__ weight_scales,
+    const uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k_padded,
+    const uint32_t weight_scale_stride,
+    const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
+    const uint32_t output_row_stride) {
+    psq8_mb_body<MB>(weight_codes, weight_scales, activation_codes,
+                     activation_scales, output, output_dtype, rows,
+                     out_features, k_padded, weight_scale_stride,
+                     activation_code_stride, activation_scale_stride,
+                     output_row_stride);
+}
+
 template <class ActivationPolicy, class EpiloguePolicy>
-__global__ void __launch_bounds__(kThreadsPerBlock)
-gemm_psq8_w8a8_wmma_rowblock1_policy_kernel(
+__device__ __forceinline__ void psq8_rowblock1_body(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
     const uint8_t* __restrict__ activation_codes,
@@ -274,6 +295,31 @@ gemm_psq8_w8a8_wmma_rowblock1_policy_kernel(
     }
 }
 
+template <class ActivationPolicy, class EpiloguePolicy>
+__global__ void __launch_bounds__(kThreadsPerBlock)
+gemm_psq8_w8a8_wmma_rowblock1_policy_kernel(
+    const uint8_t* __restrict__ weight_codes,
+    const uint8_t* __restrict__ weight_scales,
+    const uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const uint32_t output_dtype,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k_padded,
+    const uint32_t weight_scale_stride,
+    const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
+    const uint32_t output_row_stride,
+    const void* __restrict__ epilogue_residual,
+    const uint32_t epilogue_residual_row_stride) {
+    psq8_rowblock1_body<ActivationPolicy, EpiloguePolicy>(
+        weight_codes, weight_scales, activation_codes, activation_scales,
+        output, output_dtype, rows, out_features, k_padded, weight_scale_stride,
+        activation_code_stride, activation_scale_stride, output_row_stride,
+        epilogue_residual, epilogue_residual_row_stride);
+}
+
 template <Psq8GemmOutputDType kOutputType, int kUnroll, class ActivationPolicy,
           class EpiloguePolicy>
 __device__ __forceinline__ void psq8_decode1_body(
@@ -357,9 +403,11 @@ __device__ __forceinline__ void psq8_local_barrier() {
 }
 
 constexpr uint32_t k2dThreads = 256u;
+static_assert(k2dThreads == kPsq8Prefill2DThreads);
+static_assert(16u * kTileRow == kPsq8Prefill2DRowsPerBlock);
 
 template <bool kGuarded, uint32_t kOutBlock, uint32_t kKChunk>
-__global__ void __launch_bounds__(k2dThreads) gemm_psq8_w8a8_wmma_prefill_2d_kernel(
+__device__ __forceinline__ void psq8_prefill2d_body(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
     const uint8_t* __restrict__ activation_codes,
@@ -516,6 +564,25 @@ __global__ void __launch_bounds__(k2dThreads) gemm_psq8_w8a8_wmma_prefill_2d_ker
 }
 }
 
+template <bool kGuarded, uint32_t kOutBlock, uint32_t kKChunk>
+__global__ void __launch_bounds__(k2dThreads)
+    gemm_psq8_w8a8_wmma_prefill_2d_kernel(
+        const uint8_t* __restrict__ weight_codes,
+        const uint8_t* __restrict__ weight_scales,
+        const uint8_t* __restrict__ activation_codes,
+        const float* __restrict__ activation_scales, void* __restrict__ output,
+        const uint32_t output_dtype, const uint32_t rows,
+        const uint32_t out_features, const uint32_t k_padded,
+        const uint32_t weight_scale_stride,
+        const uint32_t activation_code_stride,
+        const uint32_t activation_scale_stride,
+        const uint32_t output_row_stride) {
+    psq8_prefill2d_body<kGuarded, kOutBlock, kKChunk>(
+        weight_codes, weight_scales, activation_codes, activation_scales, output,
+        output_dtype, rows, out_features, k_padded, weight_scale_stride,
+        activation_code_stride, activation_scale_stride, output_row_stride);
+}
+
 extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
 void phaseshift_qwen35_psq8_decode1_bf16_u8(Psq8Decode1Bf16Args args) {
     psq8_decode1_body<Psq8GemmOutputDType::BF16, 8, CanonicalA8ActivationPolicy,
@@ -527,12 +594,96 @@ void phaseshift_qwen35_psq8_decode1_bf16_u8(Psq8Decode1Bf16Args args) {
         args.k_padded, args.weight_scale_stride, nullptr, 0u);
 }
 
+extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
+void phaseshift_qwen35_psq8_rowblock1_bf16(Psq8MultiRowBf16Args args) {
+    psq8_rowblock1_body<CanonicalA8ActivationPolicy, CanonicalStoreEpilogue>(
+        static_cast<const uint8_t*>(args.weight_codes),
+        static_cast<const uint8_t*>(args.weight_scales),
+        static_cast<const uint8_t*>(args.activation_codes),
+        static_cast<const float*>(args.activation_scales), args.output,
+        args.output_dtype, args.rows, args.out_features, args.k_padded,
+        args.weight_scale_stride, args.activation_code_stride,
+        args.activation_scale_stride, args.output_row_stride, nullptr, 0u);
+}
+
+extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
+void phaseshift_qwen35_psq8_rowblock2_bf16(Psq8MultiRowBf16Args args) {
+    psq8_mb_body<2>(static_cast<const uint8_t*>(args.weight_codes),
+                    static_cast<const uint8_t*>(args.weight_scales),
+                    static_cast<const uint8_t*>(args.activation_codes),
+                    static_cast<const float*>(args.activation_scales), args.output,
+                    args.output_dtype, args.rows, args.out_features, args.k_padded,
+                    args.weight_scale_stride, args.activation_code_stride,
+                    args.activation_scale_stride, args.output_row_stride);
+}
+
+extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
+void phaseshift_qwen35_psq8_rowblock4_bf16(Psq8MultiRowBf16Args args) {
+    psq8_mb_body<4>(static_cast<const uint8_t*>(args.weight_codes),
+                    static_cast<const uint8_t*>(args.weight_scales),
+                    static_cast<const uint8_t*>(args.activation_codes),
+                    static_cast<const float*>(args.activation_scales), args.output,
+                    args.output_dtype, args.rows, args.out_features, args.k_padded,
+                    args.weight_scale_stride, args.activation_code_stride,
+                    args.activation_scale_stride, args.output_row_stride);
+}
+
+extern "C" __global__ __launch_bounds__(kThreadsPerBlock)
+void phaseshift_qwen35_psq8_rowblock8_bf16(Psq8MultiRowBf16Args args) {
+    psq8_mb_body<8>(static_cast<const uint8_t*>(args.weight_codes),
+                    static_cast<const uint8_t*>(args.weight_scales),
+                    static_cast<const uint8_t*>(args.activation_codes),
+                    static_cast<const float*>(args.activation_scales), args.output,
+                    args.output_dtype, args.rows, args.out_features, args.k_padded,
+                    args.weight_scale_stride, args.activation_code_stride,
+                    args.activation_scale_stride, args.output_row_stride);
+}
+
+extern "C" __global__ __launch_bounds__(k2dThreads)
+void phaseshift_qwen35_psq8_prefill2d_n64k64(Psq8MultiRowBf16Args args) {
+    psq8_prefill2d_body<false, kPsq8GemmPrefill2dBlock64,
+                        kPsq8GemmPrefill2dBlock64>(
+        static_cast<const uint8_t*>(args.weight_codes),
+        static_cast<const uint8_t*>(args.weight_scales),
+        static_cast<const uint8_t*>(args.activation_codes),
+        static_cast<const float*>(args.activation_scales), args.output,
+        args.output_dtype, args.rows, args.out_features, args.k_padded,
+        args.weight_scale_stride, args.activation_code_stride,
+        args.activation_scale_stride, args.output_row_stride);
+}
+
+extern "C" __global__ __launch_bounds__(k2dThreads)
+void phaseshift_qwen35_psq8_prefill2d_n128k64(Psq8MultiRowBf16Args args) {
+    psq8_prefill2d_body<false, kPsq8GemmPrefill2dBlock128,
+                        kPsq8GemmPrefill2dBlock64>(
+        static_cast<const uint8_t*>(args.weight_codes),
+        static_cast<const uint8_t*>(args.weight_scales),
+        static_cast<const uint8_t*>(args.activation_codes),
+        static_cast<const float*>(args.activation_scales), args.output,
+        args.output_dtype, args.rows, args.out_features, args.k_padded,
+        args.weight_scale_stride, args.activation_code_stride,
+        args.activation_scale_stride, args.output_row_stride);
+}
+
+extern "C" __global__ __launch_bounds__(k2dThreads)
+void phaseshift_qwen35_psq8_prefill2d_n128k128(Psq8MultiRowBf16Args args) {
+    psq8_prefill2d_body<false, kPsq8GemmPrefill2dBlock128,
+                        kPsq8GemmPrefill2dBlock128>(
+        static_cast<const uint8_t*>(args.weight_codes),
+        static_cast<const uint8_t*>(args.weight_scales),
+        static_cast<const uint8_t*>(args.activation_codes),
+        static_cast<const float*>(args.activation_scales), args.output,
+        args.output_dtype, args.rows, args.out_features, args.k_padded,
+        args.weight_scale_stride, args.activation_code_stride,
+        args.activation_scale_stride, args.output_row_stride);
+}
+
 namespace {
 
 #define PSQ8_MB_LAUNCH(MB)                                                      \
     do {                                                                        \
-        const dim3 grid((out_features + kTileOut - 1u) / kTileOut,              \
-                        (rows + (MB) * kTileRow - 1u) / ((MB) * kTileRow), 1);  \
+        const dim3 grid(psq8_rowblock_grid_x(out_features),                      \
+                        psq8_rowblock_grid_y(rows, (MB)), 1);                     \
         gemm_psq8_w8a8_wmma_kernel<(MB)>                                        \
             <<<grid, kThreadsPerBlock, 0, stream>>>(                            \
                 weight_codes, weight_scales, acodes, activation_scales, output, \
@@ -545,8 +696,8 @@ namespace {
 
 #define PSQ8_ROWBLOCK1_POLICY_LAUNCH()                                           \
     do {                                                                         \
-        const dim3 grid((out_features + kTileOut - 1u) / kTileOut,               \
-                        (rows + kTileRow - 1u) / kTileRow, 1);                   \
+        const dim3 grid(psq8_rowblock_grid_x(out_features),                      \
+                        psq8_rowblock_grid_y(rows, 1), 1);                        \
         gemm_psq8_w8a8_wmma_rowblock1_policy_kernel<                             \
             CanonicalA8ActivationPolicy, CanonicalStoreEpilogue>                 \
             <<<grid, kThreadsPerBlock, 0, stream>>>(                             \
@@ -578,10 +729,11 @@ hipError_t launch_gemm_psq8_w8a8_wmma_impl(
         return hipSuccess;
 #define PSQ8_2D_LAUNCH(OB, KC)                                                   \
     do {                                                                         \
-        if ((rows % (16u * kTileRow)) != 0u || (out_features % (OB)) != 0u ||    \
-            (k_padded % (KC)) != 0u)                                             \
+        if ((rows % kPsq8Prefill2DRowsPerBlock) != 0u ||                         \
+            (out_features % (OB)) != 0u || (k_padded % (KC)) != 0u)              \
             return hipErrorNotSupported;                                         \
-        const dim3 grid(out_features / (OB), rows / (16u * kTileRow), 1);        \
+        const dim3 grid(psq8_prefill2d_grid_x(out_features, (OB)),               \
+                        psq8_prefill2d_grid_y(rows), 1);                         \
         gemm_psq8_w8a8_wmma_prefill_2d_kernel<false, (OB), (KC)>                 \
             <<<grid, k2dThreads, 0, stream>>>(                                   \
                 weight_codes, weight_scales, acodes, activation_scales, output,  \

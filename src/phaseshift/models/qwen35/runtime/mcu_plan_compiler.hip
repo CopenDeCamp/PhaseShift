@@ -1,4 +1,5 @@
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
+#include <phaseshift/models/qwen35/runtime/mcu_kernel_registry.h>
 
 #include <phaseshift/models/qwen35/runtime/mcu_layer_range.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
@@ -11,6 +12,8 @@
 #include <phaseshift/models/qwen35/kernels/optimized/sampling.h>
 
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ps::qwen35::runtime {
@@ -68,6 +71,16 @@ static_assert(offsetof(mcu::McuBf16ExactRowsInvocation, input_row_stride) ==
               offsetof(::ps::kernel::Bf16GemmExactRowsArgs, input_row_stride));
 static_assert(offsetof(mcu::McuBf16ExactRowsInvocation, output_row_stride) ==
               offsetof(::ps::kernel::Bf16GemmExactRowsArgs, output_row_stride));
+static_assert(sizeof(mcu::McuBf16WmmaInvocation) ==
+              sizeof(::ps::kernel::Bf16GemmWmmaArgs));
+static_assert(alignof(mcu::McuBf16WmmaInvocation) ==
+              alignof(::ps::kernel::Bf16GemmWmmaArgs));
+static_assert(offsetof(mcu::McuBf16WmmaInvocation, rows) ==
+              offsetof(::ps::kernel::Bf16GemmWmmaArgs, rows));
+static_assert(offsetof(mcu::McuBf16WmmaInvocation, out_features) ==
+              offsetof(::ps::kernel::Bf16GemmWmmaArgs, out_features));
+static_assert(offsetof(mcu::McuBf16WmmaInvocation, output_row_stride) ==
+              offsetof(::ps::kernel::Bf16GemmWmmaArgs, output_row_stride));
 static_assert(sizeof(mcu::McuL2NormalizeInvocation) ==
               sizeof(::ps::kernel::L2NormalizeArgs));
 static_assert(offsetof(mcu::McuL2NormalizeInvocation, input) ==
@@ -102,6 +115,18 @@ static_assert(offsetof(mcu::McuEmbeddingBf16Invocation, hidden_size) ==
               offsetof(::ps::kernel::EmbeddingBf16Args, hidden_size));
 static_assert(offsetof(mcu::McuEmbeddingBf16Invocation, output_row_stride) ==
               offsetof(::ps::kernel::EmbeddingBf16Args, output_row_stride));
+static_assert(sizeof(mcu::McuEmbeddingPsq8Invocation) ==
+              sizeof(::ps::kernel::EmbeddingPsq8Args));
+static_assert(alignof(mcu::McuEmbeddingPsq8Invocation) ==
+              alignof(::ps::kernel::EmbeddingPsq8Args));
+static_assert(offsetof(mcu::McuEmbeddingPsq8Invocation, codes) ==
+              offsetof(::ps::kernel::EmbeddingPsq8Args, codes));
+static_assert(offsetof(mcu::McuEmbeddingPsq8Invocation, error_word) ==
+              offsetof(::ps::kernel::EmbeddingPsq8Args, error_word));
+static_assert(offsetof(mcu::McuEmbeddingPsq8Invocation, rows) ==
+              offsetof(::ps::kernel::EmbeddingPsq8Args, rows));
+static_assert(offsetof(mcu::McuEmbeddingPsq8Invocation, output_row_stride) ==
+              offsetof(::ps::kernel::EmbeddingPsq8Args, output_row_stride));
 static_assert(sizeof(mcu::McuOutputGatherBf16Invocation) ==
               sizeof(::ps::kernel::OutputGatherBf16McuArgs));
 static_assert(alignof(mcu::McuOutputGatherBf16Invocation) ==
@@ -290,6 +315,18 @@ static_assert(offsetof(mcu::McuPsq4MultiRowInvocation, activation_scale_stride) 
               offsetof(::ps::kernel::Psq4MultiRowBf16Args, activation_scale_stride));
 static_assert(offsetof(mcu::McuPsq4MultiRowInvocation, output_row_stride) ==
               offsetof(::ps::kernel::Psq4MultiRowBf16Args, output_row_stride));
+static_assert(sizeof(mcu::McuPsq4MultiRowInvocation) ==
+              sizeof(::ps::kernel::Psq8MultiRowBf16Args));
+static_assert(alignof(mcu::McuPsq4MultiRowInvocation) ==
+              alignof(::ps::kernel::Psq8MultiRowBf16Args));
+static_assert(offsetof(mcu::McuPsq4MultiRowInvocation, output_dtype) ==
+              offsetof(::ps::kernel::Psq8MultiRowBf16Args, output_dtype));
+static_assert(offsetof(mcu::McuPsq4MultiRowInvocation, rows) ==
+              offsetof(::ps::kernel::Psq8MultiRowBf16Args, rows));
+static_assert(offsetof(mcu::McuPsq4MultiRowInvocation, activation_code_stride) ==
+              offsetof(::ps::kernel::Psq8MultiRowBf16Args, activation_code_stride));
+static_assert(offsetof(mcu::McuPsq4MultiRowInvocation, output_row_stride) ==
+              offsetof(::ps::kernel::Psq8MultiRowBf16Args, output_row_stride));
 
 namespace {
 
@@ -421,9 +458,33 @@ static Status compile_mcu_plan_impl(const Program& program,
             return Status::unsupported(
                 "embedding dispatch is not applicable on the mcu", __FILE__,
                 __LINE__);
+        if (launch.storage == EmbeddingStorage::Psq8) {
+            auto inv = mcu_plan_value<mcu::McuEmbeddingPsq8Invocation>();
+            inv.codes = launch.codes;
+            inv.scales = launch.scales;
+            inv.token_ids = launch.token_ids;
+            inv.output = launch.output;
+            inv.error_word = reinterpret_cast<uint64_t>(ctx.error_word);
+            inv.codes_row_stride_bytes = launch.codes_row_stride_bytes;
+            inv.scale_row_stride_bytes = launch.scale_row_stride_bytes;
+            inv.rows = launch.rows;
+            inv.vocab_size = launch.vocab_size;
+            inv.hidden_size = launch.hidden_size;
+            inv.output_row_stride = launch.output_row_stride;
+            const uint32_t index =
+                static_cast<uint32_t>(out.embedding_psq8.size());
+            out.embedding_psq8.push_back(inv);
+            const uint16_t variant_id = mark_variant(
+                out, McuCompiledVariantKind::EmbeddingPsq8, launch.rows,
+                ::ps::kernel::kEmbeddingThreads);
+            push_dispatch(make_dispatch_node(
+                out.nodes.size(), variant_id,
+                mcu::kMcuKernargRecipeEmbeddingPsq8, index));
+            return Status::make_ok();
+        }
         if (launch.storage != EmbeddingStorage::Bf16)
             return Status::unsupported(
-                "embedding storage is not BF16 on the mcu", __FILE__, __LINE__);
+                "embedding storage has no mcu entrypoint", __FILE__, __LINE__);
         auto inv = mcu_plan_value<mcu::McuEmbeddingBf16Invocation>();
         inv.table = launch.table;
         inv.token_ids = launch.token_ids;
@@ -739,27 +800,80 @@ static Status compile_mcu_plan_impl(const Program& program,
                     return Status::unsupported(
                         "psq8 dispatch is not applicable on the mcu", __FILE__,
                         __LINE__);
-                if (launch.variant != PhysicalPsq8Variant::Decode1Bf16 ||
-                    launch.unroll != 8u)
-                    return Status::unsupported(
-                        "psq8 physical variant has no mcu entrypoint", __FILE__,
-                        __LINE__);
-                auto inv = mcu_plan_value<mcu::McuPsq4Decode1Invocation>();
-                inv.weight_codes = launch.weight_codes;
-                inv.weight_scales = launch.weight_scales;
-                inv.activation_codes = launch.activation_codes;
-                inv.activation_scales = launch.activation_scales;
-                inv.output = launch.output;
-                inv.k_padded = launch.k_padded;
-                inv.weight_scale_stride = launch.weight_scale_stride;
-                const uint32_t index = static_cast<uint32_t>(out.psq4.size());
-                out.psq4.push_back(inv);
-                const uint16_t variant_id = mark_variant(
-                    out, McuCompiledVariantKind::Psq8Decode1Bf16U8, launch.grid,
-                    launch.workgroup);
+                if (launch.variant == PhysicalPsq8Variant::Decode1Bf16) {
+                    if (launch.unroll != 8u)
+                        return Status::unsupported(
+                            "psq8 physical variant has no mcu entrypoint", __FILE__,
+                            __LINE__);
+                    auto inv = mcu_plan_value<mcu::McuPsq4Decode1Invocation>();
+                    inv.weight_codes = launch.weight_codes;
+                    inv.weight_scales = launch.weight_scales;
+                    inv.activation_codes = launch.activation_codes;
+                    inv.activation_scales = launch.activation_scales;
+                    inv.output = launch.output;
+                    inv.k_padded = launch.k_padded;
+                    inv.weight_scale_stride = launch.weight_scale_stride;
+                    const uint32_t index = static_cast<uint32_t>(out.psq4.size());
+                    out.psq4.push_back(inv);
+                    const uint16_t variant_id = mark_variant(
+                        out, McuCompiledVariantKind::Psq8Decode1Bf16U8,
+                        launch.grid, launch.workgroup);
+                    push_dispatch(make_dispatch_node(
+                        out.nodes.size(), variant_id,
+                        mcu::kMcuKernargRecipePsq8Decode1Bf16U8, index));
+                    break;
+                }
+                McuCompiledVariantKind multi_kind{};
+                switch (launch.variant) {
+                    case PhysicalPsq8Variant::RowBlock1Bf16:
+                        multi_kind = McuCompiledVariantKind::Psq8RowBlock1Bf16;
+                        break;
+                    case PhysicalPsq8Variant::RowBlock2Bf16:
+                        multi_kind = McuCompiledVariantKind::Psq8RowBlock2Bf16;
+                        break;
+                    case PhysicalPsq8Variant::RowBlock4Bf16:
+                        multi_kind = McuCompiledVariantKind::Psq8RowBlock4Bf16;
+                        break;
+                    case PhysicalPsq8Variant::RowBlock8Bf16:
+                        multi_kind = McuCompiledVariantKind::Psq8RowBlock8Bf16;
+                        break;
+                    case PhysicalPsq8Variant::Prefill2DN64K64:
+                        multi_kind = McuCompiledVariantKind::Psq8Prefill2DN64K64;
+                        break;
+                    case PhysicalPsq8Variant::Prefill2DN128K64:
+                        multi_kind = McuCompiledVariantKind::Psq8Prefill2DN128K64;
+                        break;
+                    case PhysicalPsq8Variant::Prefill2DN128K128:
+                        multi_kind =
+                            McuCompiledVariantKind::Psq8Prefill2DN128K128;
+                        break;
+                    default:
+                        return Status::unsupported(
+                            "psq8 physical variant has no mcu entrypoint", __FILE__,
+                            __LINE__);
+                }
+                auto minv = mcu_plan_value<mcu::McuPsq4MultiRowInvocation>();
+                minv.weight_codes = launch.weight_codes;
+                minv.weight_scales = launch.weight_scales;
+                minv.activation_codes = launch.activation_codes;
+                minv.activation_scales = launch.activation_scales;
+                minv.output = launch.output;
+                minv.output_dtype = static_cast<uint32_t>(launch.output_dtype);
+                minv.rows = launch.rows;
+                minv.out_features = launch.out_features;
+                minv.k_padded = launch.k_padded;
+                minv.weight_scale_stride = launch.weight_scale_stride;
+                minv.activation_code_stride = launch.activation_code_stride;
+                minv.activation_scale_stride = launch.activation_scale_stride;
+                minv.output_row_stride = launch.output_row_stride;
+                const uint32_t mindex =
+                    static_cast<uint32_t>(out.psq4_multi.size());
+                out.psq4_multi.push_back(minv);
+                const uint16_t mid = mark_variant(
+                    out, multi_kind, launch.grid, launch.workgroup, launch.grid_y);
                 push_dispatch(make_dispatch_node(
-                    out.nodes.size(), variant_id,
-                    mcu::kMcuKernargRecipePsq8Decode1Bf16U8, index));
+                    out.nodes.size(), mid,
+                    mcu::kMcuKernargRecipePsq4MultiRowBf16, mindex));
                 break;
             }
             case KernelId::SILU:
@@ -1115,10 +1229,49 @@ static Status compile_mcu_plan_impl(const Program& program,
                     return Status::unsupported(
                         "bf16 linear dispatch is not applicable on the mcu",
                         __FILE__, __LINE__);
-                if (launch.variant != PhysicalBf16Variant::ExactRows)
-                    return Status::unsupported(
-                        "bf16 physical variant has no mcu entrypoint", __FILE__,
-                        __LINE__);
+                if (launch.variant != PhysicalBf16Variant::ExactRows) {
+                    McuCompiledVariantKind wmma_kind{};
+                    switch (launch.variant) {
+                        case PhysicalBf16Variant::Wmma:
+                            wmma_kind = McuCompiledVariantKind::Bf16Wmma;
+                            break;
+                        case PhysicalBf16Variant::WmmaWide:
+                            wmma_kind = McuCompiledVariantKind::Bf16WmmaWide;
+                            break;
+                        case PhysicalBf16Variant::WmmaKPartition:
+                            wmma_kind = McuCompiledVariantKind::Bf16SplitKWmma;
+                            break;
+                        default:
+                            return Status::unsupported(
+                                "bf16 physical variant has no mcu entrypoint",
+                                __FILE__, __LINE__);
+                    }
+                    if (launch.grid_x == 0u || launch.workgroup == 0u)
+                        return Status::unsupported(
+                            "bf16 physical variant has no mcu geometry",
+                            __FILE__, __LINE__);
+                    auto winv = mcu_plan_value<mcu::McuBf16WmmaInvocation>();
+                    winv.weight = launch.weight;
+                    winv.input = launch.input;
+                    winv.output = launch.output;
+                    winv.output_dtype =
+                        static_cast<uint32_t>(launch.output_dtype);
+                    winv.rows = launch.rows;
+                    winv.out_features = launch.out_features;
+                    winv.k = launch.k;
+                    winv.input_row_stride = launch.input_row_stride;
+                    winv.output_row_stride = launch.output_row_stride;
+                    const uint32_t windex =
+                        static_cast<uint32_t>(out.bf16_wmma.size());
+                    out.bf16_wmma.push_back(winv);
+                    const uint16_t wid = mark_variant(
+                        out, wmma_kind, launch.grid_x, launch.workgroup,
+                        launch.grid_y);
+                    push_dispatch(make_dispatch_node(
+                        out.nodes.size(), wid,
+                        mcu::kMcuKernargRecipeBf16Wmma, windex));
+                    break;
+                }
                 const uint32_t live_rows = launch.config.exact_rows;
                 if (live_rows < 1u || live_rows > 16u)
                     return Status::unsupported(
@@ -1261,10 +1414,42 @@ static Status compile_mcu_plan_impl(const Program& program,
                 McuCompiledVariantKind rec_kind;
                 if (launch.variant == PhysicalGdnRecurrenceVariant::WmmaDecode1) {
                     rec_kind = McuCompiledVariantKind::GdnRecurrenceWmmaDecode1;
+                } else if (launch.variant ==
+                           PhysicalGdnRecurrenceVariant::DecodeRowsExact) {
+                    switch (launch.kernel.actual_rows) {
+                        case 2u:
+                            rec_kind =
+                                McuCompiledVariantKind::
+                                    GdnRecurrenceDecodeRowsExactR2;
+                            break;
+                        case 4u:
+                            rec_kind =
+                                McuCompiledVariantKind::
+                                    GdnRecurrenceDecodeRowsExactR4;
+                            break;
+                        case 8u:
+                            rec_kind =
+                                McuCompiledVariantKind::
+                                    GdnRecurrenceDecodeRowsExactR8;
+                            break;
+                        default:
+                            return Status::unsupported(
+                                "gdn decode rows variant has no mcu entrypoint",
+                                __FILE__, __LINE__);
+                    }
                 } else if (launch.variant == PhysicalGdnRecurrenceVariant::Wmma) {
                     rec_kind = launch.lossy
                                    ? McuCompiledVariantKind::GdnRecurrenceWmmaLossy
                                    : McuCompiledVariantKind::GdnRecurrenceWmmaExact;
+                } else if (launch.variant ==
+                               PhysicalGdnRecurrenceVariant::Decode1Serial ||
+                           launch.variant ==
+                               PhysicalGdnRecurrenceVariant::WmmaSerial) {
+                    rec_kind = launch.lossy
+                                   ? McuCompiledVariantKind::
+                                         GdnRecurrenceWmmaSerialLossy
+                                   : McuCompiledVariantKind::
+                                         GdnRecurrenceWmmaSerialExact;
                 } else {
                     return Status::unsupported(
                         "gdn recurrence physical variant has no mcu entrypoint",
@@ -1284,6 +1469,10 @@ static Status compile_mcu_plan_impl(const Program& program,
                 break;
             }
             case KernelId::SAMPLING: {
+                if (ctx.actual_stochastic_outputs != 0u)
+                    return Status::unsupported(
+                        "stochastic sampling has no mcu entrypoint", __FILE__,
+                        __LINE__);
                 auto logits_res = resolve_host_value(
                     program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
                 if (!logits_res.ok()) return logits_res.status();
@@ -1499,6 +1688,27 @@ Status compile_mcu_plan(const Program& program, const HostExecutionContext& ctx,
                         const McuPlanCompileOptions& options,
                         McuCompiledPlan& out) {
     const Status status = compile_mcu_plan_impl(program, ctx, options, out);
+    const char* plan_dump = std::getenv("PHASESHIFT_MCU_PLAN_DUMP");
+    if (plan_dump != nullptr && plan_dump[0] != '\0') {
+        std::fprintf(stderr, "MCU_PLAN_DUMP status=%s variants=%zu nodes=%zu\n",
+                     status.ok() ? "ok" : "unsupported", out.variants.size(),
+                     out.nodes.size());
+        for (const McuCompiledVariant& v : out.variants) {
+            std::fprintf(stderr, "MCU_PLAN_VARIANT %s grid=%u gy=%u gz=%u wg=%u\n",
+                         mcu_kernel_variant_kind_name(v.kind), v.grid, v.grid_y,
+                         v.grid_z, v.workgroup);
+        }
+        uint32_t dispatch_index = 0u;
+        for (const mcu::McuPlanNode& node : out.nodes) {
+            if (node.flags != mcu::kMcuNodeDispatch ||
+                node.variant_id >= out.variants.size())
+                continue;
+            std::fprintf(stderr, "MCU_DISPATCH %u %s\n", dispatch_index,
+                         mcu_kernel_variant_kind_name(
+                             out.variants[node.variant_id].kind));
+            ++dispatch_index;
+        }
+    }
     if (!status.ok()) out = McuCompiledPlan{};
     return status;
 }

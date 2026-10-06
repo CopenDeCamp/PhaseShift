@@ -83,15 +83,23 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
         w_slot.elements < need_w)
         return PhysicalResolveStatus::NotApplicable;
 
-    if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
-        return PhysicalResolveStatus::NotApplicable;
-    const uint32_t num_requests = ctx.batch_context->num_requests;
-    const uint32_t actual_rows = ctx.batch_context->actual_rows;
+    const ::ps::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
+    uint32_t num_requests = ctx.staged_request_count;
+    uint32_t verify_requests = ctx.staged_verify_request_count;
+    uint32_t actual_rows = ctx.actual_rows;
+    if (requests == nullptr) {
+        if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
+            return PhysicalResolveStatus::NotApplicable;
+        requests = ctx.batch_context->requests;
+        num_requests = ctx.batch_context->num_requests;
+        verify_requests = ctx.batch_context->num_verify_requests;
+        actual_rows = ctx.batch_context->actual_rows;
+    }
     if (num_requests == 0u || actual_rows == 0u)
         return PhysicalResolveStatus::NotApplicable;
     uint32_t max_request_rows = 0u;
     for (uint32_t r = 0u; r < num_requests; ++r) {
-        const auto& req = ctx.batch_context->requests[r];
+        const auto& req = requests[r];
         if (req.request_handle.slot >= gdn.max_sequences)
             return PhysicalResolveStatus::NotApplicable;
         if (req.row_count > max_request_rows) max_request_rows = req.row_count;
@@ -113,6 +121,8 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
     args.output = static_cast<float*>(dst.ptr);
     args.conv_weight = static_cast<const ::ps::bf16_t*>(w_slot.device_ptr);
     args.conv_state = gdn.conv_base;
+    if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
+        return PhysicalResolveStatus::NotApplicable;
     args.requests = ctx.batch_context->requests;
     args.num_requests = num_requests;
     args.actual_rows = actual_rows;
@@ -127,8 +137,7 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
     args.conv_layer_stride = gdn.conv_layer_stride;
     args.conv_history_stride = gdn.conv_history_stride;
     const GdnSpecHistoryDeviceView& hist = ctx.gdn_spec_history;
-    const bool mixed_verify = ctx.batch_context != nullptr &&
-                              ctx.batch_context->num_verify_requests != 0u;
+    const bool mixed_verify = verify_requests != 0u;
     if ((verify_exact_active(ctx) || mixed_verify) &&
         hist.conv_history != nullptr && hist.capture_rows != 0u) {
         args.conv_history_store = hist.conv_history;

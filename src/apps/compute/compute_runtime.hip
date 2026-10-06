@@ -177,6 +177,7 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     exec_config.max_scheduled_output_rows = config_.max_scheduled_output_rows;
     exec_config.target_hidden_taps = config_.target_hidden_taps;
     exec_config.target_hidden_tap_count = config_.target_hidden_tap_count;
+    exec_config.backend = config_.decode_backend;
 
     auto exec_result = qwen35::create_model_executor(
         *model_, *slot_pool_, *gdn_pool_, *kv_pool_, *arena_, exec_config);

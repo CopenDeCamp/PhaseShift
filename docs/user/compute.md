@@ -17,6 +17,7 @@
 --page-tokens N        paged KV page size in tokens (default 16)
 --device N             GPU device (default 0)
 --kv-cache-dtype TYPE  bf16 | fp8_e4m3 | psq4 | psq8 (default bf16)
+--decode-backend TYPE  host | gpu-mcu (default host)
 --verify-weights 0|1   verify quantized payload CRC32 on load (default 0)
 --dump-logits PATH     append per-step sampled logits rows (raw f32) to PATH
 --temperature F        sampling temperature (default 0 = greedy)
@@ -36,6 +37,30 @@
 （`248041, 77091`）を使用。
 
 `--kv-cache-dtype psq4` / `psq8` は `head_dim == 256` を要求する。
+
+### decode backend
+
+`--decode-backend host` は `ContinuousBatcher` と Host 実行経路を使う既定の構成である。
+
+`--decode-backend gpu-mcu` は GPU-MCU（persistent controller）経路を要求する。
+要求は書き換えられず、GPU-MCU が実行できない条件では **Host へ silently に
+fallback せず** `unsupported` を返して該当 batch を失敗させる。選択結果は
+`DECODE_BACKEND=host|gpu-mcu` として stdout に出力する
+（`--serve-stdio` の JSON Lines protocol には混ぜない）。
+
+現在 GPU-MCU が受け付けない条件は
+[../developer/gpu_mcu/architecture.md](../developer/gpu_mcu/architecture.md) が正本。
+主なものは次のとおり。
+
+- stochastic sampling（`--temperature` > 0）
+- 非 BF16 の KV cache
+- Tensor Parallel
+- imatrix collector / value trace
+- target hidden tap（DFlash2 経路を含む）
+- GPU-MCU が plan として compile できない kernel / physical variant
+
+DFlash2 経路（`--dflash2-model-dir`）は target hidden tap を要求するため、
+現時点では `--decode-backend gpu-mcu` と併用できない。
 
 ### resident model host
 

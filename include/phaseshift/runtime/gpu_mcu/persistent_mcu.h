@@ -922,6 +922,8 @@ public:
     uint64_t batches_completed() const noexcept;
     uint64_t batches_failed() const noexcept;
     uint64_t batches_committed() const noexcept;
+    GpuMcuBatchCommitTelemetry commit_telemetry() const noexcept;
+    void dump_state(std::FILE* out) const noexcept;
     uint64_t committed_tokens() const noexcept;
     uint64_t commit_stale_handles() const noexcept;
     uint64_t commit_pending_overflow() const noexcept;

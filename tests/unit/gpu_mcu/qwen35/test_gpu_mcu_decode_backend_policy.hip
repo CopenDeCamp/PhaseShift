@@ -106,14 +106,18 @@ int main() {
          }},
         {q35::DecodeBackendReason::ValueTrace,
          [](q35::DecodeBackendInputs& in) { in.value_trace_present = true; }},
-        {q35::DecodeBackendReason::TargetHiddenTaps,
-         [](q35::DecodeBackendInputs& in) { in.target_hidden_tap_count = 2u; }},
         {q35::DecodeBackendReason::StreamWaitUnsupported,
          [](q35::DecodeBackendInputs& in) {
              in.stream_wait_value_supported = false;
          }},
         {q35::DecodeBackendReason::McuBodyRangeUnavailable,
          [](q35::DecodeBackendInputs& in) { in.mcu_body_range_valid = false; }},
+        {q35::DecodeBackendReason::TensorParallel,
+         [](q35::DecodeBackendInputs& in) {
+             in.tensor_parallel_configured = true;
+         }},
+        {q35::DecodeBackendReason::StochasticSampling,
+         [](q35::DecodeBackendInputs& in) { in.stochastic_output_count = 1u; }},
     };
 
     for (const Rejection& r : rejections) {
@@ -194,8 +198,112 @@ int main() {
               "a rejected prefill request returns an error");
     }
 
-    std::printf("decode backend policy: cases=%zu\n",
-                sizeof(rejections) / sizeof(rejections[0]) + 8u);
+    {
+        q35::DecodeBackendInputs in{};
+        in.tensor_parallel_configured = true;
+        in.stochastic_output_count = 3u;
+        const q35::DecodeBackendDecision d = q35::decide_decode_backend(in);
+        check(d.backend == q35::DecodeBackend::Host, "Host request stays Host");
+        check(d.reason == q35::DecodeBackendReason::BackendIsHost,
+              "Host request reason is BackendIsHost");
+        check(q35::decode_backend_execution_error(d).ok(),
+              "Host request is executable with both gates set");
+    }
+
+    for (q35::DecodeBackendReason reason :
+         {q35::DecodeBackendReason::TensorParallel,
+          q35::DecodeBackendReason::StochasticSampling}) {
+        q35::DecodeBackendInputs in = requested_gpu_mcu();
+        in.persistent_ready = true;
+        in.prefill_present = true;
+        in.num_requests = 4u;
+        in.num_tokens = 33u;
+        in.actual_rows = 33u;
+        in.speculative_verify = true;
+        if (reason == q35::DecodeBackendReason::TensorParallel) {
+            in.tensor_parallel_configured = true;
+        } else {
+            in.stochastic_output_count = 2u;
+        }
+        const q35::DecodeBackendDecision d = q35::decide_decode_backend(in);
+        std::string label = std::string("persistent ready keeps GpuMcu for ") +
+                            q35::decode_backend_reason_name(reason);
+        check(d.backend == q35::DecodeBackend::GpuMcu, label.c_str());
+        label = std::string("persistent ready does not waive ") +
+                q35::decode_backend_reason_name(reason);
+        check(!d.eligible, label.c_str());
+        label = std::string("persistent ready reports ") +
+                q35::decode_backend_reason_name(reason);
+        check(d.reason == reason, label.c_str());
+        label = std::string("persistent ready returns unsupported for ") +
+                q35::decode_backend_reason_name(reason);
+        const ::ps::Status err = q35::decode_backend_execution_error(d);
+        check(!err.ok() && err.code() == ::ps::Status::Code::unsupported,
+              label.c_str());
+    }
+
+    {
+        q35::DecodeBackendConfigInputs config{};
+        config.requested = q35::DecodeBackend::GpuMcu;
+        const q35::DecodeBackendDecision d =
+            q35::decide_decode_backend_config(config);
+        check(d.backend == q35::DecodeBackend::GpuMcu,
+              "config preflight keeps GpuMcu request");
+        check(d.reason == q35::DecodeBackendReason::Selected,
+              "config preflight default reason is selected");
+        check(d.eligible, "config preflight default config is eligible");
+        check(q35::decode_backend_execution_error(d).ok(),
+              "config preflight default config is executable");
+    }
+
+    struct ConfigRejection {
+        q35::DecodeBackendReason reason;
+        void (*mutate)(q35::DecodeBackendConfigInputs&);
+    };
+    const ConfigRejection config_rejections[] = {
+        {q35::DecodeBackendReason::KvDtypeNotBf16,
+         [](q35::DecodeBackendConfigInputs& in) { in.kv_dtype_is_bf16 = false; }},
+        {q35::DecodeBackendReason::TensorParallel,
+         [](q35::DecodeBackendConfigInputs& in) {
+             in.tensor_parallel_configured = true;
+         }},
+    };
+    for (const ConfigRejection& r : config_rejections) {
+        q35::DecodeBackendConfigInputs config{};
+        config.requested = q35::DecodeBackend::GpuMcu;
+        r.mutate(config);
+        const q35::DecodeBackendDecision d =
+            q35::decide_decode_backend_config(config);
+        std::string label = std::string("config preflight keeps GpuMcu for ") +
+                            q35::decode_backend_reason_name(r.reason);
+        check(d.backend == q35::DecodeBackend::GpuMcu, label.c_str());
+        label = std::string("config preflight reports ") +
+                q35::decode_backend_reason_name(r.reason);
+        check(d.reason == r.reason, label.c_str());
+        label = std::string("config preflight returns unsupported for ") +
+                q35::decode_backend_reason_name(r.reason);
+        const ::ps::Status err = q35::decode_backend_execution_error(d);
+        check(!err.ok() && err.code() == ::ps::Status::Code::unsupported,
+              label.c_str());
+    }
+
+    for (const ConfigRejection& r : config_rejections) {
+        q35::DecodeBackendConfigInputs config;
+        config.requested = q35::DecodeBackend::Host;
+        r.mutate(config);
+        const q35::DecodeBackendDecision d =
+            q35::decide_decode_backend_config(config);
+        std::string label = std::string("config preflight ignores ") +
+                            q35::decode_backend_reason_name(r.reason) +
+                            " for a Host request";
+        check(d.backend == q35::DecodeBackend::Host &&
+                  q35::decode_backend_execution_error(d).ok(),
+              label.c_str());
+    }
+
+    std::printf("decode backend policy: rejection_reasons=%zu config_rejections=%zu\n",
+                sizeof(rejections) / sizeof(rejections[0]),
+                sizeof(config_rejections) / sizeof(config_rejections[0]));
     if (g_failed != 0) {
         std::printf("test_gpu_mcu_decode_backend_policy: %d failures\n", g_failed);
         return 1;

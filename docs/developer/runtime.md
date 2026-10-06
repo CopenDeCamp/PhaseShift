@@ -27,6 +27,11 @@ model_dispatch_correctness (ps::kernel, single launcher)
 - `Program` は dispatch-only（`push()`）。host resolutionとGPU launchの
   分離は `program_executor.h`（private header）の
   `HostExecutionContext` / `HostResolvedValue` で行う。
+- `HostExecutionContext::external_inputs` / `external_outputs` が指す配列は
+  **ctx 自身の** `external_input_storage` / `external_output_storage` が所有する。
+  構築関数のローカル配列へ pointer を持たせない。
+  ctx は構築関数の返却後も呼び出し側で生き続けるため、ローカル配列だと
+  stack が書き換わって不正な pointer が kernel に渡る。
 - device側は `DeviceProgramView`（`runtime/program/device_program.h`）を
   kernel argumentとして渡す。
 - sync semantics: opごとにstaging H2D（async）→ launch →
@@ -49,10 +54,19 @@ enum class DecodeBackend { Host = 0, GpuMcu = 1 };
 - GPU-MCU が実行できない主な理由:
   `NotDecode` / `MultipleRequests` / `NotSingleToken` / `NotSingleRow` /
   `SpeculativeVerify` / `PrefillPresent` / `KvDtypeNotBf16` /
+  `TensorParallel` / `StochasticSampling` /
   `ImatrixCollector` / `ValueTrace` / `TargetHiddenTaps` /
   `StreamWaitUnsupported` / `McuBodyRangeUnavailable`。
   `GpuMcu` 要求で成立しない場合は `decode_backend_execution_error()` が
   `Status::unsupported` を返し、Host 経路へは落ちない。
+- `TensorParallel`（`tensor_parallel_configured`）と `StochasticSampling`
+  （`stochastic_output_count`）は `persistent_ready` でも免除されない。
+  GPU-MCU は stochastic sampling を argmax で代用しない（plan compile も
+  `stochastic sampling has no mcu entrypoint` で fail-closed）。
+- capability 判定は次の 2 段階で、いずれも batch の program dispatch より前に行う。
+  1. `create_model_executor()` の config preflight（TP・hidden tap・KV dtype）と
+     `submit_co_batch()` の `decide_decode_backend()`（execution feature）
+  2. `preflight_mcu_plan()`（unsupported kernel / physical variant）
 - `Executor::mcu_state`（`McuDecodeState`）は最初に `GpuMcu` が選ばれた時点で
   `ensure_mcu_state()` が作る。以降の step で再利用する。初期化・plan・実行が
   失敗した場合も Host へ fallback せず error を返す。

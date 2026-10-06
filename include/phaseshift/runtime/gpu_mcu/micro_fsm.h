@@ -58,6 +58,7 @@ enum class McuFaultCode : uint32_t {
     completion_generation_mismatch = 6,
     kernarg_region_exhausted = 7,
     kernarg_build_failed = 8,
+    completion_wait_state_mismatch = 9,
 };
 
 enum : uint32_t {
@@ -65,6 +66,45 @@ enum : uint32_t {
     kMcuNodeWait = 1u << 1,
     kMcuNodeEnd = 1u << 2,
 };
+
+enum : uint32_t {
+    kMcuLogLineBytes = 256u,
+    kMcuLogLineCount = 4096u,
+};
+
+constexpr uint32_t kMcuLogBytes = kMcuLogLineBytes * kMcuLogLineCount;
+
+enum class McuLogEvent : uint32_t {
+    PlanBegin = 1,
+    DispatchPrepare = 2,
+    DispatchPublish = 3,
+    DispatchDoorbell = 4,
+    WaitBegin = 5,
+    WaitComplete = 6,
+    WaitSpinTimeout = 7,
+    CompletionSlotMismatch = 8,
+    KernargBuildFailed = 9,
+    Fault = 10,
+    PlanEnd = 11,
+    ExecutionSkip = 12,
+    ExecutionEpoch = 13,
+};
+
+struct alignas(16) McuLogRecord {
+    uint64_t sequence = 0;
+    uint64_t clock = 0;
+    uint32_t event = 0;
+    uint32_t pc = 0;
+    uint32_t variant = 0;
+    uint32_t completion_slot = 0;
+    uint64_t generation = 0;
+    uint64_t value0 = 0;
+    uint64_t value1 = 0;
+    char message[192] = {};
+};
+
+static_assert(sizeof(McuLogRecord) == 256);
+static_assert(alignof(McuLogRecord) == 16);
 
 enum class McuDoorbellMode : uint32_t {
     per_packet = 0,
@@ -128,7 +168,9 @@ enum : uint16_t {
     kMcuKernargRecipeOutputGatherBf16 = 24,
     kMcuKernargRecipeVerifyAcceptBatch = 25,
     kMcuKernargRecipeGdnSpecRestoreFromCounts = 26,
-    kMcuKernargRecipeCount = 27,
+    kMcuKernargRecipeEmbeddingPsq8 = 27,
+    kMcuKernargRecipeBf16Wmma = 28,
+    kMcuKernargRecipeCount = 29,
 };
 
 struct McuActivationQuantizeInvocation {
@@ -574,6 +616,30 @@ static_assert(offsetof(McuBf16ExactRowsInvocation, k) == 32);
 static_assert(offsetof(McuBf16ExactRowsInvocation, input_row_stride) == 36);
 static_assert(offsetof(McuBf16ExactRowsInvocation, output_row_stride) == 40);
 
+struct McuBf16WmmaInvocation {
+    uint64_t weight = 0;
+    uint64_t input = 0;
+    uint64_t output = 0;
+    uint32_t output_dtype = 0;
+    uint32_t rows = 0;
+    uint32_t out_features = 0;
+    uint32_t k = 0;
+    uint32_t input_row_stride = 0;
+    uint32_t output_row_stride = 0;
+};
+
+static_assert(sizeof(McuBf16WmmaInvocation) == 48);
+static_assert(alignof(McuBf16WmmaInvocation) == 8);
+static_assert(offsetof(McuBf16WmmaInvocation, weight) == 0);
+static_assert(offsetof(McuBf16WmmaInvocation, input) == 8);
+static_assert(offsetof(McuBf16WmmaInvocation, output) == 16);
+static_assert(offsetof(McuBf16WmmaInvocation, output_dtype) == 24);
+static_assert(offsetof(McuBf16WmmaInvocation, rows) == 28);
+static_assert(offsetof(McuBf16WmmaInvocation, out_features) == 32);
+static_assert(offsetof(McuBf16WmmaInvocation, k) == 36);
+static_assert(offsetof(McuBf16WmmaInvocation, input_row_stride) == 40);
+static_assert(offsetof(McuBf16WmmaInvocation, output_row_stride) == 44);
+
 struct McuL2NormalizeInvocation {
     uint64_t input = 0;
     uint64_t output = 0;
@@ -613,6 +679,34 @@ static_assert(offsetof(McuEmbeddingBf16Invocation, rows) == 32);
 static_assert(offsetof(McuEmbeddingBf16Invocation, vocab_size) == 36);
 static_assert(offsetof(McuEmbeddingBf16Invocation, hidden_size) == 40);
 static_assert(offsetof(McuEmbeddingBf16Invocation, output_row_stride) == 44);
+
+struct McuEmbeddingPsq8Invocation {
+    uint64_t codes = 0;
+    uint64_t scales = 0;
+    uint64_t token_ids = 0;
+    uint64_t output = 0;
+    uint64_t error_word = 0;
+    uint32_t codes_row_stride_bytes = 0;
+    uint32_t scale_row_stride_bytes = 0;
+    uint32_t rows = 0;
+    uint32_t vocab_size = 0;
+    uint32_t hidden_size = 0;
+    uint32_t output_row_stride = 0;
+};
+
+static_assert(sizeof(McuEmbeddingPsq8Invocation) == 64);
+static_assert(alignof(McuEmbeddingPsq8Invocation) == 8);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, codes) == 0);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, scales) == 8);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, token_ids) == 16);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, output) == 24);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, error_word) == 32);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, codes_row_stride_bytes) == 40);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, scale_row_stride_bytes) == 44);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, rows) == 48);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, vocab_size) == 52);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, hidden_size) == 56);
+static_assert(offsetof(McuEmbeddingPsq8Invocation, output_row_stride) == 60);
 
 struct McuOutputGatherBf16Invocation {
     uint64_t input = 0;
@@ -926,10 +1020,14 @@ struct alignas(64) GpuMcuFsmState {
         attention_paged_reduce_invocations = nullptr;
     uint32_t bf16_invocation_count = 0;
     const McuBf16ExactRowsInvocation* bf16_invocations = nullptr;
+    uint32_t bf16_wmma_invocation_count = 0;
+    const McuBf16WmmaInvocation* bf16_wmma_invocations = nullptr;
     uint32_t l2_invocation_count = 0;
     const McuL2NormalizeInvocation* l2_invocations = nullptr;
     uint32_t embedding_invocation_count = 0;
     const McuEmbeddingBf16Invocation* embedding_invocations = nullptr;
+    uint32_t embedding_psq8_invocation_count = 0;
+    const McuEmbeddingPsq8Invocation* embedding_psq8_invocations = nullptr;
     uint32_t output_gather_invocation_count = 0;
     const McuOutputGatherBf16Invocation* output_gather_invocations = nullptr;
     uint32_t gdn_conv1d_invocation_count = 0;
@@ -982,6 +1080,10 @@ struct alignas(64) GpuMcuFsmState {
 
     uint64_t batch_input = 0;
 
+    uint64_t log_base = 0;
+    uint32_t log_head = 0;
+    uint32_t log_enabled = 0;
+
     GpuMcuFsmRunContext run_ctx{};
 };
 
@@ -1032,10 +1134,14 @@ struct GpuMcuFsmConfig {
         attention_paged_reduce_invocations = nullptr;
     uint32_t bf16_invocation_count = 0;
     const McuBf16ExactRowsInvocation* bf16_invocations = nullptr;
+    uint32_t bf16_wmma_invocation_count = 0;
+    const McuBf16WmmaInvocation* bf16_wmma_invocations = nullptr;
     uint32_t l2_invocation_count = 0;
     const McuL2NormalizeInvocation* l2_invocations = nullptr;
     uint32_t embedding_invocation_count = 0;
     const McuEmbeddingBf16Invocation* embedding_invocations = nullptr;
+    uint32_t embedding_psq8_invocation_count = 0;
+    const McuEmbeddingPsq8Invocation* embedding_psq8_invocations = nullptr;
     uint32_t output_gather_invocation_count = 0;
     const McuOutputGatherBf16Invocation* output_gather_invocations = nullptr;
     uint32_t gdn_conv1d_invocation_count = 0;
@@ -1070,6 +1176,7 @@ struct GpuMcuFsmConfig {
     uint32_t* start_signal = nullptr;
     uint32_t* done_signal = nullptr;
     uint32_t* result_code = nullptr;
+    uint64_t log_base = 0;
 };
 
 constexpr AqlMemoryPolicy kMcuAgentAqlPolicy{
@@ -1127,6 +1234,8 @@ public:
     McuSupervisorState supervisor() const noexcept;
     McuFaultCode fault_code() const noexcept;
     uint32_t fault_pc() const noexcept;
+    uint32_t log_head() const noexcept;
+    const McuLogRecord* log_record(uint32_t slot) const noexcept;
     uint64_t plans_started() const noexcept;
     uint64_t dispatches() const noexcept;
     uint64_t completions_observed() const noexcept;

@@ -57,12 +57,14 @@ const char* decode_backend_reason_name(DecodeBackendReason reason) {
             return "ImatrixCollector";
         case DecodeBackendReason::ValueTrace:
             return "ValueTrace";
-        case DecodeBackendReason::TargetHiddenTaps:
-            return "TargetHiddenTaps";
         case DecodeBackendReason::StreamWaitUnsupported:
             return "StreamWaitUnsupported";
         case DecodeBackendReason::McuBodyRangeUnavailable:
             return "McuBodyRangeUnavailable";
+        case DecodeBackendReason::TensorParallel:
+            return "TensorParallel";
+        case DecodeBackendReason::StochasticSampling:
+            return "StochasticSampling";
         default:
             return "unknown";
     }
@@ -91,12 +93,14 @@ DecodeBackendDecision decide_decode_backend(const DecodeBackendInputs& inputs) {
         reason = DecodeBackendReason::PrefillPresent;
     } else if (!inputs.kv_dtype_is_bf16) {
         reason = DecodeBackendReason::KvDtypeNotBf16;
+    } else if (inputs.tensor_parallel_configured) {
+        reason = DecodeBackendReason::TensorParallel;
+    } else if (inputs.stochastic_output_count != 0u) {
+        reason = DecodeBackendReason::StochasticSampling;
     } else if (inputs.imatrix_collector_present) {
         reason = DecodeBackendReason::ImatrixCollector;
     } else if (inputs.value_trace_present) {
         reason = DecodeBackendReason::ValueTrace;
-    } else if (inputs.target_hidden_tap_count != 0u) {
-        reason = DecodeBackendReason::TargetHiddenTaps;
     } else if (!inputs.stream_wait_value_supported) {
         reason = DecodeBackendReason::StreamWaitUnsupported;
     } else if (!inputs.mcu_body_range_valid) {
@@ -108,6 +112,16 @@ DecodeBackendDecision decide_decode_backend(const DecodeBackendInputs& inputs) {
     return decision;
 }
 
+DecodeBackendDecision decide_decode_backend_config(
+    const DecodeBackendConfigInputs& inputs) {
+    DecodeBackendInputs batch{};
+    batch.requested = inputs.requested;
+    batch.persistent_ready = true;
+    batch.kv_dtype_is_bf16 = inputs.kv_dtype_is_bf16;
+    batch.tensor_parallel_configured = inputs.tensor_parallel_configured;
+    return decide_decode_backend(batch);
+}
+
 Status decode_backend_execution_error(const DecodeBackendDecision& decision) {
     if (decision.backend == DecodeBackend::Host || decision.eligible) {
         return Status::make_ok();
@@ -116,7 +130,6 @@ Status decode_backend_execution_error(const DecodeBackendDecision& decision) {
     message += decode_backend_reason_name(decision.reason);
     return Status::unsupported(message.c_str(), __FILE__, __LINE__);
 }
-
 }  // namespace runtime
 }  // namespace qwen35
 }  // namespace ps

@@ -41,8 +41,11 @@ McuPlanFingerprint mcu_plan_fingerprint(const McuCompiledPlan& plan) noexcept {
     hash = hash_vector(hash, plan.attention_paged_split);
     hash = hash_vector(hash, plan.attention_paged_reduce);
     hash = hash_vector(hash, plan.bf16);
+    hash = hash_vector(hash, plan.bf16_wmma);
     hash = hash_vector(hash, plan.l2);
     hash = hash_vector(hash, plan.embedding);
+    hash = hash_vector(hash, plan.embedding_psq8);
+    hash = hash_vector(hash, plan.psq4_multi);
     hash = hash_vector(hash, plan.gdn_conv1d);
     hash = hash_vector(hash, plan.gdn_recurrence);
     hash = hash_vector(hash, plan.gdn_reset);

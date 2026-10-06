@@ -13,6 +13,7 @@
 #include <phaseshift/models/qwen35/model/lower_to_primitives.h>
 #include <phaseshift/models/qwen35/model/qwen35_model.h>
 #include <phaseshift/models/qwen35/runtime/mcu_layer_range.h>
+#include <phaseshift/models/qwen35/runtime/mcu_kernel_registry.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
 #include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
@@ -67,114 +68,27 @@ bool bytes_equal(const void* a, const void* b, size_t bytes, size_t* first,
 }
 
 struct SymbolSpec {
-    const char* hsaco;
-    const char* symbol;
+    const void* hsaco = nullptr;
+    std::size_t hsaco_size = 0;
+    const char* symbol = nullptr;
 };
 
 bool symbol_for_kind(q35::McuCompiledVariantKind kind, SymbolSpec* out) {
-    switch (kind) {
-        case q35::McuCompiledVariantKind::RmsNormBf16PfOnePlus:
-            *out = {PHASESHIFT_GPU_MCU_RMSNORM_HSACO,
-                    kernel::kRmsNormBf16PfOnePlusSymbol};
-            return true;
-        case q35::McuCompiledVariantKind::RmsNormF32PgDirect:
-            *out = {PHASESHIFT_GPU_MCU_RMSNORM_HSACO,
-                    kernel::kRmsNormF32PgDirectSymbol};
-            return true;
-        case q35::McuCompiledVariantKind::RmsNormBf16F32PgOnePlus:
-            *out = {PHASESHIFT_GPU_MCU_RMSNORM_HSACO,
-                    kernel::kRmsNormBf16F32PgOnePlusSymbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseResidualBf16:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseResidualAddBf16Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseSwigluBf16:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseSwigluBf16Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseMulF32F32Bf16:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseMulF32F32Bf16Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseScaleF32:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseScaleF32Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseSiluBf16ToF32:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseSiluBf16ToF32Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseSiluF32ToBf16:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseSiluF32ToBf16Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseSigmoidBf16ToF32:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseSigmoidBf16ToF32Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::ElementwiseSplitBf16:
-            *out = {PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO,
-                    kernel::kElementwiseSplitBf16Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::Bf16ExactRows:
-            *out = {PHASESHIFT_GPU_MCU_BF16_HSACO, kernel::kBf16ExactRowsSymbol};
-            return true;
-        case q35::McuCompiledVariantKind::L2NormalizeBf16F32:
-            *out = {PHASESHIFT_GPU_MCU_L2_NORMALIZE_HSACO,
-                    kernel::kL2NormalizeBf16F32Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::RopeF32Bf16Pair:
-            *out = {PHASESHIFT_GPU_MCU_ROPE_HSACO,
-                    kernel::kRopeF32Bf16PairSymbol};
-            return true;
-        case q35::McuCompiledVariantKind::KvAppendBf16:
-            *out = {PHASESHIFT_GPU_MCU_KV_APPEND_HSACO,
-                    kernel::kKvAppendBf16Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::AttentionPagedBf16:
-            *out = {PHASESHIFT_GPU_MCU_ATTENTION_PAGED_HSACO,
-                    kernel::kPagedAttentionBf16Symbol};
-            return true;
-        case q35::McuCompiledVariantKind::AttentionPagedPrefillBf16:
-            *out = {PHASESHIFT_GPU_MCU_ATTENTION_PAGED_PREFILL_HSACO,
-                    kernel::kPagedAttentionPrefillBf16Symbol};
-            return true;
-        default:
-            return false;
+    const auto entry = q35::mcu_kernel_code_object(kind);
+    if (!entry.ok() || entry.value().blob.blob == nullptr ||
+        entry.value().blob.size == 0u) {
+        return false;
     }
+    out->hsaco = entry.value().blob.blob;
+    out->hsaco_size = entry.value().blob.size;
+    out->symbol = entry.value().symbol;
+    return true;
 }
 
 uint16_t recipe_for(q35::McuCompiledVariantKind kind) {
-    switch (kind) {
-        case q35::McuCompiledVariantKind::RmsNormBf16PfOnePlus:
-        case q35::McuCompiledVariantKind::RmsNormF32PgDirect:
-        case q35::McuCompiledVariantKind::RmsNormBf16F32PgOnePlus:
-            return mcu::kMcuKernargRecipeRmsNormBf16PfOnePlus;
-        case q35::McuCompiledVariantKind::ElementwiseResidualBf16:
-        case q35::McuCompiledVariantKind::ElementwiseSwigluBf16:
-        case q35::McuCompiledVariantKind::ElementwiseMulF32F32Bf16:
-        case q35::McuCompiledVariantKind::ElementwiseScaleF32:
-        case q35::McuCompiledVariantKind::ElementwiseSiluBf16ToF32:
-        case q35::McuCompiledVariantKind::ElementwiseSiluF32ToBf16:
-        case q35::McuCompiledVariantKind::ElementwiseSigmoidBf16ToF32:
-        case q35::McuCompiledVariantKind::ElementwiseSplitBf16:
-            return mcu::kMcuKernargRecipeElementwise;
-        case q35::McuCompiledVariantKind::Bf16ExactRows:
-            return mcu::kMcuKernargRecipeBf16ExactRows;
-        case q35::McuCompiledVariantKind::L2NormalizeBf16F32:
-            return mcu::kMcuKernargRecipeL2Normalize;
-        case q35::McuCompiledVariantKind::RopeF32Bf16Pair:
-            return mcu::kMcuKernargRecipeRope;
-        case q35::McuCompiledVariantKind::KvAppendBf16:
-            return mcu::kMcuKernargRecipeKvAppend;
-        case q35::McuCompiledVariantKind::AttentionPagedBf16:
-            return mcu::kMcuKernargRecipeAttentionPaged;
-        case q35::McuCompiledVariantKind::AttentionPagedPrefillBf16:
-            return mcu::kMcuKernargRecipeAttentionPaged;
-        default:
-            return mcu::kMcuKernargRecipeProbe;
-    }
+    const auto entry = q35::mcu_kernel_code_object(kind);
+    if (!entry.ok()) return mcu::kMcuKernargRecipeNone;
+    return entry.value().kernarg_recipe;
 }
 
 constexpr uint32_t kPageTokens = 16u;
@@ -477,7 +391,8 @@ void run_prefill_scenario() {
                 return;
             }
             auto co_res =
-                mcu::GpuMcuAqlCodeObject::load(hqueue, spec.hsaco, spec.symbol);
+                mcu::GpuMcuAqlCodeObject::load_memory(hqueue, spec.hsaco,
+                                              spec.hsaco_size, spec.symbol);
             if (!co_res.ok()) {
                 std::printf("FAIL: load %s: %s\n", spec.symbol,
                             co_res.status().message().c_str());
@@ -507,7 +422,8 @@ void run_prefill_scenario() {
             continue;
         SymbolSpec spec{};
         (void)symbol_for_kind(plan.variants[i].kind, &spec);
-        if (!rig.load_extra_code(spec.hsaco, spec.symbol, metas[i])) {
+        if (!rig.load_extra_code_memory(spec.hsaco, spec.hsaco_size, spec.symbol,
+                                  metas[i])) {
             check(false, "prefill extra code");
             return;
         }
@@ -648,10 +564,6 @@ int main() {
         return 1;
     }
     ps::qwen35::Qwen35Model model = model_result.release();
-    if (model.weights().embed_tokens.encoding != ps::weights::MatrixEncoding::Bf16) {
-        std::printf("SKIP: mcu plan compile requires BF16 embedding storage\n");
-        return 77;
-    }
 
     auto lower_result = ps::qwen35::lower_qwen35_to_primitives(
         model.text_config(), model.weights());
@@ -858,8 +770,14 @@ int main() {
     const size_t inv_total =
         plan.rms.size() + plan.quant_e4m3.size() + plan.elementwise.size() +
         plan.rope.size() + plan.kv_append.size() + plan.attention_paged.size() +
-        plan.bf16.size() + plan.l2.size() + plan.gdn_conv1d.size() +
-        plan.gdn_recurrence.size();
+        plan.bf16.size() + plan.bf16_wmma.size() + plan.l2.size() +
+        plan.gdn_conv1d.size() + plan.gdn_recurrence.size() + plan.psq4.size() +
+        plan.psq4_multi.size() + plan.attention_paged_split.size() +
+        plan.attention_paged_reduce.size() + plan.embedding.size() +
+        plan.embedding_psq8.size() + plan.output_gather.size() +
+        plan.argmax_f32.size() + plan.verify_accept.size() +
+        plan.verify_accept_batch.size() + plan.gdn_spec_restore.size() +
+        plan.gdn_spec_restore_from_counts.size();
     std::printf(
         "plan: nodes=%zu variants=%zu kernarg_slots=%u logical=%u physical=%u "
         "invocations=%zu\n",
@@ -869,7 +787,8 @@ int main() {
           "logical dispatch count matches the range");
     check(plan.physical_dispatch_count == dispatch_count,
           "physical dispatch count matches (splits == 1)");
-    check(inv_total == static_cast<size_t>(dispatch_count),
+    check(inv_total + plan.gdn_reset.size() ==
+              static_cast<size_t>(plan.physical_dispatch_count),
           "one invocation per dispatch");
     check(plan.variants.size() <= mcu::kMcuMaxVariants,
           "variants within kMcuMaxVariants");
@@ -1016,7 +935,8 @@ int main() {
                 return 1;
             }
             auto co_res =
-                mcu::GpuMcuAqlCodeObject::load(hqueue, spec.hsaco, spec.symbol);
+                mcu::GpuMcuAqlCodeObject::load_memory(hqueue, spec.hsaco,
+                                              spec.hsaco_size, spec.symbol);
             if (!co_res.ok()) {
                 std::printf("FAIL: load %s: %s\n", spec.symbol,
                             co_res.status().message().c_str());
@@ -1043,7 +963,8 @@ int main() {
             continue;
         SymbolSpec spec{};
         (void)symbol_for_kind(plan.variants[i].kind, &spec);
-        if (!rig.load_extra_code(spec.hsaco, spec.symbol, metas[i])) return 1;
+        if (!rig.load_extra_code_memory(spec.hsaco, spec.hsaco_size, spec.symbol,
+                                  metas[i])) return 1;
     }
     for (size_t i = 0; i < plan.variants.size(); ++i) {
         const auto& v = plan.variants[i];
@@ -1083,6 +1004,74 @@ int main() {
         return 1;
     if (!rig.set_l2_invocations(plan.l2.data(),
                                 static_cast<uint32_t>(plan.l2.size())))
+        return 1;
+    if (!rig.set_psq4_invocations(
+            plan.psq4.data(),
+            static_cast<uint32_t>(plan.psq4.size())))
+        return 1;
+    if (!rig.set_psq4_multi_invocations(
+            plan.psq4_multi.data(),
+            static_cast<uint32_t>(plan.psq4_multi.size())))
+        return 1;
+    if (!rig.set_attention_paged_split_invocations(
+            plan.attention_paged_split.data(),
+            static_cast<uint32_t>(plan.attention_paged_split.size())))
+        return 1;
+    if (!rig.set_attention_paged_reduce_invocations(
+            plan.attention_paged_reduce.data(),
+            static_cast<uint32_t>(plan.attention_paged_reduce.size())))
+        return 1;
+    if (!rig.set_bf16_wmma_invocations(
+            plan.bf16_wmma.data(),
+            static_cast<uint32_t>(plan.bf16_wmma.size())))
+        return 1;
+    if (!rig.set_embedding_invocations(
+            plan.embedding.data(),
+            static_cast<uint32_t>(plan.embedding.size())))
+        return 1;
+    if (!rig.set_embedding_psq8_invocations(
+            plan.embedding_psq8.data(),
+            static_cast<uint32_t>(plan.embedding_psq8.size())))
+        return 1;
+    if (!rig.set_verify_accept_invocations(
+            plan.verify_accept.data(),
+            static_cast<uint32_t>(plan.verify_accept.size())))
+        return 1;
+    if (!rig.set_verify_accept_batch_invocations(
+            plan.verify_accept_batch.data(),
+            static_cast<uint32_t>(plan.verify_accept_batch.size())))
+        return 1;
+    if (!rig.set_gdn_spec_restore_invocations(
+            plan.gdn_spec_restore.data(),
+            static_cast<uint32_t>(plan.gdn_spec_restore.size())))
+        return 1;
+    if (!rig.set_gdn_spec_restore_from_counts_invocations(
+            plan.gdn_spec_restore_from_counts.data(),
+            static_cast<uint32_t>(plan.gdn_spec_restore_from_counts.size())))
+        return 1;
+    if (!rig.set_argmax_f32_invocations(
+            plan.argmax_f32.data(),
+            static_cast<uint32_t>(plan.argmax_f32.size())))
+        return 1;
+    if (!rig.set_output_gather_invocations(
+            plan.output_gather.data(),
+            static_cast<uint32_t>(plan.output_gather.size())))
+        return 1;
+    if (!rig.set_e4m3_invocations(
+            plan.quant_e4m3.data(),
+            static_cast<uint32_t>(plan.quant_e4m3.size())))
+        return 1;
+    if (!rig.set_gdn_conv1d_invocations(
+            plan.gdn_conv1d.data(),
+            static_cast<uint32_t>(plan.gdn_conv1d.size())))
+        return 1;
+    if (!rig.set_gdn_recurrence_invocations(
+            plan.gdn_recurrence.data(),
+            static_cast<uint32_t>(plan.gdn_recurrence.size())))
+        return 1;
+    if (!rig.set_gdn_reset_invocations(
+            plan.gdn_reset.data(),
+            static_cast<uint32_t>(plan.gdn_reset.size())))
         return 1;
     rig.poison_all_kernarg();
 

@@ -7,6 +7,7 @@ __device__ __forceinline__ void mcu_fault(GpuMcuFsmState* state,
                                           uint32_t pc,
                                           uint32_t variant,
                                           uint32_t generation) {
+    mcu_log_fault(state, code, pc, variant, generation);
     __scoped_atomic_store_n(&state->fault_pc, pc, __ATOMIC_RELAXED,
                             __MEMORY_SCOPE_SYSTEM);
     __scoped_atomic_store_n(&state->fault_variant, variant, __ATOMIC_RELAXED,
@@ -142,10 +143,14 @@ constexpr std::size_t mcu_recipe_explicit_args_bytes(uint16_t recipe) {
             return sizeof(McuPagedAttentionReduceInvocation);
         case kMcuKernargRecipeBf16ExactRows:
             return sizeof(McuBf16ExactRowsInvocation);
+        case kMcuKernargRecipeBf16Wmma:
+            return sizeof(McuBf16WmmaInvocation);
         case kMcuKernargRecipeL2Normalize:
             return sizeof(McuL2NormalizeInvocation);
         case kMcuKernargRecipeEmbeddingBf16:
             return sizeof(McuEmbeddingBf16Invocation);
+        case kMcuKernargRecipeEmbeddingPsq8:
+            return sizeof(McuEmbeddingPsq8Invocation);
         case kMcuKernargRecipeOutputGatherBf16:
             return sizeof(McuOutputGatherBf16Invocation);
         case kMcuKernargRecipeGdnConv1d:
@@ -637,6 +642,32 @@ __device__ __forceinline__ bool mcu_write_bf16_kernarg(
     return true;
 }
 
+__device__ __forceinline__ bool mcu_write_bf16_wmma_kernarg(
+    const GpuMcuFsmState* state,
+    const McuPlanNode& node,
+    uint32_t slot) {
+    if (state->bf16_wmma_invocations == nullptr ||
+        node.invocation_index >= state->bf16_wmma_invocation_count) {
+        return false;
+    }
+    const McuKernelVariantDesc& variant = state->variants[node.variant_id];
+    auto* args = mcu_kernarg_slot(state, slot);
+    *reinterpret_cast<McuBf16WmmaInvocation*>(args) =
+        state->bf16_wmma_invocations[node.invocation_index];
+    GpuAqlDispatchDesc desc{};
+    mcu_variant_dispatch_geometry(variant, desc);
+    if (!mcu_apply_hidden_args(variant, args, sizeof(McuBf16WmmaInvocation),
+                               desc)) {
+        return false;
+    }
+    build_aql_launch_metadata(args, variant.kernarg_size,
+                              variant.workgroup_count_x,
+                              variant.workgroup_count_y,
+                              variant.workgroup_count_z, variant.workgroup_x);
+    __threadfence_system();
+    return true;
+}
+
 __device__ __forceinline__ bool mcu_write_l2_kernarg(
     const GpuMcuFsmState* state,
     const McuPlanNode& node,
@@ -682,6 +713,36 @@ __device__ __forceinline__ bool mcu_write_embedding_bf16_kernarg(
     GpuAqlDispatchDesc desc{};
     mcu_variant_dispatch_geometry(variant, desc);
     if (!mcu_apply_hidden_args(variant, args, sizeof(McuEmbeddingBf16Invocation),
+                               desc)) {
+        return false;
+    }
+    build_aql_launch_metadata(args, variant.kernarg_size,
+                              variant.workgroup_count_x,
+                              variant.workgroup_count_y,
+                              variant.workgroup_count_z, variant.workgroup_x);
+    __threadfence_system();
+    return true;
+}
+
+__device__ __forceinline__ bool mcu_write_embedding_psq8_kernarg(
+    const GpuMcuFsmState* state,
+    const McuPlanNode& node,
+    uint32_t slot) {
+    if (state->embedding_psq8_invocations == nullptr ||
+        node.invocation_index >= state->embedding_psq8_invocation_count) {
+        return false;
+    }
+    const McuKernelVariantDesc& variant = state->variants[node.variant_id];
+    auto* args = mcu_kernarg_slot(state, slot);
+    McuEmbeddingPsq8Invocation inv =
+        state->embedding_psq8_invocations[node.invocation_index];
+    if (state->batch_input != 0ull) {
+        inv.token_ids = state->batch_input;
+    }
+    *reinterpret_cast<McuEmbeddingPsq8Invocation*>(args) = inv;
+    GpuAqlDispatchDesc desc{};
+    mcu_variant_dispatch_geometry(variant, desc);
+    if (!mcu_apply_hidden_args(variant, args, sizeof(McuEmbeddingPsq8Invocation),
                                desc)) {
         return false;
     }
@@ -863,10 +924,14 @@ __device__ __noinline__ bool mcu_build_kernarg(const GpuMcuFsmState* state,
             return mcu_write_attention_paged_reduce_kernarg(state, node, slot);
         case kMcuKernargRecipeBf16ExactRows:
             return mcu_write_bf16_kernarg(state, node, slot);
+        case kMcuKernargRecipeBf16Wmma:
+            return mcu_write_bf16_wmma_kernarg(state, node, slot);
         case kMcuKernargRecipeL2Normalize:
             return mcu_write_l2_kernarg(state, node, slot);
         case kMcuKernargRecipeEmbeddingBf16:
             return mcu_write_embedding_bf16_kernarg(state, node, slot);
+        case kMcuKernargRecipeEmbeddingPsq8:
+            return mcu_write_embedding_psq8_kernarg(state, node, slot);
         case kMcuKernargRecipeOutputGatherBf16:
             return mcu_write_output_gather_kernarg(state, node, slot);
         case kMcuKernargRecipeVerifyAcceptBatch:

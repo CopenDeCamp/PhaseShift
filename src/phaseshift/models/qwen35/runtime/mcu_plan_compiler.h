@@ -73,6 +73,22 @@ enum class McuCompiledVariantKind : uint8_t {
     Bf16ExactRows14 = 58,
     Bf16ExactRows15 = 59,
     Bf16ExactRows16 = 60,
+    Psq8RowBlock1Bf16 = 61,
+    Psq8RowBlock2Bf16 = 62,
+    Psq8RowBlock4Bf16 = 63,
+    Psq8RowBlock8Bf16 = 64,
+    EmbeddingPsq8 = 65,
+    Bf16Wmma = 66,
+    Bf16WmmaWide = 67,
+    Bf16SplitKWmma = 68,
+    GdnRecurrenceDecodeRowsExactR2 = 69,
+    GdnRecurrenceDecodeRowsExactR4 = 70,
+    GdnRecurrenceDecodeRowsExactR8 = 71,
+    GdnRecurrenceWmmaSerialLossy = 72,
+    GdnRecurrenceWmmaSerialExact = 73,
+    Psq8Prefill2DN64K64 = 74,
+    Psq8Prefill2DN128K64 = 75,
+    Psq8Prefill2DN128K128 = 76,
 };
 
 inline constexpr McuCompiledVariantKind kMcuBf16ExactRowsKinds[16] = {
@@ -148,8 +164,11 @@ struct McuCompiledPlan {
     std::vector<::ps::runtime::gpu_mcu::McuPagedAttentionReduceInvocation>
         attention_paged_reduce;
     std::vector<::ps::runtime::gpu_mcu::McuBf16ExactRowsInvocation> bf16;
+    std::vector<::ps::runtime::gpu_mcu::McuBf16WmmaInvocation> bf16_wmma;
     std::vector<::ps::runtime::gpu_mcu::McuL2NormalizeInvocation> l2;
     std::vector<::ps::runtime::gpu_mcu::McuEmbeddingBf16Invocation> embedding;
+    std::vector<::ps::runtime::gpu_mcu::McuEmbeddingPsq8Invocation>
+        embedding_psq8;
     std::vector<::ps::runtime::gpu_mcu::McuOutputGatherBf16Invocation>
         output_gather;
     std::vector<::ps::runtime::gpu_mcu::McuVerifyAcceptBatchInvocation>

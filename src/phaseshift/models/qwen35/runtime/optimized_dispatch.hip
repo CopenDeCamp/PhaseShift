@@ -641,12 +641,22 @@ Result<PhysicalResolveStatus> resolve_bf16_physical(
             break;
         case ::ps::kernel::Bf16GemmConfigId::WmmaKPartition:
             out.variant = PhysicalBf16Variant::WmmaKPartition;
+            out.grid_x = ::ps::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_y = ::ps::kernel::bf16_wmma_grid_y(rows, 1u);
+            out.workgroup = ::ps::kernel::kBf16SplitKWmmaThreads;
             break;
         case ::ps::kernel::Bf16GemmConfigId::WmmaWide:
             out.variant = PhysicalBf16Variant::WmmaWide;
+            out.grid_x = ::ps::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_y = ::ps::kernel::bf16_wmma_grid_y(
+                rows, ::ps::kernel::kBf16WmmaWideRowTiles);
+            out.workgroup = ::ps::kernel::kBf16WmmaThreads;
             break;
         case ::ps::kernel::Bf16GemmConfigId::Wmma:
             out.variant = PhysicalBf16Variant::Wmma;
+            out.grid_x = ::ps::kernel::bf16_wmma_grid_x(e.rows);
+            out.grid_y = ::ps::kernel::bf16_wmma_grid_y(rows, 1u);
+            out.workgroup = ::ps::kernel::kBf16WmmaThreads;
             break;
     }
     return PhysicalResolveStatus::Applicable;

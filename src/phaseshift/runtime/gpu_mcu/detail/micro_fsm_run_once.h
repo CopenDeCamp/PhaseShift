@@ -40,11 +40,11 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
     __scoped_atomic_store_n(&state->supervisor,
                             static_cast<uint32_t>(supervisor), __ATOMIC_RELEASE,
                             __MEMORY_SCOPE_SYSTEM);
-if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
-                           __MEMORY_SCOPE_SYSTEM) != 0u) {
-    ctx.supervisor = static_cast<uint32_t>(McuSupervisorState::stopping);
-    return true;
-}
+    if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
+                            __MEMORY_SCOPE_SYSTEM) != 0u) {
+        ctx.supervisor = static_cast<uint32_t>(McuSupervisorState::stopping);
+        return true;
+    }
 
     if (supervisor == McuSupervisorState::idle) {
         uint64_t request = 0;
@@ -81,6 +81,8 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
         __scoped_atomic_store_n(&state->supervisor,
                                 static_cast<uint32_t>(supervisor),
                                 __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+        mcu_log_event(state, McuLogEvent::PlanBegin, 0u, 0u, 0u, state->plan_id,
+                      state->node_count, 0u);
     }
 
     if (supervisor == McuSupervisorState::fault) {
@@ -253,6 +255,9 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                     faulted = true;
                     break;
                 }
+                mcu_log_event(state, McuLogEvent::DispatchPrepare, pc,
+                              node.variant_id, node.completion_slot, generation,
+                              kernarg_slot, 0u);
                 if (grid_override_x != 0u || grid_override_y != 0u ||
                     grid_override_z != 0u) {
                     if (!mcu_override_geometry(state, node, kernarg_slot,
@@ -322,6 +327,11 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                     kernarg_base +
                         static_cast<uint64_t>(kernarg_slot) * kernarg_stride,
                     grid_override_x, grid_override_y, grid_override_z);
+                mcu_log_event(
+                    state, McuLogEvent::DispatchPublish, pc, node.variant_id,
+                    node.completion_slot, generation, queue_slot,
+                    kernarg_base +
+                        static_cast<uint64_t>(kernarg_slot) * kernarg_stride);
                 if (debug_on) {
                     const uint64_t read_after = mcu_read_index(queue);
                     const uint64_t occupancy =
@@ -366,7 +376,12 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                 timing[timing_index].dw0_publish = publish_ts;
                 timing[timing_index].doorbell = ring ? publish_ts : 0u;
             }
-            if (ring) ++run_doorbell;
+            if (ring) {
+                ++run_doorbell;
+                mcu_log_event(state, McuLogEvent::DispatchDoorbell, pc,
+                              node.variant_id, node.completion_slot, generation,
+                              queue_slot, 0u);
+            }
             last_published_slot = queue_slot;
             issued_any = true;
             ++run_issues;
@@ -468,6 +483,10 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                         faulted = true;
                         break;
                     }
+                    mcu_log_event(state, McuLogEvent::DispatchPrepare,
+                                  next_pc_dispatch, next_node.variant_id,
+                                  next_node.completion_slot, next_generation,
+                                  next_kernarg_slot, 0u);
                     if (next_grid_x != 0u || next_grid_y != 0u ||
                         next_grid_z != 0u) {
                         if (!mcu_override_geometry(state, next_node,
@@ -512,6 +531,13 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                         timing[prepared_timing].packet_stage_end =
                             wall_clock64();
                     }
+                    mcu_log_event(
+                        state, McuLogEvent::DispatchPublish, next_pc_dispatch,
+                        next_node.variant_id, next_node.completion_slot,
+                        next_generation, next_slot,
+                        kernarg_base +
+                            static_cast<uint64_t>(next_kernarg_slot) *
+                                kernarg_stride);
                     have_prepared = true;
                 }
             }
@@ -520,9 +546,23 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
         }
 
         if ((node.flags & kMcuNodeWait) != 0u) {
+            const uint64_t observed_generation =
+                have_active && active_completion < completion_count
+                    ? static_cast<uint64_t>(__scoped_atomic_load_n(
+                          &completions[active_completion].generation,
+                          __ATOMIC_ACQUIRE, __MEMORY_SCOPE_DEVICE))
+                    : 0ull;
+            mcu_log_event(state, McuLogEvent::WaitBegin, pc, node.variant_id,
+                          node.completion_slot, active_generation,
+                          have_active ? 1ull : 0ull, observed_generation);
             if (!have_active || node.completion_slot != active_completion) {
-                mcu_fault(state, McuFaultCode::completion_generation_mismatch,
-                          pc, node.variant_id, active_generation);
+                mcu_log_event(state, McuLogEvent::CompletionSlotMismatch, pc,
+                              node.variant_id, node.completion_slot,
+                              active_generation, have_active ? 1ull : 0ull,
+                              active_completion);
+                mcu_fault(state,
+                          McuFaultCode::completion_wait_state_mismatch, pc,
+                          node.variant_id, active_generation);
                 faulted = true;
                 break;
             }
@@ -530,6 +570,8 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                 doorbell_mode == McuDoorbellMode::coalesce) {
                 __threadfence_system();
                 ring_aql_doorbell(queue, last_published_slot);
+            mcu_log_event(state, McuLogEvent::DispatchDoorbell, pc, 0u, 0u, 0u,
+                          last_published_slot, 1u);
                 if (debug_records != nullptr && debug_record_count != 0u &&
                     ctx.dispatch_seq != 0u) {
                     McuDispatchRecord& rec =
@@ -553,6 +595,10 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                     }
                 }
                 if (++spins >= kMcuCompletionSpinLimit) {
+                    mcu_log_event(state, McuLogEvent::WaitSpinTimeout, pc,
+                                  node.variant_id, active_completion,
+                                  active_generation, spins,
+                                  static_cast<uint64_t>(active_completion));
                     mcu_fault(state,
                               McuFaultCode::completion_generation_mismatch,
                               pc, node.variant_id, active_generation);
@@ -564,6 +610,9 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
             if (faulted || supervisor == McuSupervisorState::stopping) {
                 break;
             }
+            mcu_log_event(state, McuLogEvent::WaitComplete, pc,
+                          node.variant_id, active_completion, active_generation,
+                          spins, ctx.completions_observed);
             if (timing != nullptr && active_timing != 0xffffffffu) {
                 timing[active_timing].dependency_ready = wall_clock64();
             }
@@ -597,6 +646,8 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
             doorbell_mode == McuDoorbellMode::coalesce) {
             __threadfence_system();
             ring_aql_doorbell(queue, last_published_slot);
+            mcu_log_event(state, McuLogEvent::DispatchDoorbell, pc, 0u, 0u, 0u,
+                          last_published_slot, 1u);
             if (debug_records != nullptr && debug_record_count != 0u &&
                 ctx.dispatch_seq != 0u) {
                 McuDispatchRecord& rec =
@@ -608,6 +659,8 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
             pending_doorbell = 0u;
         }
         ++ctx.plans_started;
+        mcu_log_event(state, McuLogEvent::PlanEnd, 0u, 0u, 0u, 0u,
+                      ctx.dispatches_committed, ctx.completions_observed);
         mcu_publish_counter(&state->dispatches_committed,
                             ctx.dispatches_committed);
         mcu_publish_counter(&state->completions_observed,
@@ -642,4 +695,3 @@ if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
         return true;
     }
 }
-

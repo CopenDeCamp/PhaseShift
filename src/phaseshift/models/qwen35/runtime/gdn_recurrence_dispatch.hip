@@ -132,16 +132,25 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         al_slot.elements < num_v_heads)
         return Status::invalid_state("gdn-recurrence: a_log invalid", __FILE__, __LINE__);
 
-    if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
-        return Status::invalid_state("gdn-recurrence: request metadata null", __FILE__, __LINE__);
-    const uint32_t num_requests = ctx.batch_context->num_requests;
-    const uint32_t actual_rows = ctx.batch_context->actual_rows;
+    const ::ps::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
+    uint32_t num_requests = ctx.staged_request_count;
+    uint32_t verify_requests = ctx.staged_verify_request_count;
+    uint32_t actual_rows = ctx.actual_rows;
+    if (requests == nullptr) {
+        if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
+            return Status::invalid_state("gdn-recurrence: request metadata null",
+                                         __FILE__, __LINE__);
+        requests = ctx.batch_context->requests;
+        num_requests = ctx.batch_context->num_requests;
+        verify_requests = ctx.batch_context->num_verify_requests;
+        actual_rows = ctx.batch_context->actual_rows;
+    }
     if (num_requests == 0u || actual_rows == 0u)
         return Status::invalid_state("gdn-recurrence: requests/rows == 0", __FILE__, __LINE__);
     uint32_t max_request_rows = 0u;
     for (uint32_t r = 0u; r < num_requests; ++r)
-        if (ctx.batch_context->requests[r].row_count > max_request_rows)
-            max_request_rows = ctx.batch_context->requests[r].row_count;
+        if (requests[r].row_count > max_request_rows)
+            max_request_rows = requests[r].row_count;
 
     GdnRecurrenceResolvedArgs ra;
     ra.rows = actual_rows;
@@ -157,6 +166,9 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     c.a_log = static_cast<const bf16_t*>(al_slot.device_ptr);
     c.recurrent_state = gdn.recurrent_base;
     c.output = static_cast<float*>(out.ptr);
+    if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
+        return Status::invalid_state("gdn-recurrence: device requests null",
+                                     __FILE__, __LINE__);
     c.requests = ctx.batch_context->requests;
     c.num_requests = num_requests;
     c.actual_rows = actual_rows;
@@ -176,8 +188,7 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     c.recurrent_slot_stride = gdn.recurrent_slot_stride;
     c.recurrent_layer_stride = gdn.recurrent_layer_stride;
     const GdnSpecHistoryDeviceView& hist = ctx.gdn_spec_history;
-    const bool mixed_verify = ctx.batch_context != nullptr &&
-                              ctx.batch_context->num_verify_requests != 0u;
+    const bool mixed_verify = verify_requests != 0u;
     if ((verify_exact_active(ctx) || mixed_verify) &&
         hist.recurrent_history != nullptr && hist.capture_rows != 0u) {
         c.recurrent_history = hist.recurrent_history;
@@ -261,7 +272,10 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
     out.variant = variant;
     out.lossy = ::ps::kernel::gdn_recurrence_lossy_enabled();
     if (variant == PhysicalGdnRecurrenceVariant::WmmaDecode1 ||
-        variant == PhysicalGdnRecurrenceVariant::Wmma) {
+        variant == PhysicalGdnRecurrenceVariant::Wmma ||
+        variant == PhysicalGdnRecurrenceVariant::DecodeRowsExact ||
+        variant == PhysicalGdnRecurrenceVariant::Decode1Serial ||
+        variant == PhysicalGdnRecurrenceVariant::WmmaSerial) {
         out.grid_x = ::ps::kernel::gdn_recurrence_wmma_grid_x(
             ra.num_requests, ra.kernel.num_v_heads, ra.kernel.head_v);
         out.grid_y = 1u;
@@ -269,7 +283,8 @@ Result<PhysicalResolveStatus> resolve_gdn_recurrence_physical(
         out.workgroup = ::ps::kernel::kGdnRecurrenceWmmaDecode1Threads;
         if (out.grid_x == 0u)
             return PhysicalResolveStatus::NotApplicable;
-        if (variant == PhysicalGdnRecurrenceVariant::Wmma &&
+        if ((variant == PhysicalGdnRecurrenceVariant::Wmma ||
+             variant == PhysicalGdnRecurrenceVariant::WmmaSerial) &&
             ra.kernel.num_v_heads % ra.kernel.key_heads != 0u)
             return PhysicalResolveStatus::NotApplicable;
     }

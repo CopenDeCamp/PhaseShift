@@ -213,6 +213,8 @@ void poison_if_current(
 constexpr uint32_t kHostExternalCapacity = 16u;
 static_assert(4u + kMaxTargetHiddenTaps <= kHostExternalCapacity,
               "host external output capacity must cover the fixed outputs plus taps");
+static_assert(kHostExternalCapacity <= runtime::kHostExternalValueCapacity,
+              "host execution context must own storage for every host external value");
 
 Status build_host_execution_context(
     Executor& executor,
@@ -222,6 +224,7 @@ Status build_host_execution_context(
     uint32_t actual_outputs,
     uint32_t actual_sampled_outputs,
     uint32_t actual_stochastic_outputs,
+    uint32_t request_count,
     uint32_t min_visible_tokens,
     uint32_t max_visible_tokens,
     ::ps::runtime::ExecutionRole role,
@@ -252,28 +255,31 @@ Status build_host_execution_context(
         executor.dispatch_staging_bytes == 0) {
         return Status::invalid_state("dispatch staging not allocated", __FILE__, __LINE__);
     }
-    const void* inputs[kHostExternalCapacity] = {};
-    void* outputs[kHostExternalCapacity] = {};
     auto* token_ids = executor.batch_context_storage.token_ids.data<int32_t>();
-    for (uint32_t i = 0; i < program.external_input_count; ++i) inputs[i] = token_ids;
+    for (uint32_t i = 0; i < program.external_input_count; ++i) {
+        ctx.external_input_storage[i] = token_ids;
+    }
     for (uint32_t i = 0; i < program.external_output_count; ++i) {
         if (i == 0u) {
-            outputs[i] = executor.output_hidden.data<void>();
+            ctx.external_output_storage[i] = executor.output_hidden.data<void>();
         } else if (i == 1u) {
-            outputs[i] = executor.logits.data<void>();
+            ctx.external_output_storage[i] = executor.logits.data<void>();
         } else if (i == 2u) {
-            outputs[i] = executor.sampled_tokens.data<void>();
+            ctx.external_output_storage[i] = executor.sampled_tokens.data<void>();
         } else if (i == 3u) {
-            outputs[i] = executor.token_hidden.data<void>();
+            ctx.external_output_storage[i] = executor.token_hidden.data<void>();
         } else {
             const uint32_t tap = i - 4u;
             if (tap >= executor.config.target_hidden_tap_count) {
                 return Status::invalid_state(
                     "external output has no bound buffer", __FILE__, __LINE__);
             }
-            outputs[i] = executor.dflash_target_hidden[tap].data<void>();
+            ctx.external_output_storage[i] =
+                executor.dflash_target_hidden[tap].data<void>();
         }
     }
+    ctx.external_inputs = ctx.external_input_storage;
+    ctx.external_outputs = ctx.external_output_storage;
     auto* ws_base = executor.execution_workspace.data<uint8_t>();
     if (ws_base == nullptr) {
         return Status::invalid_state("execution workspace not allocated", __FILE__, __LINE__);
@@ -303,9 +309,7 @@ Status build_host_execution_context(
     ctx.row_positions = executor.batch_context_storage.row_positions.data<uint32_t>();
     ctx.rope_inv_freq = executor.rope_inv_freq.data<double>();
     ctx.row_sequence_slots = executor.batch_context_storage.row_sequence_slots.data<uint32_t>();
-    ctx.external_inputs = inputs;
     ctx.external_input_count = program.external_input_count;
-    ctx.external_outputs = outputs;
     ctx.external_output_count = program.external_output_count;
     ctx.workspace = ws_base;
     ctx.workspace_bytes = executor.execution_workspace.allocation_bytes();
@@ -336,6 +340,21 @@ Status build_host_execution_context(
     ctx.actual_outputs = actual_outputs;
     ctx.actual_sampled_outputs = actual_sampled_outputs;
     ctx.actual_stochastic_outputs = actual_stochastic_outputs;
+    ctx.staged_requests = static_cast<
+        const ::ps::runtime::DeviceRequestDescriptor*>(executor.host_request_staging);
+    ctx.staged_request_count = request_count;
+    uint32_t staged_verify = 0u;
+    if (ctx.staged_requests != nullptr) {
+        for (uint32_t i = 0u; i < request_count; ++i) {
+            if (ctx.staged_requests[i].execution_class ==
+                ::ps::runtime::ExecutionClass::SPEC_VERIFY) {
+                ++staged_verify;
+            }
+        }
+    } else {
+        staged_verify = 0u;
+    }
+    ctx.staged_verify_request_count = staged_verify;
     ctx.output_sampling_params =
         executor.batch_context_storage.output_sampling_params
             .data<::ps::runtime::DeviceSamplingParams>();
@@ -521,17 +540,28 @@ Status stage_mcu_commit_slots(
     return Status::make_ok();
 }
 
-Status execute_mcu_hybrid(
+struct McuPlanPreflight {
+    runtime::McuCompiledPlan plan;
+    uint32_t plan_begin = 0u;
+    uint32_t plan_end = 0u;
+};
+
+void report_full_plan_reject(const Status& status) {
+    static bool reported = false;
+    if (reported) return;
+    reported = true;
+    std::fprintf(stderr, "[mcu] full plan rejected: %s (body range used)\n",
+                 status.message().c_str());
+}
+
+Status preflight_mcu_plan(
     Executor& executor,
     const ::ps::runtime::Program& program,
-    runtime::HostExecutionContext& ctx,
-    hipStream_t stream,
+    const runtime::HostExecutionContext& ctx,
     uint32_t bucket,
     uint32_t dispatch_count,
-    const ::ps::runtime::DeviceRequestDescriptor* staging,
-    uint32_t request_count,
-    const runtime::GdnSpecHistoryDeviceView& gdn_history) {
-    namespace mcu = ::ps::runtime::gpu_mcu;
+    const runtime::GdnSpecHistoryDeviceView& gdn_history,
+    McuPlanPreflight& out) {
     if (executor.mcu_state == nullptr) {
         return Status::invalid_state("mcu state not created", __FILE__, __LINE__);
     }
@@ -541,8 +571,7 @@ Status execute_mcu_hybrid(
         return Status::unsupported("mcu body range is not available", __FILE__,
                                    __LINE__);
     }
-
-    runtime::McuDecodeState& state = *executor.mcu_state;
+    const runtime::McuDecodeState& state = *executor.mcu_state;
     runtime::McuPlanCompileOptions compile_options{};
     compile_options.dispatch_begin = 0u;
     compile_options.dispatch_end = dispatch_count;
@@ -558,7 +587,9 @@ Status execute_mcu_hybrid(
     compile_options.verify_recurrent_history_stride =
         gdn_history.recurrent_row_stride;
     runtime::McuCompiledPlan plan{};
-    Status st = runtime::compile_mcu_plan(program, ctx, compile_options, plan);
+    const Status full_st =
+        runtime::compile_mcu_plan(program, ctx, compile_options, plan);
+    Status st = full_st;
     uint32_t plan_begin = 0u;
     uint32_t plan_end = dispatch_count;
     if (!st.ok()) {
@@ -570,8 +601,36 @@ Status execute_mcu_hybrid(
         plan_end = range.body_end;
     }
     if (!st.ok()) return st;
+    if (!full_st.ok()) report_full_plan_reject(full_st);
+    out.plan = std::move(plan);
+    out.plan_begin = plan_begin;
+    out.plan_end = plan_end;
+    return Status::make_ok();
+}
+
+Status execute_mcu_hybrid(
+    Executor& executor,
+    const ::ps::runtime::Program& program,
+    runtime::HostExecutionContext& ctx,
+    hipStream_t stream,
+    uint32_t dispatch_count,
+    const ::ps::runtime::DeviceRequestDescriptor* staging,
+    uint32_t request_count,
+    const McuPlanPreflight& preflight) {
+    namespace mcu = ::ps::runtime::gpu_mcu;
+    if (executor.mcu_state == nullptr) {
+        return Status::invalid_state("mcu state not created", __FILE__, __LINE__);
+    }
+
+    runtime::McuDecodeState& state = *executor.mcu_state;
+    const runtime::McuCompiledPlan& plan = preflight.plan;
+    const uint32_t plan_begin = preflight.plan_begin;
+    const uint32_t plan_end = preflight.plan_end;
 
     state.full_plan = plan_begin == 0u && plan_end == dispatch_count;
+    state.plan_begin = plan_begin;
+    state.plan_end = plan_end;
+    state.plan_total = dispatch_count;
     const runtime::McuPlanShape shape =
         plan.attention_paged_split.empty() ? runtime::McuPlanShape::Direct
                                            : runtime::McuPlanShape::Split;
@@ -579,6 +638,7 @@ Status execute_mcu_hybrid(
         runtime::mcu_plan_fingerprint(plan);
     const runtime::McuPlanCacheStep step =
         state.cache.observe(shape, fingerprint);
+    Status st = Status::make_ok();
     if (step.needs_switch) {
         st = state.runtime.prepare_plan(plan);
         if (!st.ok()) return st;
@@ -613,9 +673,6 @@ Status execute_mcu_hybrid(
     const uint32_t max_rows = executor.config.max_scheduled_tokens;
     const uint32_t max_outputs = executor.config.max_scheduled_output_rows;
 
-    *state.ready_epoch += 1u;
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-
     if (plan_begin != 0u) {
         st = launch_host_backend_range(executor, program, ctx, stream, 0u,
                                        plan_begin);
@@ -646,6 +703,15 @@ Status execute_mcu_hybrid(
         state.commit_max_slots);
     if (!st.ok()) return st;
 
+    const hipError_t ctx_sync = hipStreamSynchronize(stream);
+    if (ctx_sync != hipSuccess) {
+        return Status::hip_error("mcu batch context synchronize",
+                                 hipGetErrorString(ctx_sync), __FILE__,
+                                 __LINE__);
+    }
+    *state.ready_epoch += 1u;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
     st = state.persistent.start();
     if (!st.ok()) return st;
     const auto deadline = std::chrono::steady_clock::now() +
@@ -655,6 +721,27 @@ Status execute_mcu_hybrid(
         if (std::chrono::steady_clock::now() >= deadline) {
             (void)state.persistent.request_stop();
             (void)state.persistent.wait_stopped(5000u);
+            state.runtime.dump_log(stderr);
+            state.persistent.dump_state(stderr);
+            const ::ps::runtime::gpu_mcu::GpuMcuBatchCommitTelemetry ctelem =
+                state.persistent.commit_telemetry();
+            std::fprintf(
+                stderr,
+                "[mcu] commit telemetry: dispatched=%llu completed=%llu "
+                "committed=%llu failed=%llu req=%u tokens=%u stale=%u "
+                "geom=%u verify_ovf=%u pending_ovf=%u stopped_tok=%u\n",
+                static_cast<unsigned long long>(
+                    state.persistent.batches_dispatched()),
+                static_cast<unsigned long long>(
+                    state.persistent.batches_completed()),
+                static_cast<unsigned long long>(
+                    state.persistent.batches_committed()),
+                static_cast<unsigned long long>(
+                    state.persistent.batches_failed()),
+                ctelem.committed_requests, ctelem.committed_tokens,
+                ctelem.stale_handles, ctelem.invalid_geometry,
+                ctelem.verify_overflow, ctelem.pending_overflow,
+                ctelem.stopped_tokens);
             return Status::invalid_state("mcu batch did not commit", __FILE__,
                                          __LINE__);
         }
@@ -1129,9 +1216,10 @@ Result<PendingBatch> submit_co_batch(
     backend_inputs.kv_dtype_is_bf16 =
         executor.kv_pool != nullptr &&
         executor.kv_pool->dtype() == ::ps::qwen35::KVCacheDType::BF16;
+    backend_inputs.tensor_parallel_configured = !executor.tp_schedules.empty();
+    backend_inputs.stochastic_output_count = prep.num_stochastic_outputs;
     backend_inputs.imatrix_collector_present = executor.imatrix_collector != nullptr;
     backend_inputs.value_trace_present = executor.value_trace != nullptr;
-    backend_inputs.target_hidden_tap_count = executor.config.target_hidden_tap_count;
     backend_inputs.stream_wait_value_supported = executor.mcu_state != nullptr;
     backend_inputs.persistent_ready = executor.mcu_state != nullptr;
     const std::size_t program_slot =
@@ -1149,6 +1237,20 @@ Result<PendingBatch> submit_co_batch(
         return on_error(backend_error);
     }
     const bool mcu_selected = backend_decision.eligible;
+
+    runtime::HostExecutionContext ctx{};
+    {
+        const Status ctx_status = build_host_execution_context(
+            executor, *program, status_ptr, N, prep.num_outputs,
+            prep.num_sampled_outputs, prep.num_stochastic_outputs, R,
+            min_visible_tokens, max_visible_tokens, exec_role, exec_numeric_mode,
+            options.gdn_spec_history, options.gdn_compact,
+            prep.stochastic_topk_eligible, prep.stochastic_top_k, ctx);
+        if (!ctx_status.ok()) return on_error(ctx_status);
+    }
+    const uint32_t dispatch_count =
+        static_cast<uint32_t>(program->dispatches.size());
+    McuPlanPreflight mcu_preflight{};
 
     BatchExecutionOutput output;
     output.num_outputs = prep.num_outputs;
@@ -1247,20 +1349,17 @@ Result<PendingBatch> submit_co_batch(
             stq = upload(executor.batch_context, ctx_src, sizeof(host_ctx));
             if (!stq.ok()) return stq;
         }
+        if (mcu_selected) {
+            stq = preflight_mcu_plan(executor, *program, ctx,
+                                     static_cast<uint32_t>(program_slot),
+                                     dispatch_count, options.gdn_spec_history,
+                                     mcu_preflight);
+            if (!stq.ok()) return stq;
+        }
         stq = ::ps::runtime::launch_prepare_batch_descriptor(
             executor.batch_context, executor.config.max_scheduled_requests, stream);
         if (!stq.ok()) return stq;
-        runtime::HostExecutionContext ctx{};
-        stq = build_host_execution_context(
-            executor, *program, status_ptr, N, prep.num_outputs,
-            prep.num_sampled_outputs, prep.num_stochastic_outputs,
-            min_visible_tokens, max_visible_tokens, exec_role,
-            exec_numeric_mode, options.gdn_spec_history, options.gdn_compact,
-            prep.stochastic_topk_eligible, prep.stochastic_top_k, ctx);
-        if (!stq.ok()) return stq;
 
-        const uint32_t dispatch_count =
-            static_cast<uint32_t>(program->dispatches.size());
         const hipError_t word_err =
             hipMemsetAsync(ctx.error_word, 0, sizeof(uint32_t), stream);
         if (word_err != hipSuccess) {
@@ -1271,6 +1370,13 @@ Result<PendingBatch> submit_co_batch(
             program - executor.program_set.programs.data());
         const bool tp_configured = !executor.tp_schedules.empty();
         executor.active_submission_mcu_epoch = 0u;
+        if (tp_configured && mcu_selected) {
+            runtime::DecodeBackendDecision conflict{};
+            conflict.backend = runtime::DecodeBackend::GpuMcu;
+            conflict.reason = runtime::DecodeBackendReason::TensorParallel;
+            conflict.eligible = false;
+            return runtime::decode_backend_execution_error(conflict);
+        }
         if (tp_configured) {
             if (program_index >= executor.tp_schedules.size() ||
                 !executor.tp_schedules[program_index].active() ||
@@ -1287,9 +1393,8 @@ Result<PendingBatch> submit_co_batch(
                                             dispatch_count);
         } else {
             stq = execute_mcu_hybrid(executor, *program, ctx, stream,
-                                     static_cast<uint32_t>(program_slot),
                                      dispatch_count, staging, R,
-                                     options.gdn_spec_history);
+                                     mcu_preflight);
             if (stq.ok()) {
                 executor.active_submission_mcu_epoch = executor.mcu_state->epoch;
             }
@@ -2058,6 +2163,20 @@ Result<Executor> create_model_executor(
         return Status::invalid_argument(
             "max_scheduled_tokens and max_scheduled_requests must be > 0",
             __FILE__, __LINE__);
+    }
+
+    {
+        runtime::DecodeBackendConfigInputs backend_config{};
+        backend_config.requested = config.backend;
+        backend_config.kv_dtype_is_bf16 =
+            kv_pool.dtype() == KVCacheDType::BF16;
+        backend_config.tensor_parallel_configured =
+            config.tp != nullptr && config.tp->tp_size > 1u;
+        const runtime::DecodeBackendDecision decision =
+            runtime::decide_decode_backend_config(backend_config);
+        const Status backend_error =
+            runtime::decode_backend_execution_error(decision);
+        if (!backend_error.ok()) return backend_error;
     }
 
     if (kv_pool.dtype() != KVCacheDType::BF16

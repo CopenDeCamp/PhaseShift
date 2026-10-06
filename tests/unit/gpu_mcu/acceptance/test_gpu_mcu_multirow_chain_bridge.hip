@@ -338,8 +338,8 @@ int main() {
         std::printf("FAIL: prepare_plan: %s\n", prepared.message().c_str());
         return 1;
     }
-    check(runtime.row_global_patch_count() == 1u,
-          "runtime derives one row-global patch");
+    check(runtime.row_global_patch_count() == 0u,
+          "row-block rows are fixed by the prepared plan");
 
     rt::DeviceBatchContext* ctx_dev = nullptr;
     rt::DeviceRequestDescriptor* req_dev = nullptr;
@@ -414,7 +414,7 @@ int main() {
                                            runtime.row_global_patch_count())
               .ok(),
           "configure execution patches");
-    check(persistent.execution_patch_count() == 1u, "patch table recorded");
+    check(persistent.execution_patch_count() == 0u, "patch table recorded");
 
     uint64_t ready = 1u;
     (void)hipMemcpy(ready_dev, &ready, sizeof(ready), hipMemcpyHostToDevice);

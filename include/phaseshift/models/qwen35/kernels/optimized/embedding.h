@@ -9,6 +9,8 @@ namespace ps::kernel {
 
 inline constexpr const char* kEmbeddingBf16Symbol =
     "phaseshift_qwen35_embedding_bf16";
+inline constexpr const char* kEmbeddingPsq8Symbol =
+    "phaseshift_qwen35_embedding_psq8";
 
 inline constexpr uint32_t kEmbeddingThreads = 256u;
 
@@ -33,6 +35,34 @@ static_assert(offsetof(EmbeddingBf16Args, rows) == 32);
 static_assert(offsetof(EmbeddingBf16Args, vocab_size) == 36);
 static_assert(offsetof(EmbeddingBf16Args, hidden_size) == 40);
 static_assert(offsetof(EmbeddingBf16Args, output_row_stride) == 44);
+
+struct EmbeddingPsq8Args {
+    const uint8_t* codes = nullptr;
+    const uint8_t* scales = nullptr;
+    const int32_t* token_ids = nullptr;
+    bf16_t* output = nullptr;
+    uint32_t* error_word = nullptr;
+    uint32_t codes_row_stride_bytes = 0;
+    uint32_t scale_row_stride_bytes = 0;
+    uint32_t rows = 0;
+    uint32_t vocab_size = 0;
+    uint32_t hidden_size = 0;
+    uint32_t output_row_stride = 0;
+};
+
+static_assert(sizeof(EmbeddingPsq8Args) == 64);
+static_assert(alignof(EmbeddingPsq8Args) == 8);
+static_assert(offsetof(EmbeddingPsq8Args, codes) == 0);
+static_assert(offsetof(EmbeddingPsq8Args, scales) == 8);
+static_assert(offsetof(EmbeddingPsq8Args, token_ids) == 16);
+static_assert(offsetof(EmbeddingPsq8Args, output) == 24);
+static_assert(offsetof(EmbeddingPsq8Args, error_word) == 32);
+static_assert(offsetof(EmbeddingPsq8Args, codes_row_stride_bytes) == 40);
+static_assert(offsetof(EmbeddingPsq8Args, scale_row_stride_bytes) == 44);
+static_assert(offsetof(EmbeddingPsq8Args, rows) == 48);
+static_assert(offsetof(EmbeddingPsq8Args, vocab_size) == 52);
+static_assert(offsetof(EmbeddingPsq8Args, hidden_size) == 56);
+static_assert(offsetof(EmbeddingPsq8Args, output_row_stride) == 60);
 
 hipError_t launch_embedding_bf16(
     const bf16_t* table,

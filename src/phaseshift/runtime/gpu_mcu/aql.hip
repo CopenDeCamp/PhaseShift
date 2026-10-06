@@ -422,6 +422,15 @@ Result<GpuMcuKernargRegion> GpuMcuAqlQueue::allocate_kernarg(
     return region;
 }
 
+Result<GpuMcuKernargRegion> GpuMcuAqlQueue::allocate_log_region(
+    std::size_t bytes) {
+    if (bytes == 0) {
+        return Status::invalid_argument("log region size must be nonzero",
+                                        __FILE__, __LINE__);
+    }
+    return allocate_kernarg(bytes, 1u);
+}
+
 Status GpuMcuAqlQueue::submit_host(
     const GpuAqlPacketTemplate* packets,
     uint32_t count) {

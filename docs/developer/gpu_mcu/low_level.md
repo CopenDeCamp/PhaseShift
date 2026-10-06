@@ -275,6 +275,17 @@ contract を文書で守るのではなく、compile 前に落とす。
 - variant は **dense id**（0 = completion marker、1 以降 = 実 kernel）。
   MCU は `variant_id` のみを識別し、`kernel_object` の switch を持たない。
 - 実 kernel の runtime 値は plan node に埋めず、invocation descriptor table に置く。
+- `LINEAR_BF16` は `ExactRows`（rows 1..16、`Bf16ExactRowsVariant` catalog）のほか、
+  rows > 1 のとき `Wmma` / `WmmaWide` / `WmmaKPartition` を MCU entrypoint で持つ。
+  grid は `bf16_wmma_grid_x/y` を Host launcher と共有し、`rows` は
+  `row_global_patches` の `ActualRows` patch で loop ごとに更新される。
+- `LINEAR_PSQ8` は `RowBlock1/2/4/8` と `Prefill2D`（rows が 256 の倍数かつ
+  rows >= 512 のときの N64K64 / N128K64 / N128K128）を MCU entrypoint で持つ。
+  grid は `psq8_rowblock_grid_x/y` / `psq8_prefill2d_grid_x/y` を Host launcher と
+  共有し、`Prefill2D` も RowBlock と同じ `Psq8MultiRowBf16Args` と recipe を共有する。
+- `select_bf16_gemm_config` / `select_psq8_gemm_config` は Host と MCU で単一実装を
+  共有する。selector が保証する割り切り条件（`rows % 256`、`out % ob`、`k % kc`）を
+  MCU 側で再判定しない。
 
 | recipe | invocation struct | production args |
 |---|---|---|
@@ -283,7 +294,10 @@ contract を文書で守るのではなく、compile 前に落とす。
 | `kMcuKernargRecipeActivationQuantizeA8` | `McuActivationQuantizeInvocation` | `ActivationQuantizeA8Args` |
 | `kMcuKernargRecipePsq4Decode1Bf16U16/U8` | `McuPsq4Decode1Invocation` | `Psq4Decode1Bf16Args` |
 | `kMcuKernargRecipePsq8Decode1Bf16U8` | `McuPsq4Decode1Invocation` | `Psq8Decode1Bf16Args` |
+| `kMcuKernargRecipePsq4MultiRowBf16` | `McuPsq4MultiRowInvocation` | `Psq4MultiRowBf16Args` / `Psq8MultiRowBf16Args` |
 | `kMcuKernargRecipeEmbeddingBf16` | `McuEmbeddingBf16Invocation` | `EmbeddingBf16Args` |
+| `kMcuKernargRecipeEmbeddingPsq8` | `McuEmbeddingPsq8Invocation` | `EmbeddingPsq8Args` |
+| `kMcuKernargRecipeBf16Wmma` | `McuBf16WmmaInvocation` | `Bf16GemmWmmaArgs` |
 | `kMcuKernargRecipeOutputGatherBf16` | `McuOutputGatherBf16Invocation` | `OutputGatherBf16McuArgs` |
 | `kMcuKernargRecipeVerifyAcceptBatch` | `McuVerifyAcceptBatchInvocation` | `VerifyAcceptBatchArgs` |
 | `kMcuKernargRecipeGdnSpecRestoreFromCounts` | `McuGdnSpecRestoreFromCountsInvocation` | `GdnSpecRestoreFromCountsArgs` |
@@ -294,13 +308,16 @@ contract を文書で守るのではなく、compile 前に落とす。
 
 ## embedding prefix
 
-- token 列を受け取る BF16 embedding（optimized selector が効く hidden 2560 / 5120）は
-  MCU region の**先頭 node** として compile する。Host からの embedding launch と
+- token 列を受け取る embedding（BF16 / PSQ8、optimized selector が効く hidden 2560 /
+  5120）は MCU region の**先頭 node** として compile する。Host からの embedding launch と
   embedding 直後の Host/GPU 同期境界を置かない。
 - token 入力は graph 上 `I32`（`ValueDType::I32`）を contract とする。`EmbeddingBf16Args`
   は `table` / `token_ids` / `output` / `error_word` / `rows` / `vocab_size` /
   `hidden_size` / `output_row_stride` を持ち、`McuEmbeddingBf16Invocation` と
   `sizeof` / `alignof` / 全 `offsetof` を static_assert で固定する。
+  PSQ8 は `codes` / `scales` / `codes_row_stride_bytes` / `scale_row_stride_bytes` を
+  加えた 11 フィールド（64 bytes）の `EmbeddingPsq8Args` を持ち、
+  `McuEmbeddingPsq8Invocation` と同様に static_assert で固定する。
 - selector / weight encoding / shape / pointer 解決は Host resolver
   （`resolve_embedding_physical`）と共有する。Host と MCU で selector 条件を別実装しない。
 - invocation の `token_ids` は compile 時に resolve した安定 device pointer を既定値とし、
@@ -308,9 +325,10 @@ contract を文書で守るのではなく、compile 前に落とす。
   上書きする。HostStream と external persistent の両経路に対応する。
 - `rows` / `grid.x` は **actual launch rows** を使い、bucket max へ丸めない。
   stable kernel 側に `row >= args.rows` guard を残す。
-- `EmbeddingStorage::Psq8` は MCU 対象外。BF16 以外・selector 非対象 shape は
-  Host prefix に残す。この判定は executor の `ProgramMcuRange::region_begin` で行い、
-  `region_begin == 0` のとき Host prefix launch は発行しない。
+- `EmbeddingStorage::Psq8` も MCU で compile でき、`kMcuKernargRecipeEmbeddingPsq8`
+  を使う。selector 非対象 shape は Host prefix に残す。この判定は executor の
+  `ProgramMcuRange::region_begin` で行い、`region_begin == 0` のとき
+  Host prefix launch は発行しない。
 
 ## lm-head plan extension
 
@@ -547,7 +565,7 @@ request の resource lifecycle は device（persistent MCU）が所有する。H
   1 batch にしか入れないため **毎 loop dispatch しても冪等**で、decode だけの loop では
   no-op になる。
 - plan builder（`compile_mcu_plan`）が GDN state を触る range の先頭に 1 node 出す。
-  先頭に BF16 embedding がある場合は embedding node の後ろに置く。
+  先頭に embedding（BF16 / PSQ8）がある場合は embedding node の後ろに置く。
   対象 range に `STATEFUL_CAUSAL_CONV1D` / `GDN_RECURRENCE` が無ければ出さない。
   node は plan に焼き込まれるので、batch ごとの Host 判断を挟まない。
 - 対象は layer あたり MB 規模なので、persistent loop 自身の thread では zero 化しない。
@@ -596,3 +614,56 @@ MCU continuous batching の永続 request state。CPU runtime の
   `request_stop()` + `wait_stopped()` で MCU を停止してから readback する。
 - どちらも 9 分規模のハングとして現れた。この 2 点は stream 契約であり、
   実装の見直しではなく配置の見直しで解消する。
+
+## MCU execution log (GTT)
+
+persistent FSM の内部進行を観測するためのログ領域。substrate の標準観測機構であり、
+デバッグ用の一時機能ではない。
+
+- 領域は **GTT（HSA host-visible region）に 1 MiB**、`GpuMcuAqlQueue::allocate_log_region()`
+  で確保する。行は 256 B 固定で **4096 行**。`kMcuLogLineCount` は 2 の冪。
+- 異常系でも観測できるよう、**log 無効時（`log_base == 0`）は helper の先頭で return**
+  する。`GpuMcuFsmConfig::log_base` を 0 にすれば production でも記録されない。
+- 書き込みは device の共通 helper `mcu_log_event()`（`detail/mcu_log.h`、
+  `__device__ __forceinline__`）で行う。**`GpuMcuFsmState` 経由の indirection**
+  （`state->log_base`）のみを辿る。GPU 上の関数ポインタ呼び出しは使わない
+  （RDC / device linking / indirect call の ABI 問題を招くため）。
+- 行は固定 binary record `McuLogRecord`。`sequence` を先頭に持つため、
+  **ラウンドラップ後も `sequence` で全体を時系列に並べ直せる**。
+  書き込み index は `atomicAdd(&state->log_head, 1)`、slot は `seq & (4096 - 1)`。
+- host 側は `GpuMcuFsm::log_head()` と `GpuMcuFsm::log_record(slot)` で読む。
+  GTT のため追加コピーは不要。`sequence < log_head` の record が有効。
+
+### record layout（256 B）
+
+| offset | field |
+| --- | --- |
+| 0 | `sequence` (u64) |
+| 8 | `clock` (u64, `wall_clock64()`) |
+| 16 | `event` (u32) |
+| 20 | `pc` (u32) |
+| 24 | `variant` (u32) |
+| 28 | `completion_slot` (u32) |
+| 32 | `generation` (u64) |
+| 40 | `value0` (u64) |
+| 48 | `value1` (u64) |
+| 56 | `message[192]` |
+
+### event
+
+| id | event | 含まれる値 |
+| --- | --- | --- |
+| 1 | `PlanBegin` | `generation` = plan_id、`value0` = node_count |
+| 2 | `DispatchPrepare` | `pc` / `variant` / `generation`、`value0` = kernarg slot |
+| 3 | `DispatchPublish` | `value0` = queue slot、`value1` = kernarg address |
+| 4 | `DispatchDoorbell` | `value0` = queue slot |
+| 5 | `WaitBegin` | `value0` = have_active、`value1` = observed generation |
+| 6 | `WaitComplete` | `value0` = spin 回数 |
+| 7 | `WaitSpinTimeout` | `value0` = spin 上限到達時の値 |
+| 8 | `CompletionSlotMismatch` | `value0` = have_active、`value1` = active completion |
+| 9 | `KernargBuildFailed` | `value0` = `McuFaultCode` |
+| 10 | `Fault` | `value0` = `McuFaultCode` |
+| 11 | `PlanEnd` | `value0` = dispatches committed、`value1` = completions observed |
+
+`DispatchPublish` の `kernel_object` は record に含めない。
+`McuKernelVariantDesc::packet`（retained packet の offset 32）から host 側で復元する。

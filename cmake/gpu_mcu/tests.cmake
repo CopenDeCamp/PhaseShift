@@ -44,6 +44,8 @@ phaseshift_add_test(NAME test_gpu_mcu_plan_cache SOURCE unit/gpu_mcu/qwen35/test
 target_include_directories(test_gpu_mcu_plan_cache PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_decode_backend_policy SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_decode_backend_policy.hip LABELS "cpu;required" LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35 phaseshift_runtime phaseshift_gpu)
 target_include_directories(test_gpu_mcu_decode_backend_policy PRIVATE "${CMAKE_SOURCE_DIR}/src")
+phaseshift_add_test(NAME test_gpu_mcu_plan_sampling_gate SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_plan_sampling_gate.hip LABELS "cpu;required" LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35 phaseshift_runtime phaseshift_gpu)
+target_include_directories(test_gpu_mcu_plan_sampling_gate PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_runtime_lifecycle SOURCE unit/gpu_mcu/controller/test_gpu_mcu_runtime_lifecycle.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 600 GPU_COUNT 1 GPU_COST_GB 1
 set_tests_properties(test_gpu_mcu_runtime_lifecycle PROPERTIES RUN_SERIAL TRUE) LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35 phaseshift_gpu_mcu phaseshift_runtime phaseshift_gpu)
 target_include_directories(test_gpu_mcu_runtime_lifecycle PRIVATE "${CMAKE_SOURCE_DIR}/src")
@@ -74,6 +76,8 @@ set_tests_properties(test_gpu_mcu_real_rmsnorm_feed PROPERTIES RUN_SERIAL TRUE)
 phaseshift_add_test(NAME test_gpu_mcu_real_rmsnorm_f32_pg SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_rmsnorm_f32_pg.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_RMSNORM_HSACO="${PS_GPU_MCU_RMSNORM_HSACO}" DEPENDS gpu_mcu_hsaco_rmsnorm)
 phaseshift_add_test(NAME test_gpu_mcu_real_elementwise SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_elementwise.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_ELEMENTWISE_HSACO="${PS_GPU_MCU_ELEMENTWISE_HSACO}" DEPENDS gpu_mcu_hsaco_elementwise)
 phaseshift_add_test(NAME test_gpu_mcu_real_bf16_exact_rows SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_bf16_exact_rows.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_BF16_HSACO="${PS_GPU_MCU_BF16_HSACO}" DEPENDS gpu_mcu_hsaco_bf16)
+phaseshift_add_test(NAME test_gpu_mcu_real_bf16_wmma_aql SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_bf16_wmma_aql.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_runtime phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_BF16_HSACO="${PS_GPU_MCU_BF16_HSACO}" DEPENDS gpu_mcu_hsaco_bf16)
+target_include_directories(test_gpu_mcu_real_bf16_wmma_aql PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_real_paged_attention_split SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_paged_attention_split.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_ATTENTION_PAGED_HSACO="${PS_GPU_MCU_ATTENTION_PAGED_HSACO}" DEPENDS gpu_mcu_hsaco_attention_paged)
 target_include_directories(test_gpu_mcu_real_paged_attention_split PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_real_paged_attention SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_paged_attention.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_qwen35_runtime phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_ATTENTION_PAGED_HSACO="${PS_GPU_MCU_ATTENTION_PAGED_HSACO}" DEPENDS gpu_mcu_hsaco_attention_paged)
@@ -96,6 +100,8 @@ phaseshift_add_test(NAME test_gpu_mcu_plan_binder SOURCE unit/gpu_mcu/acceptance
 target_include_directories(test_gpu_mcu_plan_binder PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_multirow_chain_bridge SOURCE unit/gpu_mcu/acceptance/test_gpu_mcu_multirow_chain_bridge.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu_mcu phaseshift_gpu)
 target_include_directories(test_gpu_mcu_multirow_chain_bridge PRIVATE "${CMAKE_SOURCE_DIR}/src")
+phaseshift_add_test(NAME test_gpu_mcu_hidden_tap_plan SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_hidden_tap_plan.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu_mcu phaseshift_gpu)
+target_include_directories(test_gpu_mcu_hidden_tap_plan PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_mixed_linear_attention_bridge SOURCE unit/gpu_mcu/acceptance/test_gpu_mcu_mixed_linear_attention_bridge.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu_mcu phaseshift_gpu)
 target_include_directories(test_gpu_mcu_mixed_linear_attention_bridge PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_gdn_chain_bridge SOURCE unit/gpu_mcu/acceptance/test_gpu_mcu_gdn_chain_bridge.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu_mcu phaseshift_gpu)
@@ -108,6 +114,8 @@ phaseshift_add_test(NAME test_gpu_mcu_real_activation_quantize_e4m3_aql SOURCE u
 phaseshift_add_test(NAME test_gpu_mcu_real_psq4_decode1_aql SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_psq4_decode1_aql.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_PSQ4_HSACO="${PS_GPU_MCU_PSQ4_HSACO}" DEPENDS gpu_mcu_hsaco_psq4)
 phaseshift_add_test(NAME test_gpu_mcu_real_psq4_rows_aql SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_psq4_rows_aql.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_runtime phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_PSQ4_HSACO="${PS_GPU_MCU_PSQ4_HSACO}" DEPENDS gpu_mcu_hsaco_psq4)
 target_include_directories(test_gpu_mcu_real_psq4_rows_aql PRIVATE "${CMAKE_SOURCE_DIR}/src")
+phaseshift_add_test(NAME test_gpu_mcu_real_psq8_rows_aql SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_psq8_rows_aql.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_runtime phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_PSQ8_HSACO="${PS_GPU_MCU_PSQ8_HSACO}" DEPENDS gpu_mcu_hsaco_psq8)
+target_include_directories(test_gpu_mcu_real_psq8_rows_aql PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_production_w4a8_chain SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_production_w4a8_chain.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_qwen35_runtime phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_RMSNORM_HSACO="${PS_GPU_MCU_RMSNORM_HSACO}" PHASESHIFT_GPU_MCU_ACTIVATION_QUANTIZE_HSACO="${PS_GPU_MCU_ACTIVATION_QUANTIZE_HSACO}" PHASESHIFT_GPU_MCU_PSQ4_HSACO="${PS_GPU_MCU_PSQ4_HSACO}" DEPENDS gpu_mcu_hsaco_rmsnorm gpu_mcu_hsaco_activation_quantize gpu_mcu_hsaco_psq4)
 target_include_directories(test_gpu_mcu_production_w4a8_chain PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_w4a8_registry SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_w4a8_registry.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_qwen35_runtime phaseshift_gpu)
@@ -161,6 +169,7 @@ set(PS_GPU_MCU_REQUIRED_TESTS
     test_gpu_mcu_mixed_batch_execution
     test_gpu_mcu_plan_binder
     test_gpu_mcu_multirow_chain_bridge
+    test_gpu_mcu_hidden_tap_plan
     test_gpu_mcu_mixed_linear_attention_bridge
     test_gpu_mcu_gdn_chain_bridge
     test_gpu_mcu_prepared_dispatch
@@ -184,6 +193,7 @@ set(PS_GPU_MCU_REQUIRED_TESTS
     test_gpu_mcu_real_paged_attention_split
     test_gpu_mcu_mixed_attention_regions
     test_gpu_mcu_real_bf16_exact_rows
+    test_gpu_mcu_real_bf16_wmma_aql
     test_gpu_mcu_real_l2_normalize
     test_gpu_mcu_real_embedding
     test_gpu_mcu_real_gdn_conv1d
@@ -193,9 +203,11 @@ set(PS_GPU_MCU_REQUIRED_TESTS
     test_gpu_mcu_real_activation_quantize_e4m3_aql
     test_gpu_mcu_real_psq4_decode1_aql
     test_gpu_mcu_real_psq4_rows_aql
+    test_gpu_mcu_real_psq8_rows_aql
     test_gpu_mcu_verify_kv_transaction
     test_gpu_mcu_production_w4a8_chain
     test_gpu_mcu_w4a8_registry
     test_gpu_mcu_program_plan_three_primitive
     test_gpu_mcu_layer_dispatch_range
+    test_gpu_mcu_plan_sampling_gate
 )

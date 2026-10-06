@@ -10,6 +10,7 @@
 #include <phaseshift/runtime/stream_bridge.h>
 
 #include <memory>
+#include <cstdio>
 #include <vector>
 
 namespace ps {
@@ -57,6 +58,7 @@ public:
     uint32_t row_global_patch_count() const noexcept {
         return row_global_patch_count_;
     }
+    void dump_log(std::FILE* out) const noexcept;
     uint32_t result_code() const noexcept;
     uint32_t embedded_kernel_count() const noexcept {
         return static_cast<uint32_t>(code_objects_.size());
@@ -87,6 +89,7 @@ private:
     ::ps::runtime::gpu_mcu::GpuMcuAqlQueue queue_{};
     ::ps::runtime::gpu_mcu::GpuMcuFsm fsm_{};
     ::ps::runtime::gpu_mcu::GpuMcuKernargRegion kernarg_{};
+    ::ps::runtime::gpu_mcu::GpuMcuKernargRegion log_region_{};
     ::ps::runtime::gpu_mcu::GpuMcuAqlCodeObject probe_code_{};
     ::ps::runtime::gpu_mcu::GpuAqlKernelMetadata probe_meta_{};
 
@@ -147,10 +150,14 @@ private:
     uint32_t paged_reduce_count_ = 0;
     void* bf16_ = nullptr;
     uint32_t bf16_count_ = 0;
+    void* bf16_wmma_ = nullptr;
+    uint32_t bf16_wmma_count_ = 0;
     void* l2_ = nullptr;
     uint32_t l2_count_ = 0;
     void* embedding_ = nullptr;
     uint32_t embedding_count_ = 0;
+    void* embedding_psq8_ = nullptr;
+    uint32_t embedding_psq8_count_ = 0;
     void* output_gather_ = nullptr;
     uint32_t output_gather_count_ = 0;
     void* gdn_conv_ = nullptr;

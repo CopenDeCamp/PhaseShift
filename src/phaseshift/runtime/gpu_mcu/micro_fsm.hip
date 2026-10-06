@@ -20,6 +20,7 @@ constexpr uint32_t kMcuCompletionSpinLimit = 4000000000u;
 constexpr uint32_t kMcuCompletionStopCheckMask = 0xffu;
 constexpr uint32_t kMcuStartSpinLimit = 10000000u;
 
+#include "detail/mcu_log.h"
 #include "detail/micro_fsm_kernarg.h"
 #include "detail/micro_fsm_run_once.h"
 #include "detail/micro_fsm_control.h"

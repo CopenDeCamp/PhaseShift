@@ -182,6 +182,8 @@ struct Rig {
     mcu::GpuMcuAqlCodeObject code;
     std::vector<mcu::GpuMcuAqlCodeObject> extra_codes;
     mcu::GpuMcuKernargRegion region{};
+    mcu::GpuMcuKernargRegion log_region{};
+    bool log_enabled = false;
     mcu::GpuAqlKernelMetadata meta{};
 
     uint32_t* output = nullptr;
@@ -202,12 +204,21 @@ struct Rig {
     uint32_t e4m3_count = 0;
     mcu::McuPsq4Decode1Invocation* psq4_invocations = nullptr;
     uint32_t psq4_count = 0;
+    mcu::McuPsq4MultiRowInvocation* psq4_multi_invocations = nullptr;
+    uint32_t psq4_multi_count = 0;
     mcu::McuVerifyAcceptPrefixInvocation* verify_accept_invocations = nullptr;
     uint32_t verify_accept_count = 0;
+    mcu::McuVerifyAcceptBatchInvocation* verify_accept_batch_invocations = nullptr;
+    uint32_t verify_accept_batch_count = 0;
     mcu::McuGdnSpecRestoreInvocation* gdn_spec_restore_invocations = nullptr;
     uint32_t gdn_spec_restore_count = 0;
+    mcu::McuGdnSpecRestoreFromCountsInvocation*
+        gdn_spec_restore_from_counts_invocations = nullptr;
+    uint32_t gdn_spec_restore_from_counts_count = 0;
     mcu::McuArgmaxF32Invocation* argmax_f32_invocations = nullptr;
     uint32_t argmax_f32_count = 0;
+    mcu::McuOutputGatherBf16Invocation* output_gather_invocations = nullptr;
+    uint32_t output_gather_count = 0;
     mcu::McuElementwiseInvocation* elementwise_invocations = nullptr;
     uint32_t elementwise_count = 0;
     mcu::McuRopeInvocation* rope_invocations = nullptr;
@@ -223,10 +234,14 @@ struct Rig {
     uint32_t attention_paged_reduce_count = 0;
     mcu::McuBf16ExactRowsInvocation* bf16_invocations = nullptr;
     uint32_t bf16_count = 0;
+    mcu::McuBf16WmmaInvocation* bf16_wmma_invocations = nullptr;
+    uint32_t bf16_wmma_count = 0;
     mcu::McuL2NormalizeInvocation* l2_invocations = nullptr;
     uint32_t l2_count = 0;
     mcu::McuEmbeddingBf16Invocation* embedding_invocations = nullptr;
     uint32_t embedding_count = 0;
+    mcu::McuEmbeddingPsq8Invocation* embedding_psq8_invocations = nullptr;
+    uint32_t embedding_psq8_count = 0;
     mcu::McuGdnConv1dInvocation* gdn_conv1d_invocations = nullptr;
     uint32_t gdn_conv1d_count = 0;
     mcu::McuGdnRecurrenceInvocation* gdn_recurrence_invocations = nullptr;
@@ -427,6 +442,35 @@ struct Rig {
         return true;
     }
 
+    bool load_extra_code_memory(const void* code_object, std::size_t code_size,
+                                const char* symbol,
+                                mcu::GpuAqlKernelMetadata& out) {
+        auto res = mcu::GpuMcuAqlCodeObject::load_memory(
+            queue, code_object, code_size, symbol);
+        if (!check(res.ok(), "extra code object loaded")) return false;
+        auto loaded = res.release();
+        out = loaded.metadata();
+        extra_codes.push_back(std::move(loaded));
+        return true;
+    }
+
+    bool set_output_gather_invocations(
+        const mcu::McuOutputGatherBf16Invocation* source, uint32_t count) {
+        if (count == 0u) return true;
+        const std::size_t bytes = static_cast<std::size_t>(count) *
+                                  sizeof(mcu::McuOutputGatherBf16Invocation);
+        if (hipMalloc(reinterpret_cast<void**>(&output_gather_invocations),
+                      bytes) != hipSuccess) {
+            return check(false, "output gather invocation table allocated");
+        }
+        output_gather_count = count;
+        if (hipMemcpy(output_gather_invocations, source, bytes,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            return check(false, "output gather invocation table uploaded");
+        }
+        return true;
+    }
+
     bool set_invocations(const mcu::McuRmsNormInvocation* source,
                          uint32_t count) {
         if (count == 0u) return true;
@@ -491,6 +535,23 @@ struct Rig {
         if (hipMemcpy(psq4_invocations, source, bytes, hipMemcpyHostToDevice) !=
             hipSuccess) {
             return check(false, "psq4 invocation table uploaded");
+        }
+        return true;
+    }
+
+    bool set_psq4_multi_invocations(const mcu::McuPsq4MultiRowInvocation* source,
+                                    uint32_t count) {
+        if (count == 0u) return true;
+        const std::size_t bytes = static_cast<std::size_t>(count) *
+                                  sizeof(mcu::McuPsq4MultiRowInvocation);
+        if (hipMalloc(reinterpret_cast<void**>(&psq4_multi_invocations), bytes) !=
+            hipSuccess) {
+            return check(false, "psq4 multi invocation table allocated");
+        }
+        psq4_multi_count = count;
+        if (hipMemcpy(psq4_multi_invocations, source, bytes,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            return check(false, "psq4 multi invocation table uploaded");
         }
         return true;
     }
@@ -614,6 +675,23 @@ struct Rig {
         return true;
     }
 
+    bool set_bf16_wmma_invocations(const mcu::McuBf16WmmaInvocation* source,
+                                   uint32_t count) {
+        if (count == 0u) return true;
+        const std::size_t bytes =
+            static_cast<std::size_t>(count) * sizeof(mcu::McuBf16WmmaInvocation);
+        if (hipMalloc(reinterpret_cast<void**>(&bf16_wmma_invocations), bytes) !=
+            hipSuccess) {
+            return check(false, "bf16 wmma invocation table allocated");
+        }
+        bf16_wmma_count = count;
+        if (hipMemcpy(bf16_wmma_invocations, source, bytes,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            return check(false, "bf16 wmma invocation table uploaded");
+        }
+        return true;
+    }
+
     bool set_l2_invocations(const mcu::McuL2NormalizeInvocation* source,
                             uint32_t count) {
         if (count == 0u) return true;
@@ -644,6 +722,23 @@ struct Rig {
         if (hipMemcpy(embedding_invocations, source, bytes,
                       hipMemcpyHostToDevice) != hipSuccess) {
             return check(false, "embedding invocation table uploaded");
+        }
+        return true;
+    }
+
+    bool set_embedding_psq8_invocations(
+        const mcu::McuEmbeddingPsq8Invocation* source, uint32_t count) {
+        if (count == 0u) return true;
+        const std::size_t bytes = static_cast<std::size_t>(count) *
+                                  sizeof(mcu::McuEmbeddingPsq8Invocation);
+        if (hipMalloc(reinterpret_cast<void**>(&embedding_psq8_invocations),
+                      bytes) != hipSuccess) {
+            return check(false, "psq8 embedding invocation table allocated");
+        }
+        embedding_psq8_count = count;
+        if (hipMemcpy(embedding_psq8_invocations, source, bytes,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            return check(false, "psq8 embedding invocation table uploaded");
         }
         return true;
     }
@@ -716,6 +811,23 @@ struct Rig {
         return true;
     }
 
+    bool set_verify_accept_batch_invocations(
+        const mcu::McuVerifyAcceptBatchInvocation* source, uint32_t count) {
+        if (count == 0u) return true;
+        const std::size_t bytes = static_cast<std::size_t>(count) *
+                                  sizeof(mcu::McuVerifyAcceptBatchInvocation);
+        if (hipMalloc(reinterpret_cast<void**>(&verify_accept_batch_invocations),
+                      bytes) != hipSuccess) {
+            return check(false, "verify accept batch invocation table allocated");
+        }
+        verify_accept_batch_count = count;
+        if (hipMemcpy(verify_accept_batch_invocations, source, bytes,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            return check(false, "verify accept batch invocation table uploaded");
+        }
+        return true;
+    }
+
     bool set_gdn_spec_restore_invocations(
         const mcu::McuGdnSpecRestoreInvocation* source, uint32_t count) {
         if (count == 0u) return true;
@@ -729,6 +841,27 @@ struct Rig {
         if (hipMemcpy(gdn_spec_restore_invocations, source, bytes,
                       hipMemcpyHostToDevice) != hipSuccess) {
             return check(false, "gdn spec restore invocation table uploaded");
+        }
+        return true;
+    }
+
+    bool set_gdn_spec_restore_from_counts_invocations(
+        const mcu::McuGdnSpecRestoreFromCountsInvocation* source,
+        uint32_t count) {
+        if (count == 0u) return true;
+        const std::size_t bytes = static_cast<std::size_t>(count) *
+                                  sizeof(mcu::McuGdnSpecRestoreFromCountsInvocation);
+        if (hipMalloc(
+                reinterpret_cast<void**>(&gdn_spec_restore_from_counts_invocations),
+                bytes) != hipSuccess) {
+            return check(false,
+                         "gdn spec restore from counts invocation table allocated");
+        }
+        gdn_spec_restore_from_counts_count = count;
+        if (hipMemcpy(gdn_spec_restore_from_counts_invocations, source, bytes,
+                      hipMemcpyHostToDevice) != hipSuccess) {
+            return check(false,
+                         "gdn spec restore from counts invocation table uploaded");
         }
         return true;
     }
@@ -797,12 +930,22 @@ struct Rig {
         c.e4m3_invocation_count = e4m3_count;
         c.psq4_invocations = psq4_invocations;
         c.psq4_invocation_count = psq4_count;
+        c.psq4_multi_invocations = psq4_multi_invocations;
+        c.psq4_multi_invocation_count = psq4_multi_count;
         c.verify_accept_invocations = verify_accept_invocations;
         c.verify_accept_invocation_count = verify_accept_count;
+        c.verify_accept_batch_invocations = verify_accept_batch_invocations;
+        c.verify_accept_batch_invocation_count = verify_accept_batch_count;
         c.gdn_spec_restore_invocations = gdn_spec_restore_invocations;
         c.gdn_spec_restore_invocation_count = gdn_spec_restore_count;
+        c.gdn_spec_restore_from_counts_invocations =
+            gdn_spec_restore_from_counts_invocations;
+        c.gdn_spec_restore_from_counts_invocation_count =
+            gdn_spec_restore_from_counts_count;
         c.argmax_f32_invocations = argmax_f32_invocations;
         c.argmax_f32_invocation_count = argmax_f32_count;
+        c.output_gather_invocations = output_gather_invocations;
+        c.output_gather_invocation_count = output_gather_count;
         c.elementwise_invocations = elementwise_invocations;
         c.elementwise_invocation_count = elementwise_count;
         c.rope_invocations = rope_invocations;
@@ -819,10 +962,14 @@ struct Rig {
         c.attention_paged_reduce_invocation_count = attention_paged_reduce_count;
         c.bf16_invocations = bf16_invocations;
         c.bf16_invocation_count = bf16_count;
+        c.bf16_wmma_invocations = bf16_wmma_invocations;
+        c.bf16_wmma_invocation_count = bf16_wmma_count;
         c.l2_invocations = l2_invocations;
         c.l2_invocation_count = l2_count;
         c.embedding_invocations = embedding_invocations;
         c.embedding_invocation_count = embedding_count;
+        c.embedding_psq8_invocations = embedding_psq8_invocations;
+        c.embedding_psq8_invocation_count = embedding_psq8_count;
         c.gdn_conv1d_invocations = gdn_conv1d_invocations;
         c.gdn_conv1d_invocation_count = gdn_conv1d_count;
         c.gdn_recurrence_invocations = gdn_recurrence_invocations;
@@ -855,6 +1002,11 @@ struct Rig {
     bool configure_fsm(const mcu::GpuMcuFsmConfig& in, bool launch) {
         mcu::GpuMcuFsmConfig c{};
         build_fsm_config(in, c);
+        if (log_enabled && log_region.base == nullptr) {
+            auto log_res = queue.allocate_log_region(mcu::kMcuLogBytes);
+            if (log_res.ok()) log_region = log_res.release();
+        }
+        c.log_base = reinterpret_cast<uint64_t>(log_region.base);
         if (!check(c.kernarg_slot_count <= mcu::kMcuMaxKernargSlots,
                    "kernarg slots within limit")) {
             return false;
@@ -973,15 +1125,35 @@ struct Rig {
             psq4_invocations = nullptr;
             psq4_count = 0;
         }
+        if (psq4_multi_invocations) {
+            ok &= hipFree(psq4_multi_invocations) == hipSuccess;
+            psq4_multi_invocations = nullptr;
+            psq4_multi_count = 0;
+        }
         if (verify_accept_invocations) {
             ok &= hipFree(verify_accept_invocations) == hipSuccess;
             verify_accept_invocations = nullptr;
             verify_accept_count = 0;
         }
+        if (verify_accept_batch_invocations) {
+            ok &= hipFree(verify_accept_batch_invocations) == hipSuccess;
+            verify_accept_batch_invocations = nullptr;
+            verify_accept_batch_count = 0;
+        }
         if (gdn_spec_restore_invocations) {
             ok &= hipFree(gdn_spec_restore_invocations) == hipSuccess;
             gdn_spec_restore_invocations = nullptr;
             gdn_spec_restore_count = 0;
+        }
+        if (gdn_spec_restore_from_counts_invocations) {
+            ok &= hipFree(gdn_spec_restore_from_counts_invocations) == hipSuccess;
+            gdn_spec_restore_from_counts_invocations = nullptr;
+            gdn_spec_restore_from_counts_count = 0;
+        }
+        if (output_gather_invocations) {
+            ok &= hipFree(output_gather_invocations) == hipSuccess;
+            output_gather_invocations = nullptr;
+            output_gather_count = 0;
         }
         if (argmax_f32_invocations) {
             ok &= hipFree(argmax_f32_invocations) == hipSuccess;
@@ -1023,6 +1195,11 @@ struct Rig {
             bf16_invocations = nullptr;
             bf16_count = 0;
         }
+        if (bf16_wmma_invocations) {
+            ok &= hipFree(bf16_wmma_invocations) == hipSuccess;
+            bf16_wmma_invocations = nullptr;
+            bf16_wmma_count = 0;
+        }
         if (l2_invocations) {
             ok &= hipFree(l2_invocations) == hipSuccess;
             l2_invocations = nullptr;
@@ -1032,6 +1209,11 @@ struct Rig {
             ok &= hipFree(embedding_invocations) == hipSuccess;
             embedding_invocations = nullptr;
             embedding_count = 0;
+        }
+        if (embedding_psq8_invocations) {
+            ok &= hipFree(embedding_psq8_invocations) == hipSuccess;
+            embedding_psq8_invocations = nullptr;
+            embedding_psq8_count = 0;
         }
         if (gdn_conv1d_invocations) {
             ok &= hipFree(gdn_conv1d_invocations) == hipSuccess;
