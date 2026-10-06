@@ -62,6 +62,11 @@ struct alignas(64) GpuMcuPersistentState {
     uint32_t pending_event_valid = 0;
     uint32_t request_reserved1 = 0;
     ControlRingPayload pending_event{};
+    uint32_t pending_terminal_valid = 0;
+    uint32_t pending_terminal_reserved = 0;
+    uint64_t pending_terminal_request_id = 0;
+    uint64_t pending_terminal_descriptor_handle = 0;
+    GpuMcuOutputRecord pending_terminal{};
 
     uint32_t batch_plan_enabled = 0;
     uint32_t batch_plan_reserved = 0;
@@ -316,8 +321,21 @@ inline void gpu_mcu_restore_start_config(
 
 __global__ void gpu_mcu_persistent_loop_kernel(GpuMcuPersistentState* state);
 
+__device__ __forceinline__ void gpu_mcu_finish_backlog_cancel(
+    GpuMcuPersistentState* state) noexcept;
+
 __device__ __forceinline__ bool gpu_mcu_scheduler_flush_pending(
     GpuMcuPersistentState* state) noexcept {
+    if (state->pending_terminal_valid != 0u &&
+        state->output_ring != nullptr &&
+        gpu_mcu_publish_terminal_record(
+            state->output_ring, state->output_position,
+            state->pending_terminal_request_id,
+            state->pending_terminal.request_handle_bits,
+            state->pending_terminal.terminal_reason)) {
+        state->pending_terminal_valid = 0u;
+        gpu_mcu_finish_backlog_cancel(state);
+    }
     if (state->pending_event_valid == 0u) return false;
     if (state->request_event_ring == nullptr) return false;
     if (!control_ring_try_push(state->request_event_ring,
@@ -401,6 +419,57 @@ __device__ __forceinline__ bool gpu_mcu_admission_remove(
         return true;
     }
     return false;
+}
+
+__device__ __forceinline__ bool gpu_mcu_admission_contains(
+    const GpuMcuPersistentState* state,
+    uint64_t request_id,
+    uint64_t descriptor_handle) noexcept {
+    if (state->admission_queue == nullptr ||
+        state->admission_capacity == 0u) {
+        return false;
+    }
+    for (uint32_t i = 0; i < state->admission_count; ++i) {
+        const uint32_t index =
+            (state->admission_head + i) % state->admission_capacity;
+        const GpuMcuPendingAdmission& pending = state->admission_queue[index];
+        if (pending.request_id == request_id &&
+            pending.descriptor_handle == descriptor_handle) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Retires a backlog entry whose terminal record has reached the output ring.
+__device__ __forceinline__ void gpu_mcu_finish_backlog_cancel(
+    GpuMcuPersistentState* state) noexcept {
+    const uint64_t request_id = state->pending_terminal_request_id;
+    const uint64_t descriptor_handle =
+        state->pending_terminal_descriptor_handle;
+    if (!gpu_mcu_admission_remove(state, request_id, descriptor_handle)) {
+        return;
+    }
+    if (descriptor_handle >= 1u &&
+        descriptor_handle <= state->request_ingress_capacity) {
+        state->request_ingress_entries[descriptor_handle - 1u].state =
+            kGpuMcuIngressClaimed;
+    }
+    GpuMcuEvent event{};
+    event.opcode = static_cast<uint32_t>(GpuMcuEventOpcode::cancel_accepted);
+    event.request_id = request_id;
+    event.slot = kInvalidRequestSlot;
+    event.generation = kInvalidRequestGeneration;
+    event.descriptor_handle = descriptor_handle;
+    const ControlRingPayload payload = encode_event(event);
+    if (state->pending_event_valid == 0u &&
+        control_ring_try_push(state->request_event_ring,
+                              state->request_event_position, payload)) {
+        state->events_published += 1u;
+        return;
+    }
+    state->pending_event = payload;
+    state->pending_event_valid = 1u;
 }
 
 // Reserves the kv pages the next step of every live slot needs. A slot whose
@@ -589,29 +658,35 @@ __device__ __forceinline__ bool gpu_mcu_scheduler_consume_one(
         return true;
     }
     if (result.cancel_not_found) {
-        if (gpu_mcu_admission_remove(state, command.request_id,
-                                     command.descriptor_handle)) {
-            if (command.descriptor_handle >= 1u &&
-                command.descriptor_handle <= state->request_ingress_capacity) {
-                state->request_ingress_entries[command.descriptor_handle - 1u]
-                    .state = kGpuMcuIngressClaimed;
+        // 未 claim request の cancel は terminal record を output ring へ
+        // publish してから backlog から外す（request あたり terminal record
+        // exactly 1）。ring 満杯なら外さず pending にして次 boundary で再試行する。
+        if (gpu_mcu_admission_contains(state, command.request_id,
+                                       command.descriptor_handle)) {
+            if (state->pending_terminal_valid == 0u) {
+                state->pending_terminal_request_id = command.request_id;
+                state->pending_terminal_descriptor_handle =
+                    command.descriptor_handle;
+                state->pending_terminal = GpuMcuOutputRecord{};
+                state->pending_terminal.request_handle_bits =
+                    (static_cast<uint64_t>(kInvalidRequestGeneration) << 32u) |
+                    static_cast<uint64_t>(kInvalidRequestSlot);
+                state->pending_terminal.request_id = command.request_id;
+                state->pending_terminal.token_id = -1;
+                state->pending_terminal.flags = kOutputRecordFlagTerminal;
+                state->pending_terminal.terminal_reason =
+                    static_cast<uint32_t>(GpuMcuTerminalReason::cancelled);
+                state->pending_terminal_valid = 1u;
             }
-            GpuMcuEvent event{};
-            event.opcode =
-                static_cast<uint32_t>(GpuMcuEventOpcode::cancel_accepted);
-            event.request_id = command.request_id;
-            event.slot = kInvalidRequestSlot;
-            event.generation = kInvalidRequestGeneration;
-            event.descriptor_handle = command.descriptor_handle;
-            const ControlRingPayload payload = encode_event(event);
-            if (control_ring_try_push(state->request_event_ring,
-                                      state->request_event_position,
-                                      payload)) {
-                state->events_published += 1u;
-                return true;
+            if (state->output_ring != nullptr &&
+                gpu_mcu_publish_terminal_record(
+                    state->output_ring, state->output_position,
+                    state->pending_terminal_request_id,
+                    state->pending_terminal.request_handle_bits,
+                    state->pending_terminal.terminal_reason)) {
+                state->pending_terminal_valid = 0u;
+                gpu_mcu_finish_backlog_cancel(state);
             }
-            state->pending_event = payload;
-            state->pending_event_valid = 1u;
             return true;
         }
     }
@@ -745,7 +820,10 @@ __device__ __forceinline__ bool gpu_mcu_scheduler_boundary(
             progressed = true;
             continue;
         }
-        if (state->pending_event_valid != 0u) break;
+        if (state->pending_event_valid != 0u ||
+            state->pending_terminal_valid != 0u) {
+            break;
+        }
         if (!gpu_mcu_scheduler_consume_one(state)) break;
         progressed = true;
     }

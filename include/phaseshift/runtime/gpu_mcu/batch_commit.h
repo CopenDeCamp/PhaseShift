@@ -5,6 +5,7 @@
 #include <phaseshift/runtime/gpu_mcu/slot_binding.h>
 #include <phaseshift/runtime/gpu_mcu/slot_runtime.h>
 #include <phaseshift/runtime/gpu_mcu/slot_table.h>
+#include <phaseshift/runtime/gpu_mcu/stop_conditions.h>
 
 #include <hip/hip_runtime.h>
 
@@ -134,14 +135,42 @@ __device__ __forceinline__ int32_t gpu_mcu_commit_read_token(
     return view.sampled_tokens[row];
 }
 
+__device__ __forceinline__ const GpuMcuStopConditions* gpu_mcu_stop_conditions_for(
+    const GpuMcuBatchCommitView& view, RequestHandle handle) noexcept {
+    if (view.bindings == nullptr || handle.slot >= view.binding_max_slots) {
+        return nullptr;
+    }
+    const uint64_t h = view.bindings[handle.slot].stop_conditions_handle;
+    if (h == 0u) return nullptr;
+    return reinterpret_cast<const GpuMcuStopConditions*>(h);
+}
+
+__device__ __forceinline__ int32_t gpu_mcu_scan_first_stop(
+    const GpuMcuBatchCommitView& view,
+    const DeviceRequestDescriptor& descriptor,
+    const GpuMcuStopConditions* stop,
+    uint32_t count) noexcept {
+    if (stop == nullptr || stop->token_ids == nullptr || stop->token_count == 0u) {
+        return -1;
+    }
+    for (uint32_t j = 0u; j < count; ++j) {
+        const int32_t token = gpu_mcu_commit_read_token(view, descriptor, j);
+        for (uint32_t s = 0u; s < stop->token_count; ++s) {
+            if (token == stop->token_ids[s]) {
+                return static_cast<int32_t>(j);
+            }
+        }
+    }
+    return -1;
+}
+
 __device__ __forceinline__ void gpu_mcu_commit_evaluate_stop(
     GpuMcuSlotState& slot, GpuMcuBatchCommitTelemetry& telemetry) noexcept {
     if (slot.terminal_reason !=
         static_cast<uint32_t>(GpuMcuTerminalReason::none)) {
         return;
     }
-    if (slot.max_new_tokens != 0u &&
-        slot.generated_tokens >= slot.max_new_tokens) {
+    if (slot.generated_tokens >= slot.max_new_tokens) {
         slot.terminal_reason =
             static_cast<uint32_t>(GpuMcuTerminalReason::max_new_tokens);
         telemetry.stopped_tokens += 1u;
@@ -187,6 +216,16 @@ __device__ __forceinline__ bool gpu_mcu_commit_active_batch(
                 local.committed_requests += 1u;
                 continue;
             }
+            if (slot.max_new_tokens == 0u) {
+                if (slot.terminal_reason ==
+                    static_cast<uint32_t>(GpuMcuTerminalReason::none)) {
+                    slot.terminal_reason = static_cast<uint32_t>(
+                        GpuMcuTerminalReason::max_new_tokens);
+                    local.stopped_tokens += 1u;
+                }
+                local.committed_requests += 1u;
+                continue;
+            }
             slot.phase = gpu_mcu_slot_phase_value(GpuMcuSlotPhase::decode);
             tokens = descriptor.output_count != 0u ? 1u : 0u;
         } else if (descriptor.execution_class == ExecutionClass::DECODE) {
@@ -212,6 +251,28 @@ __device__ __forceinline__ bool gpu_mcu_commit_active_batch(
                     : nullptr;
             const bool resources_on =
                 view.resources_enabled != 0u && meta != nullptr;
+
+            // effective_commit_count を副作用より先に決める。
+            // stop-condition scan で first_stop を求め、stop boundary と
+            // generation budget の小さい方を採る。同率のときは stop を優先する。
+            uint32_t effective = committed;
+            int32_t first_stop = -1;
+            if (!invalid) {
+                const GpuMcuStopConditions* stop =
+                    gpu_mcu_stop_conditions_for(view, handle);
+                first_stop =
+                    gpu_mcu_scan_first_stop(view, descriptor, stop, committed);
+                if (first_stop >= 0 &&
+                    static_cast<uint32_t>(first_stop) + 1u < effective) {
+                    effective = static_cast<uint32_t>(first_stop) + 1u;
+                }
+                if (slot.max_new_tokens != 0u) {
+                    const uint32_t budget =
+                        slot.max_new_tokens - slot.generated_tokens;
+                    if (budget < effective) effective = budget;
+                }
+            }
+
             bool resource_ok = true;
             if (resources_on && meta->verify_txn_active != 0u) {
                 if (invalid) {
@@ -222,7 +283,7 @@ __device__ __forceinline__ bool gpu_mcu_commit_active_batch(
                     local.verify_resource_failed += 1u;
                 } else if (!gpu_mcu_verify_resource_commit(
                                slot, *meta, view.resources, view.kv_pages,
-                               view.kv_blocks, committed)) {
+                               view.kv_blocks, effective)) {
                     (void)gpu_mcu_verify_resource_abort(
                         slot, *meta, view.resources, view.kv_pages,
                         view.kv_blocks);
@@ -238,11 +299,17 @@ __device__ __forceinline__ bool gpu_mcu_commit_active_batch(
                 ok = false;
                 continue;
             }
-            slot.sequence_length = descriptor.prefix_length + committed;
+            slot.sequence_length = descriptor.prefix_length + effective;
             slot.committed_position = slot.sequence_length;
-            slot.verify_committed_count = committed;
+            slot.verify_committed_count = effective;
             slot.phase = gpu_mcu_slot_phase_value(GpuMcuSlotPhase::decode);
-            tokens = committed;
+            tokens = effective;
+            if (first_stop >= 0 &&
+                static_cast<uint32_t>(first_stop) < effective) {
+                (void)gpu_mcu_slot_mark_terminal(
+                    slot, handle,
+                    static_cast<uint32_t>(GpuMcuTerminalReason::eos));
+            }
         } else {
             local.invalid_geometry += 1u;
             ok = false;
@@ -275,6 +342,17 @@ __device__ __forceinline__ bool gpu_mcu_commit_active_batch(
                 }
                 slot.generated_tokens += staged;
                 local.committed_tokens += staged;
+                const GpuMcuStopConditions* stop =
+                    gpu_mcu_stop_conditions_for(view, handle);
+                if (stop != nullptr) {
+                    const int32_t first_stop =
+                        gpu_mcu_scan_first_stop(view, descriptor, stop, staged);
+                    if (first_stop >= 0) {
+                        (void)gpu_mcu_slot_mark_terminal(
+                            slot, handle,
+                            static_cast<uint32_t>(GpuMcuTerminalReason::eos));
+                    }
+                }
                 gpu_mcu_commit_evaluate_stop(slot, local);
             }
         }

@@ -1,5 +1,6 @@
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/mcu_decode_state.h>
+#include <phaseshift/runtime/gpu_mcu/stop_conditions.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_cache.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
 #include <phaseshift/runtime/stream_bridge.h>
@@ -414,6 +415,35 @@ Status ensure_mcu_state(Executor& executor) {
     if (!created.ok()) return created.status();
     auto state = std::make_unique<runtime::McuDecodeState>();
     state->runtime = created.release();
+    if (executor.model != nullptr) {
+        const auto& stop_tokens = executor.model->text_config().stop_tokens;
+        if (!stop_tokens.empty()) {
+            const std::size_t stop_bytes = stop_tokens.size() * sizeof(int32_t);
+            void* ids = nullptr;
+            void* cond_device = nullptr;
+            if (hipMalloc(&ids, stop_bytes) == hipSuccess &&
+                hipMemcpy(ids, stop_tokens.data(), stop_bytes,
+                          hipMemcpyHostToDevice) == hipSuccess &&
+                hipMalloc(&cond_device,
+                          sizeof(::ps::runtime::gpu_mcu::GpuMcuStopConditions)) ==
+                    hipSuccess) {
+                const ::ps::runtime::gpu_mcu::GpuMcuStopConditions cond{
+                    static_cast<const int32_t*>(ids),
+                    static_cast<uint32_t>(stop_tokens.size()), 0u};
+                if (hipMemcpy(cond_device, &cond, sizeof(cond),
+                              hipMemcpyHostToDevice) == hipSuccess) {
+                    state->stop_token_ids = ids;
+                    state->stop_token_count =
+                        static_cast<uint32_t>(stop_tokens.size());
+                    state->stop_conditions = cond_device;
+                    ids = nullptr;
+                    cond_device = nullptr;
+                }
+            }
+            if (ids != nullptr) (void)hipFree(ids);
+            if (cond_device != nullptr) (void)hipFree(cond_device);
+        }
+    }
 
     const uint32_t max_slots =
         executor.sequence_pool != nullptr
@@ -534,6 +564,8 @@ Status stage_mcu_commit_slots(
         state.commit_slots[slot] = fresh;
         mcu::GpuMcuSlotBinding binding{};
         binding.handle = d.request_handle;
+        binding.stop_conditions_handle =
+            reinterpret_cast<uint64_t>(state.stop_conditions);
         state.commit_bindings[slot] = binding;
     }
     std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -2059,6 +2091,25 @@ Status executor_shutdown(Executor& ex) noexcept {
                                                 __FILE__, __LINE__);
             }
             ex.mcu_state->commit_bindings = nullptr;
+        }
+        if (ex.mcu_state->stop_conditions != nullptr) {
+            const hipError_t ferr = hipFree(ex.mcu_state->stop_conditions);
+            if (ferr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipFree mcu stop conditions",
+                                                hipGetErrorString(ferr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->stop_conditions = nullptr;
+        }
+        if (ex.mcu_state->stop_token_ids != nullptr) {
+            const hipError_t ferr = hipFree(ex.mcu_state->stop_token_ids);
+            if (ferr != hipSuccess && first_error.ok()) {
+                first_error = Status::hip_error("hipFree mcu stop token ids",
+                                                hipGetErrorString(ferr),
+                                                __FILE__, __LINE__);
+            }
+            ex.mcu_state->stop_token_ids = nullptr;
+            ex.mcu_state->stop_token_count = 0;
         }
         if (ex.mcu_state->plan_epoch != nullptr) {
             const hipError_t ferr = hipFree(ex.mcu_state->plan_epoch);

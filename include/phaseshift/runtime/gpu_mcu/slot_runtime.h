@@ -79,6 +79,29 @@ __device__ __forceinline__ bool gpu_mcu_slot_publish_terminal(
     return true;
 }
 
+// Publishes a terminal record for a request that never claimed a slot
+// (a cancel of an admission-backlog entry for example).
+__device__ __forceinline__ bool gpu_mcu_publish_terminal_record(
+    OutputRing* ring,
+    uint64_t& position,
+    uint64_t request_id,
+    uint64_t request_handle_bits,
+    uint32_t terminal_reason) noexcept {
+    if (ring == nullptr) return false;
+    if (terminal_reason ==
+        static_cast<uint32_t>(GpuMcuTerminalReason::none)) {
+        return false;
+    }
+    GpuMcuOutputRecord record{};
+    record.request_handle_bits = request_handle_bits;
+    record.request_id = request_id;
+    record.token_id = -1;
+    record.token_index = 0u;
+    record.flags = kOutputRecordFlagTerminal;
+    record.terminal_reason = terminal_reason;
+    return gpu_mcu_output_ring_try_push(ring, position, record);
+}
+
 __device__ __forceinline__ GpuMcuTerminalPublishResult
 gpu_mcu_publish_slot_terminals(OutputRing* ring,
                                uint64_t& position,

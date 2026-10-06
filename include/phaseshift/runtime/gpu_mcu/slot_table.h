@@ -191,6 +191,10 @@ __device__ __forceinline__ bool gpu_mcu_slot_mark_terminal(
     uint32_t reason) noexcept {
     if (!gpu_mcu_slot_matches_handle(slot, handle)) return false;
     if (!gpu_mcu_terminal_reason_valid(reason)) return false;
+    if (slot.terminal_reason !=
+        static_cast<uint32_t>(GpuMcuTerminalReason::none)) {
+        return false;
+    }
     if (reason == gpu_mcu_terminal_reason_value(GpuMcuTerminalReason::none)) {
         return false;
     }

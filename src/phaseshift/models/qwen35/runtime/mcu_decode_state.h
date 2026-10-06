@@ -21,6 +21,9 @@ struct McuDecodeState {
     hipStream_t control_stream = nullptr;
     ::ps::runtime::gpu_mcu::GpuMcuSlotState* commit_slots = nullptr;
     ::ps::runtime::gpu_mcu::GpuMcuSlotBinding* commit_bindings = nullptr;
+    void* stop_conditions = nullptr;
+    void* stop_token_ids = nullptr;
+    uint32_t stop_token_count = 0;
     uint64_t* plan_epoch = nullptr;
     uint64_t* ready_epoch = nullptr;
     uint32_t* verify_counts = nullptr;
