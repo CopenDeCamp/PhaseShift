@@ -53,6 +53,11 @@ Status free_table(void** ptr, uint32_t* count) noexcept {
     return Status::make_ok();
 }
 
+bool mcu_debug_records_disabled() {
+    const char* e = std::getenv("PHASESHIFT_MCU_DEBUG_RECORDS");
+    return e != nullptr && e[0] == '0';
+}
+
 }  // namespace
 
 McuDecodeRuntime::~McuDecodeRuntime() { (void)shutdown(); }
@@ -142,7 +147,7 @@ Result<McuDecodeRuntime> McuDecodeRuntime::create(
     (void)hipMemset(out.plan_variants_, 0, variant_bytes);
     (void)hipMemset(out.plan_retained_, 0, retained_bytes);
 
-    if (options.record_entries != 0u) {
+    if (options.record_entries != 0u && !mcu_debug_records_disabled()) {
         if (hipMalloc(reinterpret_cast<void**>(&out.records_),
                       static_cast<std::size_t>(options.record_entries) *
                           sizeof(mcu::McuDispatchRecord)) != hipSuccess) {
@@ -693,6 +698,19 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     config.queue_ahead_depth = queue_ahead_depth_;
     config.doorbell_mode =
         static_cast<uint32_t>(mcu::McuDoorbellMode::per_packet);
+    if (const char* e = std::getenv("PHASESHIFT_MCU_QUEUE_AHEAD")) {
+        const unsigned long v = std::strtoul(e, nullptr, 10);
+        if (v >= 1ul && v <= 256ul)
+            config.queue_ahead_depth = static_cast<uint32_t>(v);
+    }
+    if (const char* e = std::getenv("PHASESHIFT_MCU_DOORBELL")) {
+        if (std::strcmp(e, "coalesce") == 0)
+            config.doorbell_mode =
+                static_cast<uint32_t>(mcu::McuDoorbellMode::coalesce);
+        else if (std::strcmp(e, "first_only") == 0)
+            config.doorbell_mode =
+                static_cast<uint32_t>(mcu::McuDoorbellMode::first_only);
+    }
     config.issue_wait_running = 0u;
     config.template_source = 0u;
     config.prepared_enabled = 0u;
