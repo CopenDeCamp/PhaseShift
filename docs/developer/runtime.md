@@ -187,6 +187,9 @@ host-side request objectは解放しない。
 
 ## Multi-request terminal semantics
 
+停止条件の共通意味論（優先順位・one-way latch・zero-work との分離）は
+[stop_conditions.md](stop_conditions.md) を正本とする。
+
 `--serve-stdio` の `ServeState` は `std::map<int64_t, ServeGeneration>` でin-flight requestを
 保持し、request_idでeventをdemultiplexする。request間のevent順序は保証しないが、
 1 request内では `token*` の後にterminal event（`done` または `error`）が必ず1個だけ出る。

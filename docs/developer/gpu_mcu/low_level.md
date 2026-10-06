@@ -155,8 +155,10 @@ GPU-MCU Low-Level Substrate
   `wall_clock64()` heartbeat と `__builtin_amdgcn_s_sleep(64)` backoff を行う。
   command semantics は持たない。
 - `start()` は launch 後に started flag を bounded time で待つ。
-- `request_stop()` は stop flag を release store し、`wait_stopped()` が
-  started=0 を bounded time で待つ。
+- `request_stop()` は persistent MCU controller を終了する lifecycle API であり、
+  request を停止する API ではない。全 request が terminal に達しても呼ばれない
+  （[stop_conditions.md](stop_conditions.md) §4 概念の分離）。stop flag を release
+  store し、`wait_stopped()` が started=0 を bounded time で待つ。
 - `shutdown()` は stop request -> wait_stopped -> `hipStreamSynchronize(control)`
   の順。destructor は最終 fallback。
 
@@ -495,6 +497,7 @@ terminal slot は release 後に recycle されるため、**terminal は output
 - `GpuMcuOutputRecord.flags` が record kind を持つ。token record は kind 0、terminal flag
   は terminal record だけが立てる。token を出さない終了（cancel / pre token error /
   `max_new_tokens == 0`）でも request あたり丁度 1 個の terminal record が出る。
+  停止理由の意味論と one-way latch は [stop_conditions.md](stop_conditions.md) を正本とする。
 - `GpuMcuSlotRuntimeState`（64 byte、slot id で index）が、固定 256 byte の slot state に
   入らない lifecycle bookkeeping を持つ（terminal publish 状態、release pending、
   resource blocked、scheduler epoch）。slot generation に自己 bind し、recycle された
@@ -511,6 +514,9 @@ terminal slot は release 後に recycle されるため、**terminal は output
 ## admission backlog
 
 slot が満杯の submit を `no_idle_slot` で拒否せず、device 上に queue する。
+未 claim の request に対する cancel が terminal record を通る経路は未設計であり
+（[stop_conditions.md](stop_conditions.md) §既知の差異）、
+`request あたり terminal record exactly 1` を満たす方式を要する。
 
 - `GpuMcuPendingAdmission` は request id と descriptor handle / generation の組を持つ固定
   容量 FIFO。ingress は ready と claimed の間に queued 状態を持つ。
