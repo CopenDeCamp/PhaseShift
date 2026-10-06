@@ -1,4 +1,5 @@
 #include <phaseshift/core/memory/arena.h>
+#include <phaseshift/models/qwen35/runtime/decode_backend.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/scheduled_batch.h>
 #include <phaseshift/models/qwen35/weights/model_weights.h>
@@ -40,6 +41,8 @@ struct BenchOptions {
     int runs = 3;
     int warmup = 0;
     std::string output;
+    ps::qwen35::runtime::DecodeBackend decode_backend =
+        ps::qwen35::runtime::DecodeBackend::Host;
 };
 
 void print_usage(FILE* out) {
@@ -57,6 +60,7 @@ void print_usage(FILE* out) {
         "  --arena-gib N                (default 6)\n"
         "  --runs N                     (default 3)\n"
         "  --warmup N                   (default 0)\n"
+        "  --decode-backend TYPE        host | gpu-mcu (default host)\n"
         "  --output PATH                (default none)\n");
 }
 
@@ -133,6 +137,12 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
         } else if (key == "--page-tokens") {
             if (!parse_int(need_value(), opts.page_tokens) || opts.page_tokens < 1) {
                 fprintf(stderr, "invalid --page-tokens\n");
+                return false;
+            }
+        } else if (key == "--decode-backend") {
+            if (!ps::qwen35::runtime::parse_decode_backend(
+                    need_value().c_str(), &opts.decode_backend)) {
+                fprintf(stderr, "invalid --decode-backend\n");
                 return false;
             }
         } else if (key == "--arena-gib") {
@@ -292,6 +302,7 @@ int run_pp(int argc, char** argv) {
     ps::qwen35::ExecutorConfig exec_config;
     exec_config.max_scheduled_tokens = std::max(opts.prompt_tokens, 16);
     exec_config.max_scheduled_requests = 1;
+    exec_config.backend = opts.decode_backend;
 
     auto exec_result = ps::qwen35::create_model_executor(
         model, seq_pool, rec_pool, kv_pool, arena, exec_config);

@@ -45,6 +45,7 @@ detail and is not a `--variant` value.
 --arena-gib N                (default 6)
 --runs N                     (default 3)
 --warmup N                   (default 0)
+--decode-backend TYPE        host | gpu-mcu (default host)
 --output PATH                (default none)
 ```
 
@@ -61,6 +62,7 @@ detail and is not a `--variant` value.
 --model-dir PATH             (required)
 --page-tokens N              (default 16)
 --arena-gib N                (default 6)
+--decode-backend TYPE        host | gpu-mcu (default host)
 --output PATH                (default none)
 ```
 

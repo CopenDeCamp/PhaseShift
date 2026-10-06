@@ -1,4 +1,5 @@
 #include <phaseshift/core/memory/arena.h>
+#include <phaseshift/models/qwen35/runtime/decode_backend.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/scheduled_batch.h>
 #include <phaseshift/models/qwen35/runtime/decode_perf_stats.h>
@@ -45,6 +46,8 @@ struct BenchOptions {
     std::string perf_stats_output;
     std::string tokens_file;
     int tokens_offset = 0;
+    ps::qwen35::runtime::DecodeBackend decode_backend =
+        ps::qwen35::runtime::DecodeBackend::Host;
 };
 
 void print_usage(FILE* out) {
@@ -66,7 +69,8 @@ void print_usage(FILE* out) {
         "                                -1 = hipEventCreate)\n"
         "  --perf-stats-output PATH     (default none, diagnostic decode counters)\n"
         "  --tokens-file PATH           PSKLDTOK corpus file used as the context\n"
-        "  --tokens-offset N            corpus position to start the context (default 0)\n");
+        "  --tokens-offset N            corpus position to start the context (default 0)\n"
+        "  --decode-backend TYPE        host | gpu-mcu (default host)\n");
 }
 
 bool parse_bool(const std::string& value, bool& out) {
@@ -174,6 +178,12 @@ bool parse_args(int argc, char** argv, BenchOptions& opts) {
         } else if (key == "--arena-gib") {
             if (!parse_double(need_value(), opts.arena_gib) || opts.arena_gib <= 0.0) {
                 fprintf(stderr, "invalid --arena-gib\n");
+                return false;
+            }
+        } else if (key == "--decode-backend") {
+            if (!ps::qwen35::runtime::parse_decode_backend(
+                    need_value().c_str(), &opts.decode_backend)) {
+                fprintf(stderr, "invalid --decode-backend\n");
                 return false;
             }
         } else if (key == "--output") {
@@ -368,6 +378,7 @@ int run_tg(int argc, char** argv) {
     exec_config.max_scheduled_tokens =
         std::max(opts.prefill_chunk, opts.tokens + opts.warmup + 16);
     exec_config.max_scheduled_requests = 1;
+    exec_config.backend = opts.decode_backend;
 
     auto exec_result = ps::qwen35::create_model_executor(
         model, seq_pool, rec_pool, kv_pool, arena, exec_config);
