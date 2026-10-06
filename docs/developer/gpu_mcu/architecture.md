@@ -103,6 +103,25 @@ runtime skip mechanism（`McuDynamicNodeBinding::enabled` 等）を保存する�
 `workgroup_count_x/y/z == 0` の「geometry override なし」という
 sentinel semantics は変更しない。
 
+## request payload lifetime
+
+`GpuMcuRequestDescriptor` が device へ渡す handle の lifetime は次のとおりである。
+
+| handle | 書き込み | 読み取り | 有効期間 |
+| --- | --- | --- | --- |
+| `prompt_tokens_handle` | claim 時に `GpuMcuSlotBinding` へ転送 | 毎 PREFILL bind（`gpu_mcu_bind_prefill_tokens`）。chunked prefill では `prefix_length + row_count <= prompt_length` の範囲で複数回 | request terminal |
+| `sampling_params_handle` | claim 時に `GpuMcuSlotBinding` へ転送 | 毎 batch bind | request terminal |
+| `stop_conditions_handle` | claim 時に `GpuMcuSlotBinding` へ転送 | 毎 token commit | model lifetime（単一インスタンスを共有） |
+
+- SUBMIT 時の H2D upload は許可される Host operation である。
+- SUBMIT command を control ring に書いた時点で、参照する payload は
+  device-visible で安定していなければならない。
+- prompt payload は claim された時点で解放してはならない。
+  chunked prefill で request lifetime 中に再参照される。
+- payload の確保と解放は per-token で `hipMalloc` / `hipFree` を行わない。
+  固定容量 pool または長寿命 allocation を使う。
+- model 共通の stop-condition table は model lifetime で共有する。
+
 ## 責務境界
 
 ### GPU-MCU substrate（model-independent）

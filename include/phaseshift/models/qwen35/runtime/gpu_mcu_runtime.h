@@ -4,6 +4,7 @@
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
 #include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/core/status.h>
+#include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/gpu_mcu/control_ring.h>
 #include <phaseshift/runtime/gpu_mcu/output_ring.h>
 #include <phaseshift/runtime/gpu_mcu/request_ingress.h>
@@ -36,6 +37,15 @@ struct GpuMcuRuntimeConfig {
 
 class GpuMcuRuntime {
  public:
+    static constexpr uint32_t kInvalidPayloadSlot = 0xFFFFFFFFu;
+
+    struct RequestPayload {
+        uint64_t descriptor_handle = 0u;
+        uint32_t prompt_slot = kInvalidPayloadSlot;
+        uint32_t sampling_slot = kInvalidPayloadSlot;
+        ::ps::runtime::RequestHandle slot_handle{};
+    };
+
     GpuMcuRuntime(
         Executor& executor,
         SequenceSlotPool& seq_pool,
@@ -66,7 +76,24 @@ class GpuMcuRuntime {
 
     Status allocate_controller_resources(int device);
 
+    Status allocate_request_payloads();
+
     Status shutdown();
+
+    uint32_t prompt_payload_capacity() const noexcept {
+        return prompt_capacity_;
+    }
+    uint32_t prompt_payload_stride() const noexcept { return prompt_stride_; }
+    uint32_t sampling_payload_capacity() const noexcept {
+        return sampling_capacity_;
+    }
+    ::ps::runtime::DeviceSamplingParams* request_sampling_params(
+        uint32_t slot) noexcept;
+    int32_t* request_prompt_tokens(uint32_t slot) noexcept;
+    const RequestPayload* request_payload(uint64_t request_id) const;
+    uint32_t request_payload_count() const noexcept {
+        return static_cast<uint32_t>(payloads_.size());
+    }
 
     bool controller_resources_ready() const noexcept {
         return controller_resources_ready_;
@@ -113,6 +140,16 @@ class GpuMcuRuntime {
  private:
     using RequestList = std::list<RuntimeRequest>;
 
+    Status acquire_request_payload(uint32_t* prompt_slot,
+                                   uint32_t* sampling_slot) noexcept;
+    void release_request_payload(uint32_t prompt_slot,
+                                 uint32_t sampling_slot) noexcept;
+    Status upload_request_payload(uint32_t prompt_slot,
+                                  uint32_t sampling_slot,
+                                  const std::vector<int32_t>& input_tokens,
+                                  const SamplingConfig& sampling);
+    void release_payload_record(uint64_t request_id);
+
     Executor& executor_;
     SequenceSlotPool& seq_pool_;
     GdnStatePool& gdn_pool_;
@@ -121,6 +158,7 @@ class GpuMcuRuntime {
     hipStream_t stream_;
 
     bool shutdown_ = false;
+    uint64_t next_id_ = 1u;
 
     RequestList requests_;
     std::unordered_map<uint64_t, RequestList::iterator> request_index_;
@@ -135,6 +173,15 @@ class GpuMcuRuntime {
     uint32_t max_slots_ = 0u;
     uint32_t admission_capacity_ = 0u;
     bool controller_resources_ready_ = false;
+
+    ::ps::runtime::DeviceSamplingParams* sampling_pool_ = nullptr;
+    int32_t* prompt_pool_ = nullptr;
+    uint32_t prompt_capacity_ = 0u;
+    uint32_t prompt_stride_ = 0u;
+    uint32_t sampling_capacity_ = 0u;
+    std::vector<uint32_t> prompt_free_;
+    std::vector<uint32_t> sampling_free_;
+    std::unordered_map<uint64_t, RequestPayload> payloads_;
 };
 
 }  // namespace runtime

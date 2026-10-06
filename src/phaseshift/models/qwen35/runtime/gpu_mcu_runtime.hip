@@ -28,30 +28,192 @@ GpuMcuRuntime::~GpuMcuRuntime() noexcept {
     }
 }
 
-Result<uint64_t> GpuMcuRuntime::submit(
-    std::vector<int32_t> input_tokens,
-    uint32_t max_new_tokens,
+Status GpuMcuRuntime::allocate_request_payloads() {
+    if (prompt_pool_ != nullptr) return Status::make_ok();
+    if (config_.max_scheduled_requests == 0u || config_.max_seq_len == 0u) {
+        return Status::invalid_state(
+            "gpu-mcu request payload capacity is zero", __FILE__, __LINE__);
+    }
+
+    prompt_capacity_ = config_.max_scheduled_requests;
+    prompt_stride_ = config_.max_seq_len;
+    sampling_capacity_ = config_.max_scheduled_requests;
+    const std::size_t prompt_bytes =
+        static_cast<std::size_t>(prompt_capacity_) *
+        static_cast<std::size_t>(prompt_stride_) * sizeof(int32_t);
+    const std::size_t sampling_bytes =
+        static_cast<std::size_t>(sampling_capacity_) *
+        sizeof(::ps::runtime::DeviceSamplingParams);
+
+    hipError_t err = hipMalloc(reinterpret_cast<void**>(&prompt_pool_),
+                               prompt_bytes);
+    if (err == hipSuccess) {
+        err = hipMalloc(reinterpret_cast<void**>(&sampling_pool_),
+                        sampling_bytes);
+    }
+    if (err != hipSuccess) {
+        if (prompt_pool_ != nullptr) (void)hipFree(prompt_pool_);
+        if (sampling_pool_ != nullptr) (void)hipFree(sampling_pool_);
+        prompt_pool_ = nullptr;
+        sampling_pool_ = nullptr;
+        prompt_capacity_ = 0u;
+        prompt_stride_ = 0u;
+        sampling_capacity_ = 0u;
+        return Status::hip_error("gpu-mcu request payload allocation",
+                                 hipGetErrorString(err), __FILE__, __LINE__);
+    }
+
+    prompt_free_.clear();
+    prompt_free_.reserve(prompt_capacity_);
+    for (uint32_t i = prompt_capacity_; i-- > 0;) prompt_free_.push_back(i);
+    sampling_free_.clear();
+    sampling_free_.reserve(sampling_capacity_);
+    for (uint32_t i = sampling_capacity_; i-- > 0;) sampling_free_.push_back(i);
+    return Status::make_ok();
+}
+
+int32_t* GpuMcuRuntime::request_prompt_tokens(uint32_t slot) noexcept {
+    if (prompt_pool_ == nullptr || slot >= prompt_capacity_) return nullptr;
+    return prompt_pool_ + static_cast<std::size_t>(slot) * prompt_stride_;
+}
+
+::ps::runtime::DeviceSamplingParams* GpuMcuRuntime::request_sampling_params(
+    uint32_t slot) noexcept {
+    if (sampling_pool_ == nullptr || slot >= sampling_capacity_) return nullptr;
+    return sampling_pool_ + slot;
+}
+
+const GpuMcuRuntime::RequestPayload* GpuMcuRuntime::request_payload(
+    uint64_t request_id) const {
+    const auto found = payloads_.find(request_id);
+    if (found == payloads_.end()) return nullptr;
+    return &found->second;
+}
+
+Status GpuMcuRuntime::acquire_request_payload(uint32_t* prompt_slot,
+                                              uint32_t* sampling_slot) noexcept {
+    if (prompt_slot == nullptr || sampling_slot == nullptr) {
+        return Status::invalid_argument("null payload slot out", __FILE__,
+                                        __LINE__);
+    }
+    *prompt_slot = kInvalidPayloadSlot;
+    *sampling_slot = kInvalidPayloadSlot;
+    if (prompt_free_.empty() || sampling_free_.empty()) {
+        return Status::insufficient_memory(
+            "gpu-mcu request payload pool is exhausted", __FILE__, __LINE__);
+    }
+    *prompt_slot = prompt_free_.back();
+    prompt_free_.pop_back();
+    *sampling_slot = sampling_free_.back();
+    sampling_free_.pop_back();
+    return Status::make_ok();
+}
+
+void GpuMcuRuntime::release_request_payload(uint32_t prompt_slot,
+                                            uint32_t sampling_slot) noexcept {
+    if (prompt_slot != kInvalidPayloadSlot) prompt_free_.push_back(prompt_slot);
+    if (sampling_slot != kInvalidPayloadSlot) {
+        sampling_free_.push_back(sampling_slot);
+    }
+}
+
+void GpuMcuRuntime::release_payload_record(uint64_t request_id) {
+    const auto found = payloads_.find(request_id);
+    if (found == payloads_.end()) return;
+    release_request_payload(found->second.prompt_slot,
+                            found->second.sampling_slot);
+    payloads_.erase(found);
+}
+
+Status GpuMcuRuntime::upload_request_payload(
+    uint32_t prompt_slot,
+    uint32_t sampling_slot,
+    const std::vector<int32_t>& input_tokens,
     const SamplingConfig& sampling) {
-    (void)input_tokens;
-    (void)max_new_tokens;
-    (void)sampling;
-    if (shutdown_) {
-        return Status::invalid_state("gpu-mcu runtime is shut down",
+    int32_t* prompt = request_prompt_tokens(prompt_slot);
+    ::ps::runtime::DeviceSamplingParams* params =
+        request_sampling_params(sampling_slot);
+    if (prompt == nullptr || params == nullptr) {
+        return Status::invalid_state("gpu-mcu request payload slot is invalid",
                                      __FILE__, __LINE__);
     }
-    if (config_.max_scheduled_requests == 0u) {
-        return Status::invalid_state(
-            "gpu-mcu runtime is not configured", __FILE__, __LINE__);
+    if (input_tokens.empty()) {
+        return Status::invalid_argument("request input tokens are empty",
+                                        __FILE__, __LINE__);
     }
-    return Status::unsupported(
-        "gpu-mcu submit bridge is not connected", __FILE__,
-        __LINE__);
+    if (input_tokens.size() > prompt_stride_) {
+        return Status::invalid_argument(
+            "request prompt exceeds the payload stride", __FILE__, __LINE__);
+    }
+    const std::size_t prompt_bytes =
+        input_tokens.size() * sizeof(int32_t);
+    if (hipMemcpy(prompt, input_tokens.data(), prompt_bytes,
+                  hipMemcpyHostToDevice) != hipSuccess) {
+        return Status::hip_error("gpu-mcu prompt payload upload",
+                                 hipGetErrorString(hipGetLastError()),
+                                 __FILE__, __LINE__);
+    }
+
+    const SamplingRequest request =
+        make_sampling_request(sampling, /*sample=*/true, /*sample_index=*/0u);
+    ::ps::runtime::DeviceSamplingParams device_params{};
+    device_params.mode = static_cast<uint8_t>(request.mode);
+    device_params.temperature = request.temperature;
+    device_params.top_p = request.top_p;
+    device_params.top_k = request.top_k;
+    device_params.seed = request.seed;
+    device_params.sample_index = request.sample_index;
+    if (hipMemcpy(params, &device_params, sizeof(device_params),
+                  hipMemcpyHostToDevice) != hipSuccess) {
+        return Status::hip_error("gpu-mcu sampling payload upload",
+                                 hipGetErrorString(hipGetLastError()),
+                                 __FILE__, __LINE__);
+    }
+    return Status::make_ok();
+}
+
+Result<uint64_t> GpuMcuRuntime::submit(std::vector<int32_t> input_tokens,
+                                       uint32_t max_new_tokens,
+                                       const SamplingConfig& sampling) {
+    (void)max_new_tokens;
+    if (shutdown_) {
+        return Status::invalid_state("gpu-mcu runtime is shut down", __FILE__,
+                                     __LINE__);
+    }
+    if (config_.max_scheduled_requests == 0u) {
+        return Status::invalid_state("gpu-mcu runtime is not configured",
+                                     __FILE__, __LINE__);
+    }
+
+    uint32_t prompt_slot = kInvalidPayloadSlot;
+    uint32_t sampling_slot = kInvalidPayloadSlot;
+    const Status acquired =
+        acquire_request_payload(&prompt_slot, &sampling_slot);
+    if (!acquired.ok()) return acquired;
+
+    const Status uploaded =
+        upload_request_payload(prompt_slot, sampling_slot, input_tokens,
+                               sampling);
+    if (!uploaded.ok()) {
+        release_request_payload(prompt_slot, sampling_slot);
+        return uploaded;
+    }
+
+    const uint64_t request_id = next_id_++;
+    RequestPayload payload;
+    payload.prompt_slot = prompt_slot;
+    payload.sampling_slot = sampling_slot;
+    payloads_[request_id] = payload;
+
+    release_payload_record(request_id);
+    return Status::unsupported("gpu-mcu submit bridge is not connected",
+                               __FILE__, __LINE__);
 }
 
 Result<StepResult> GpuMcuRuntime::step() {
     if (shutdown_) {
-        return Status::invalid_state("gpu-mcu runtime is shut down",
-                                     __FILE__, __LINE__);
+        return Status::invalid_state("gpu-mcu runtime is shut down", __FILE__,
+                                     __LINE__);
     }
     StepResult result{};
     for (auto it = requests_.begin(); it != requests_.end();) {
@@ -59,8 +221,10 @@ Result<StepResult> GpuMcuRuntime::step() {
             ++it;
             continue;
         }
-        request_index_.erase(it->id);
+        const uint64_t id = it->id;
+        request_index_.erase(id);
         it = requests_.erase(it);
+        release_payload_record(id);
         result.executed = true;
         ++result.num_requests;
     }
@@ -69,16 +233,15 @@ Result<StepResult> GpuMcuRuntime::step() {
 
 Status GpuMcuRuntime::cancel(uint64_t id) {
     if (shutdown_) {
-        return Status::invalid_state("gpu-mcu runtime is shut down",
-                                     __FILE__, __LINE__);
+        return Status::invalid_state("gpu-mcu runtime is shut down", __FILE__,
+                                     __LINE__);
     }
     if (request_index_.find(id) == request_index_.end()) {
         return Status::invalid_argument("unknown gpu-mcu request id", __FILE__,
                                         __LINE__);
     }
-    return Status::unsupported(
-        "gpu-mcu cancel bridge is not connected", __FILE__,
-        __LINE__);
+    return Status::unsupported("gpu-mcu cancel bridge is not connected",
+                               __FILE__, __LINE__);
 }
 
 Status GpuMcuRuntime::retire(uint64_t id) {
@@ -93,6 +256,7 @@ Status GpuMcuRuntime::retire(uint64_t id) {
     }
     requests_.erase(found->second);
     request_index_.erase(found);
+    release_payload_record(id);
     return Status::make_ok();
 }
 
@@ -108,17 +272,15 @@ const RuntimeRequest* GpuMcuRuntime::request(uint64_t id) const {
 
 Status GpuMcuRuntime::cancel_all() {
     if (requests_.empty()) return Status::make_ok();
-    return Status::unsupported(
-        "gpu-mcu cancel bridge is not connected", __FILE__,
-        __LINE__);
+    return Status::unsupported("gpu-mcu cancel bridge is not connected",
+                               __FILE__, __LINE__);
 }
 
 Status GpuMcuRuntime::allocate_controller_resources(int device) {
     if (controller_resources_ready_) return Status::make_ok();
     if (config_.max_scheduled_requests == 0u) {
         return Status::invalid_state(
-            "gpu-mcu runtime slot capacity is zero", __FILE__,
-            __LINE__);
+            "gpu-mcu runtime slot capacity is zero", __FILE__, __LINE__);
     }
 
     auto control = ::ps::runtime::gpu_mcu::GpuMcuControlRing::create(device);
@@ -209,10 +371,35 @@ Status GpuMcuRuntime::allocate_controller_resources(int device) {
 Status GpuMcuRuntime::shutdown() {
     if (shutdown_) return Status::make_ok();
     shutdown_ = true;
+    payloads_.clear();
     request_index_.clear();
     requests_.clear();
+    prompt_free_.clear();
+    sampling_free_.clear();
 
     Status first_error = Status::make_ok();
+    if (sampling_pool_ != nullptr) {
+        const hipError_t err = hipFree(sampling_pool_);
+        if (err != hipSuccess && first_error.ok()) {
+            first_error = Status::hip_error("hipFree gpu-mcu sampling payload",
+                                            hipGetErrorString(err), __FILE__,
+                                            __LINE__);
+        }
+        sampling_pool_ = nullptr;
+    }
+    if (prompt_pool_ != nullptr) {
+        const hipError_t err = hipFree(prompt_pool_);
+        if (err != hipSuccess && first_error.ok()) {
+            first_error = Status::hip_error("hipFree gpu-mcu prompt payload",
+                                            hipGetErrorString(err), __FILE__,
+                                            __LINE__);
+        }
+        prompt_pool_ = nullptr;
+    }
+    prompt_capacity_ = 0u;
+    prompt_stride_ = 0u;
+    sampling_capacity_ = 0u;
+
     if (admission_ != nullptr) {
         const hipError_t err = hipFree(admission_);
         if (err != hipSuccess && first_error.ok()) {

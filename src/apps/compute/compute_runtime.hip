@@ -205,6 +205,9 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
         const Status mcu_resources =
             gpu_mcu_runtime_->allocate_controller_resources(config_.device);
         if (!mcu_resources.ok()) return mcu_resources;
+        const Status mcu_payloads =
+            gpu_mcu_runtime_->allocate_request_payloads();
+        if (!mcu_payloads.ok()) return mcu_payloads;
         return Status::make_ok();
     }
 
