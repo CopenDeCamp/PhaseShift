@@ -79,8 +79,6 @@ __device__ __forceinline__ bool gpu_mcu_slot_publish_terminal(
     return true;
 }
 
-// Publishes a terminal record for a request that never claimed a slot
-// (a cancel of an admission-backlog entry for example).
 __device__ __forceinline__ bool gpu_mcu_publish_terminal_record(
     OutputRing* ring,
     uint64_t& position,

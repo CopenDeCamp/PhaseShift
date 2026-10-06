@@ -106,6 +106,8 @@ __device__ __forceinline__ bool gpu_mcu_execution_step(
         commit.max_slots = state->request_max_slots;
         commit.bindings = state->slot_bindings;
         commit.binding_max_slots = state->binding_max_slots;
+        commit.request_limits_valid =
+            state->request_runtime_enabled != 0u ? 1u : 0u;
         commit.sampled_tokens = state->execution_sampled_tokens;
         commit.sampled_capacity = state->execution_sampled_capacity;
         commit.verify_committed_counts = state->execution_verify_counts;

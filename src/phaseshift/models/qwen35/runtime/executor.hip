@@ -421,27 +421,34 @@ Status ensure_mcu_state(Executor& executor) {
             const std::size_t stop_bytes = stop_tokens.size() * sizeof(int32_t);
             void* ids = nullptr;
             void* cond_device = nullptr;
-            if (hipMalloc(&ids, stop_bytes) == hipSuccess &&
-                hipMemcpy(ids, stop_tokens.data(), stop_bytes,
-                          hipMemcpyHostToDevice) == hipSuccess &&
-                hipMalloc(&cond_device,
-                          sizeof(::ps::runtime::gpu_mcu::GpuMcuStopConditions)) ==
-                    hipSuccess) {
+            hipError_t err = hipMalloc(&ids, stop_bytes);
+            if (err == hipSuccess) {
+                err = hipMemcpy(ids, stop_tokens.data(), stop_bytes,
+                                hipMemcpyHostToDevice);
+            }
+            if (err == hipSuccess) {
+                err = hipMalloc(
+                    &cond_device,
+                    sizeof(::ps::runtime::gpu_mcu::GpuMcuStopConditions));
+            }
+            if (err == hipSuccess) {
                 const ::ps::runtime::gpu_mcu::GpuMcuStopConditions cond{
                     static_cast<const int32_t*>(ids),
                     static_cast<uint32_t>(stop_tokens.size()), 0u};
-                if (hipMemcpy(cond_device, &cond, sizeof(cond),
-                              hipMemcpyHostToDevice) == hipSuccess) {
-                    state->stop_token_ids = ids;
-                    state->stop_token_count =
-                        static_cast<uint32_t>(stop_tokens.size());
-                    state->stop_conditions = cond_device;
-                    ids = nullptr;
-                    cond_device = nullptr;
-                }
+                err = hipMemcpy(cond_device, &cond, sizeof(cond),
+                                hipMemcpyHostToDevice);
             }
-            if (ids != nullptr) (void)hipFree(ids);
-            if (cond_device != nullptr) (void)hipFree(cond_device);
+            if (err != hipSuccess) {
+                if (ids != nullptr) (void)hipFree(ids);
+                if (cond_device != nullptr) (void)hipFree(cond_device);
+                return Status::hip_error("stop condition table construction",
+                                         hipGetErrorString(err), __FILE__,
+                                         __LINE__);
+            }
+            state->stop_token_ids = ids;
+            state->stop_token_count =
+                static_cast<uint32_t>(stop_tokens.size());
+            state->stop_conditions = cond_device;
         }
     }
 

@@ -452,6 +452,11 @@ consume するだけで、per-token / per-batch の進行に関与しない。
   slot / binding table だけを設定し、request runtime と batch planner を enable しない。
   `request_runtime_enabled == 0` の間は `gpu_mcu_scheduler_boundary()` が早期 return するため、
   呼び出し側が構築した `DeviceBatchContext` は再構築されない。executor 経路がこれを使う。
+- commit が `max_new_tokens` / `max_sequence_length` を request terminal 判定に使うのは
+  request runtime が有効なときだけである
+  （[stop_conditions.md](stop_conditions.md) §request limits の validity）。
+  `configure_commit_slots` 経路の slot は batch ごとに再構成され limit を持たない。
+  EOS / stop token の scan は mode に依存せず有効である。
 - `batch_ready_epoch` が進んだときだけ dispatch する。`actual_rows == 0` は dispatch
   しない。`execution_epoch` の wrap は fail-closed で継続しない。
 - commit は completion 成功時のみ。失敗 batch は参加 slot だけを `error` terminal に
@@ -514,9 +519,9 @@ terminal slot は release 後に recycle されるため、**terminal は output
 ## admission backlog
 
 slot が満杯の submit を `no_idle_slot` で拒否せず、device 上に queue する。
-未 claim の request に対する cancel が terminal record を通る経路は未設計であり
-（[stop_conditions.md](stop_conditions.md) §既知の差異）、
-`request あたり terminal record exactly 1` を満たす方式を要する。
+queue にいる未 claim request への cancel は、`request あたり terminal record
+exactly 1` を output ring へ publish してから backlog から外す
+（[stop_conditions.md](stop_conditions.md)）。
 
 - `GpuMcuPendingAdmission` は request id と descriptor handle / generation の組を持つ固定
   容量 FIFO。ingress は ready と claimed の間に queued 状態を持つ。

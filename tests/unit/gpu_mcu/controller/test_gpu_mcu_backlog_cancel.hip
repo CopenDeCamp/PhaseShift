@@ -143,7 +143,7 @@ uint32_t active_slots(mcu::GpuMcuSlotTable& slots, hipStream_t stream) {
     return count;
 }
 
-}  // namespace
+}
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -352,9 +352,6 @@ int main() {
     check(!bad.ok(), "a null pointer is rejected");
 
     {
-        // P0-4: 未 claim request（admission backlog）への cancel は
-        // terminal record exactly 1 を output ring へ publish してから
-        // backlog から外す。
         uint64_t backlog_descriptor = 0u;
         for (uint32_t i = 0u; i < 5u; ++i) {
             const uint32_t handle = push_submit(

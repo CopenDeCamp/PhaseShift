@@ -21,7 +21,7 @@ void check(bool condition, const char* message) {
     }
 }
 
-constexpr uint32_t kSlots = 16u;
+constexpr uint32_t kSlots = 32u;
 constexpr uint32_t kRows = 64u;
 
 __global__ void commit_once_kernel(mcu::GpuMcuBatchCommitView view,
@@ -142,10 +142,12 @@ int main() {
         (void)hipStreamSynchronize(stream);
     };
 
-    auto claim = [&](uint32_t index, uint32_t prompt_length,
-                     uint32_t max_new_tokens) {
+    auto claim_with = [&](uint32_t index, uint32_t prompt_length,
+                          uint32_t max_sequence_length,
+                          uint32_t max_new_tokens) {
         check(mcu::gpu_mcu_slot_table_claim(slots, index, 100u + index,
-                                            prompt_length, 0u, 256u,
+                                            prompt_length, 0u,
+                                            max_sequence_length,
                                             max_new_tokens, applied, stream)
                   .ok(),
               "slot claim launches");
@@ -154,7 +156,12 @@ int main() {
         bindings[index].handle = host_slots[index].handle;
     };
 
-    auto run = [&]() {
+    auto claim = [&](uint32_t index, uint32_t prompt_length,
+                     uint32_t max_new_tokens) {
+        claim_with(index, prompt_length, 256u, max_new_tokens);
+    };
+
+    auto run = [&](uint32_t request_limits_valid = 1u) {
         uint32_t* ok = nullptr;
         check(hipMalloc(reinterpret_cast<void**>(&ok), sizeof(uint32_t)) ==
                   hipSuccess,
@@ -165,6 +172,7 @@ int main() {
         view.max_slots = kSlots;
         view.bindings = static_cast<mcu::GpuMcuSlotBinding*>(bind_dev);
         view.binding_max_slots = kSlots;
+        view.request_limits_valid = request_limits_valid;
         view.sampled_tokens = static_cast<const int32_t*>(sampled_dev);
         view.sampled_capacity = kRows;
         view.verify_committed_counts = static_cast<const uint32_t*>(verify_dev);
@@ -342,7 +350,6 @@ int main() {
                       sizeof(mcu::GpuMcuSlotState)) == 0,
           "stale commit does not touch the slot");
 
-    // F. stop-condition contract: effective_commit_count と terminal latch。
     {
         void* ids_host = nullptr;
         void* ids_dev = nullptr;
@@ -367,7 +374,6 @@ int main() {
         sampled[3] = 9004;
         sampled[4] = 9005;
 
-        // F-1. stop boundary < budget -> effective は stop で絞られ EOS が latch される。
         claim(8u, 8u, 64u);
         bindings[8].stop_conditions_handle =
             reinterpret_cast<uint64_t>(cond_dev);
@@ -390,11 +396,9 @@ int main() {
                   static_cast<uint32_t>(mcu::GpuMcuTerminalReason::eos),
               "eos latches at the stop boundary");
 
-        // F-2/F-3 は stop を 3 番目の token に移し、stop boundary と budget を比較する。
         sampled[1] = 9002;
         sampled[2] = kEos;
 
-        // F-2. stop boundary == budget -> stop wins.
         claim(9u, 8u, 3u);
         bindings[9].stop_conditions_handle =
             reinterpret_cast<uint64_t>(cond_dev);
@@ -408,7 +412,6 @@ int main() {
                   static_cast<uint32_t>(mcu::GpuMcuTerminalReason::eos),
               "the stop wins the tie");
 
-        // F-3. budget < stop boundary -> budget wins and max_new_tokens latches.
         claim(10u, 8u, 2u);
         bindings[10].stop_conditions_handle =
             reinterpret_cast<uint64_t>(cond_dev);
@@ -425,7 +428,6 @@ int main() {
                       mcu::GpuMcuTerminalReason::max_new_tokens),
               "max_new_tokens latches when the budget wins");
 
-        // F-4. latch 済みの terminal は上書きされない（one-way latch）。
         fill(reqs[0], host_slots[8].handle, 0u, 1u, 10u, 11u,
              rt::ExecutionClass::DECODE, 0u, 1u);
         check(run(), "post-terminal commit runs");
@@ -433,8 +435,6 @@ int main() {
                   static_cast<uint32_t>(mcu::GpuMcuTerminalReason::eos),
               "the latched eos reason is not overwritten");
 
-        // G. max_new_tokens == 0 は partial prefill では terminal にせず、
-        //    final prefill で terminal する。
         claim(11u, 16u, 0u);
         fill(reqs[0], host_slots[11].handle, 0u, 4u, 0u, 4u,
              rt::ExecutionClass::PREFILL, 0xFFFFFFFFu, 0u);
@@ -461,6 +461,106 @@ int main() {
         check(host_slots[11].generated_tokens == 0u &&
                   host_slots[11].pending_count == 0u,
               "max_new_tokens zero stages no token");
+
+        rows[0] = 0u;
+        rows[1] = 1u;
+        rows[2] = 2u;
+        rows[3] = 3u;
+        context->num_requests = 1u;
+        context->actual_rows = 4u;
+
+        claim_with(12u, 8u, 10u, 64u);
+        sampled[0] = 9100;
+        sampled[1] = 9101;
+        sampled[2] = 9102;
+        sampled[3] = 9103;
+        fill(reqs[0], host_slots[12].handle, 0u, 4u, 8u, 12u,
+             rt::ExecutionClass::SPEC_VERIFY, 0u, 4u);
+        verify[0] = 4u;
+        check(run(), "capacity bounded verify commits");
+        check(host_slots[12].verify_committed_count == 2u,
+              "remaining sequence capacity bounds the commit");
+        check(host_slots[12].sequence_length == 10u,
+              "the sequence stops at the sequence limit");
+        check(host_slots[12].generated_tokens == 2u &&
+                  host_slots[12].pending_count == 2u,
+              "only the capacity bounded prefix is staged");
+        check(host_slots[12].terminal_reason ==
+                  static_cast<uint32_t>(
+                      mcu::GpuMcuTerminalReason::max_seq_len),
+              "max_seq_len latches when the capacity wins");
+
+        claim_with(13u, 8u, 11u, 64u);
+        bindings[13].stop_conditions_handle =
+            reinterpret_cast<uint64_t>(cond_dev);
+        sampled[2] = kEos;
+        fill(reqs[0], host_slots[13].handle, 0u, 4u, 8u, 12u,
+             rt::ExecutionClass::SPEC_VERIFY, 0u, 4u);
+        verify[0] = 4u;
+        check(run(), "verify with a stop at the capacity boundary commits");
+        check(host_slots[13].verify_committed_count == 3u,
+              "the stop boundary equals the remaining capacity");
+        check(host_slots[13].terminal_reason ==
+                  static_cast<uint32_t>(mcu::GpuMcuTerminalReason::eos),
+              "eos wins the tie against the sequence capacity");
+
+        claim_with(14u, 8u, 10u, 64u);
+        bindings[14].stop_conditions_handle =
+            reinterpret_cast<uint64_t>(cond_dev);
+        fill(reqs[0], host_slots[14].handle, 0u, 4u, 8u, 12u,
+             rt::ExecutionClass::SPEC_VERIFY, 0u, 4u);
+        verify[0] = 4u;
+        check(run(), "verify with a stop beyond the capacity commits");
+        check(host_slots[14].verify_committed_count == 2u,
+              "the capacity bounds the commit before the stop");
+        check(host_slots[14].terminal_reason ==
+                  static_cast<uint32_t>(
+                      mcu::GpuMcuTerminalReason::max_seq_len),
+              "max_seq_len wins when the stop lies out of range");
+
+        claim_with(15u, 16u, 256u, 0u);
+        sampled[0] = 9200;
+        fill(reqs[0], host_slots[15].handle, 0u, 4u, 0u, 4u,
+             rt::ExecutionClass::PREFILL, 0xFFFFFFFFu, 0u);
+        context->actual_rows = 4u;
+        check(run(0u), "host fed partial prefill commits");
+        check(host_slots[15].terminal_reason ==
+                  static_cast<uint32_t>(mcu::GpuMcuTerminalReason::none),
+              "host fed partial prefill does not terminate");
+        fill(reqs[0], host_slots[15].handle, 4u, 12u, 4u, 16u,
+             rt::ExecutionClass::PREFILL, 0u, 1u);
+        context->actual_rows = 12u;
+        check(run(0u), "host fed final prefill commits");
+        check(host_slots[15].terminal_reason ==
+                  static_cast<uint32_t>(mcu::GpuMcuTerminalReason::none),
+              "host fed final prefill does not treat a zero limit as a request");
+        check(host_slots[15].phase ==
+                  mcu::gpu_mcu_slot_phase_value(mcu::GpuMcuSlotPhase::decode),
+              "host fed final prefill moves to decode");
+        check(host_slots[15].generated_tokens == 1u &&
+                  host_slots[15].pending_count == 1u,
+              "host fed final prefill stages one token");
+        check(host_slots[15].pending_tokens[0] == 9200,
+              "host fed final prefill stages the sampled token");
+
+        claim_with(16u, 8u, 256u, 0u);
+        bindings[16].stop_conditions_handle =
+            reinterpret_cast<uint64_t>(cond_dev);
+        sampled[0] = 9300;
+        sampled[1] = kEos;
+        sampled[2] = 9302;
+        sampled[3] = 9303;
+        fill(reqs[0], host_slots[16].handle, 0u, 4u, 8u, 12u,
+             rt::ExecutionClass::SPEC_VERIFY, 0u, 4u);
+        verify[0] = 4u;
+        check(run(0u), "host fed verify with a stop boundary commits");
+        check(host_slots[16].verify_committed_count == 2u,
+              "the stop boundary applies without request limits");
+        check(host_slots[16].sequence_length == 10u,
+              "the host fed sequence follows the stop boundary");
+        check(host_slots[16].terminal_reason ==
+                  static_cast<uint32_t>(mcu::GpuMcuTerminalReason::eos),
+              "host fed verify latches eos");
 
         check(hipHostFree(ids_host) == hipSuccess, "stop ids free");
         check(hipHostFree(cond_host) == hipSuccess, "stop conditions free");

@@ -145,6 +145,26 @@ prompt prefill の完了前に terminal してしまうため、
 
 GPU-MCU もこの semantics に従う。
 
+### request limits の validity
+
+GPU-MCU の batch commit が `max_new_tokens` / `max_sequence_length` を
+request terminal 判定に使ってよいのは、limit を所有する slot のみである。
+
+| mode | slot の limit | request terminal 判定 |
+| --- | --- | --- |
+| autonomous request runtime | request ingress が limit を設定する | limit を評価する |
+| Host-fed transient commit slot | batch ごとに再構成され limit を持たない | limit を評価しない |
+
+Host-fed の commit slot は batch ごとに zero 初期化される。
+ここでの `max_new_tokens == 0` は「生成0個の request」ではなく、
+**limit 情報が slot に存在しない**ことを表す。
+`max_new_tokens == 0` を limit 不在の sentinel として扱ってはならない。
+
+limit 判定の有効性は **request runtime の有効状態**から導出する。
+
+EOS / stop token の scan は mode に依存せず有効である。
+Host-fed でも terminal token より後ろの token を semantic commit してはならない。
+
 ## Host ⇔ GPU-MCU の対応
 
 | 論理責務 | Host backend | GPU-MCU |
@@ -221,7 +241,7 @@ semantic に commit する token 数（`effective_commit_count`）は分離す�
 effective_commit_count =
     accepted_count
     ∩ remaining_generation_budget
-    ∵ remaining_sequence_capacity
+    ∩ remaining_sequence_capacity
     ∩ (first_stop_token_position + 1)
 ```
 
@@ -229,6 +249,13 @@ effective_commit_count =
 
 `effective_commit_count` と terminal reason は、
 resource / KV / output への副作用**より先に**決定する。
+
+`remaining_generation_budget` は `max_new_tokens - generated_tokens` であり、
+`generated_tokens >= max_new_tokens` のときは 0 である。
+`remaining_sequence_capacity` は `max_sequence_length - prefix_length` であり、
+prefix が既に limit 以上のときは 0 である。
+`max_sequence_length == 0` は limit なしを表す。
+limit の評価可否は `request limits の validity` に従う。
 
 ```text
 sampled / accepted tokens

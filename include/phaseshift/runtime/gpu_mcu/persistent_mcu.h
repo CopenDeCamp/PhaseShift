@@ -441,7 +441,6 @@ __device__ __forceinline__ bool gpu_mcu_admission_contains(
     return false;
 }
 
-// Retires a backlog entry whose terminal record has reached the output ring.
 __device__ __forceinline__ void gpu_mcu_finish_backlog_cancel(
     GpuMcuPersistentState* state) noexcept {
     const uint64_t request_id = state->pending_terminal_request_id;
@@ -658,9 +657,6 @@ __device__ __forceinline__ bool gpu_mcu_scheduler_consume_one(
         return true;
     }
     if (result.cancel_not_found) {
-        // 未 claim request の cancel は terminal record を output ring へ
-        // publish してから backlog から外す（request あたり terminal record
-        // exactly 1）。ring 満杯なら外さず pending にして次 boundary で再試行する。
         if (gpu_mcu_admission_contains(state, command.request_id,
                                        command.descriptor_handle)) {
             if (state->pending_terminal_valid == 0u) {
