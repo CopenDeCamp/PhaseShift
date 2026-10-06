@@ -27,6 +27,45 @@ GPU-MCU Low-Level Substrate
 - link するものは Qwen3.5 GPU-MCU backend、低レイヤーテスト、
   `phaseshift-bench` の GPU-MCU subcommand。
 
+## execution model
+
+GPU-MCU backend では `GpuMcuPersistentMcu::start()` 後、Host は inference
+progression を駆動してはならない。Host が runtime 中に行う制御は request
+submit、request cancel、controller shutdown に限定する。token / terminal
+output の consume および telemetry の観測は可能だが、それらを次 batch /
+next token 実行の条件としてはならない。batch planning、binding、forward
+execution、commit、停止判定、次 batch への遷移、idle 復帰はすべて
+GPU-MCU controller 内で完結する。
+
+`ContinuousBatcher::step() -> execute_batch()` は Host backend の execution
+model であり、GPU-MCU backend の execution driver として使用しない。
+
+`GpuMcuPersistentMcu::start()` は初期化時に一度だけ行う。
+static plan の compile と upload も初期化時に行い、request 到着後には
+compile / switch を行わない。batch ごとの差は `DeviceBatchContext` /
+`McuInvocationPatch` / `McuDynamicNodeBinding` で吸収する。
+
+Host が runtime で許される操作は次の5つだけである。
+
+| 操作 | 用途 |
+| --- | --- |
+| request submit | 新規 request の受付 |
+| request cancel | request の取消 |
+| controller shutdown | アプリ / model runtime の shutdown |
+| output consume | 確定 token / terminal record の読み取り |
+| telemetry 観測 | 健全性・debug。進行条件にしてはならない |
+
+## 既知の差異
+
+以下は現在の contract と実装の差である。
+
+- production の Qwen35 GPU-MCU 経路は §execution model に未到達である。
+  `configure_request_runtime()` を呼まず、control ring / ingress / output ring
+  を構築しない。`DeviceBatchContext` と request descriptor を Host が構築して
+  `configure_batch_plan()` へ渡し、`configure_commit_slots()`
+  （`request_runtime_enabled == 0`）を使う。`start()` と static plan の
+  compile は forward ごとに行われる。
+
 ## HSA / HIP agent mapping
 
 - HIP device から `hipDeviceGetPCIBusId` で PCI BDF を取得する。
@@ -437,8 +476,8 @@ contract を文書で守るのではなく、compile 前に落とす。
 
 ## Persistent controller
 
-persistent MCU が唯一の controller。Host は request を渡し、確定 token を非同期に
-consume するだけで、per-token / per-batch の進行に関与しない。
+persistent MCU が唯一の controller である。Host が runtime で許される操作と
+inference progression の所有者は §execution model を定める。
 
 - `mcu_run_once(GpuMcuFsmState*, GpuMcuRetainedPacket*) -> bool` は plan を 1 回
   完走する execution primitive であり、controller ではない。
@@ -451,7 +490,7 @@ consume するだけで、per-token / per-batch の進行に関与しない。
 - `configure_commit_slots(slots, max_slots, bindings, binding_max_slots)` は commit が読む
   slot / binding table だけを設定し、request runtime と batch planner を enable しない。
   `request_runtime_enabled == 0` の間は `gpu_mcu_scheduler_boundary()` が早期 return するため、
-  呼び出し側が構築した `DeviceBatchContext` は再構築されない。executor 経路がこれを使う。
+  呼び出し側が構築した `DeviceBatchContext` は再構築されない。
 - commit が `max_new_tokens` / `max_sequence_length` を request terminal 判定に使うのは
   request runtime が有効なときだけである
   （[stop_conditions.md](stop_conditions.md) §request limits の validity）。

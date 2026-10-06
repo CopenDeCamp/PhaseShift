@@ -15,6 +15,94 @@ Host は request を渡し、確定した token を非同期に consume する�
 
 対象は RDNA4（gfx1201）+ ROCm + HIP のみ。他のプラットフォーム向けの抽象化を持たない。
 
+## execution model
+
+### controller ownership
+
+`GpuMcuPersistentMcu::start()` 後の inference progression の所有者は
+Persistent MCU のみである。Host scheduler は progression を所有しない。
+Host は per-token / per-batch の forward を発射しない。
+
+batch planning、binding、forward execution、commit、停止判定、
+次 batch への遷移、idle 復帰はすべて GPU-MCU controller 内で完結する。
+
+### Host が start 後に行ってよいこと
+
+control:
+
+- 新規 request の SUBMIT
+- request の CANCEL
+- explicit controller shutdown
+
+observation:
+
+- OutputRing からの token / terminal record の consume
+- event ring の consume
+- telemetry / counters の観測
+
+observation は進行の prerequisite にしてはならない。
+観測結果を次の batch 開始・次の token 生成・次の forward 発射の条件にしない。
+
+### Host が start 後に行ってはいけないこと
+
+production GPU-MCU backend では start 後に次を行ってはいけない。
+
+- `compile_mcu_plan()`
+- `preflight_mcu_plan()`
+- `prepare_plan()`
+- per-batch `configure_*`
+- Host による `ready_epoch` increment
+- `execute_batch()` による inference progression
+- Host scheduler による次 batch 選択
+- `batches_committed() == 1` を待って次 forward を発射すること
+- batch ごとの `start()`
+- batch ごとの `request_stop()`
+- batch ごとの `wait_stopped()`
+
+### ContinuousBatcher との境界
+
+```text
+ContinuousBatcher::step() -> schedule_requests() -> execute_batch()
+```
+
+は Host backend の execution model である。
+GPU-MCU backend の execution driver として使用してはいけない。
+
+GPU-MCU backend が既存 public API の `step()` を残す場合は、
+`step()` は OutputRing drain / event drain / Host mirror 更新のみを行う
+observation API とし、GPU inference を前進させてはいけない。
+
+### request terminal と controller stop
+
+```text
+1 request terminal            != controller stop
+all request terminal          != controller stop
+runnable request == 0         -> idle
+request_stop()                -> application / model runtime shutdown 専用
+```
+
+### static plan
+
+Persistent MCU start 後に Host は compile / upload / switch を行わない。
+必要な execution plan は controller start 前に準備する。
+
+batch ごとの actual rows / request count / output count /
+attention region rows / verification count / runtime zero-work は、
+device-side binding / invocation patch / dynamic node binding で処理する。
+実行中の batch 値を理由として Host が recompile してはいけない。
+
+### zero-work との関係
+
+compile-time batch geometry と runtime batch geometry が同じであることを
+前提にしてはいけない。
+
+長寿命 controller では start 後に batch geometry が何度も変化するため、
+runtime zero-work は device-side binding の責務になる。
+runtime skip mechanism（`McuDynamicNodeBinding::enabled` 等）を保存する。
+
+`workgroup_count_x/y/z == 0` の「geometry override なし」という
+sentinel semantics は変更しない。
+
 ## 責務境界
 
 ### GPU-MCU substrate（model-independent）
@@ -58,7 +146,7 @@ Qwen3.5 kernel の standalone HSACO。
 | KV addressing の接続 | `mcu_kv_binding.h` |
 | body range | `mcu_layer_range.h`, `mcu_plan_value.h` |
 | backend 選択 policy | `decode_backend.h/.cpp` |
-| host 側の MCU 起動・供給 | `executor.hip`（`ensure_mcu_state` / `preflight_mcu_plan` / `execute_mcu_hybrid` / `stage_mcu_commit_slots`） |
+| controller 起動・static plan・request ingress・output の所有 | GPU-MCU production runtime owner（Qwen35 Executor/backend boundary。§既知の差異参照） |
 
 backend は substrate の AQL / FSM / persistent controller をそのまま使い、
 Qwen3.5 固有のものは plan・kernel inventory・kernarg recipe・KV addressing に限られる。
@@ -74,15 +162,11 @@ Qwen3.5 固有のものは plan・kernel inventory・kernarg recipe・KV address
 - 判定材料は request 数・token 数・prefill 有無・KV dtype・Tensor Parallel・
   stochastic sampling の有無・speculative verify・
   imatrix / value trace / hidden tap の有無・stream wait 支援・`mcu_body_range` の有効性。
-- capability 判定は preflight で行う。`create_model_executor()` が config 段
-  （TP・hidden tap・KV dtype）を、`submit_co_batch()` が batch 段
-  （`decide_decode_backend()` → `preflight_mcu_plan()`）を担当し、
-  どちらもこの batch の program dispatch より前に `Status::unsupported` を返す。
-  `preflight_mcu_plan()` は unsupported kernel / physical variant を
-  plan compile で検出し、`execute_mcu_hybrid()` は preflight 済み plan を consume するだけ。
-  plan compile は batch の device staging（request upload と `DeviceBatchContext` の H2D）
-  の後ろに置く。`gdn_conv_dispatch` / `gdn_recurrence_dispatch` が host から
-  `batch_context->requests[r]` を読むため、staging より前には置けない。
+- capability 判定は plan compile で行う。`create_model_executor()` が config 段
+  （TP・hidden tap・KV dtype）を、static plan compile が unsupported kernel /
+  physical variant を検出して `Status::unsupported` を返す。
+  static plan compile は controller start 前に行い、
+  request 到着後には compile / upload / switch を行わない。
 - persistent 準備前は prefill・verify・複数 request・単一 token 以外が対象外で、
   `GpuMcu` 要求なら error になる。persistent 準備後は prefill・verify・複数 request を
   GPU-MCU が受け、BF16 以外の KV・Tensor Parallel・stochastic sampling・
@@ -172,20 +256,25 @@ Host
 
 ```text
 Program (lower_to_primitives の出力)
-  -> compile_mcu_plan(program, context, options, McuCompiledPlan)
-  -> McuPlanCache が fingerprint で hit/miss を判定
+  -> compile_mcu_plan(program, context, options, McuCompiledPlan)   （controller start 前）
   -> McuCompiledPlan { nodes, variants, invocation, epilogue, dynamic binding }
-  -> GpuMcuPersistentMcu へ configure
+  -> GpuMcuPersistentMcu へ configure と upload                     （controller start 前）
+  -> GpuMcuPersistentMcu::start()
   -> mcu_run_once が plan node を解釈して AQL dispatch
 ```
 
+- compile と upload は controller start 前に一度だけ行う。
+  start 後に Host が compile / upload / switch を行うことは禁止である。
+- batch ごとの差は `DeviceBatchContext` の値、`McuInvocationPatch` の
+  row-global overlay、`McuDynamicNodeBinding` で吸収する。
+  static plan は最大 geometry を保持する
+  （`gpu_mcu_bind_execution_plan()` の契約）。
 - plan node は `McuPlanNode`（variant_id / next / kernarg_recipe / completion_slot 等）。
   interpreter は `variant_id` のみ解決し、`kernel_object` を持たない。
 - verify acceptance は runtime transaction であり Program graph には入れない。
   `McuCompiledPlan::epilogue` として runtime が node を積む。
 - plan を 1 つも compile できなければ compile の `Status` をそのまま返す。
   Host 経路へは戻らない。
-  `McuDecodeState::full_plan` は full plan（`0..dispatch_count`）を選んだことを示す。
 
 ## kernel registry と embedded HSACO
 
@@ -210,27 +299,65 @@ src/phaseshift/models/qwen35/kernels/optimized/*.hip
 
 ## production decode までのデータフロー
 
+初期化（controller start 前にすべて完了する）:
+
 ```text
-ContinuousBatcher -> ScheduledBatch
-  -> Executor::execute
-  -> ensure_mcu_state()                    GpuMcu 要求時の最初の submit で作成
-  -> decide_decode_backend()                 Host / GpuMcu
-       decode_backend_execution_error()      GpuMcu + eligibility NG -> Status::unsupported
-  -> batch staging                           token / request / DeviceBatchContext の H2D
-  -> preflight_mcu_plan()
-       compile_mcu_plan()                    Program -> McuCompiledPlan
-                                             （unsupported kernel / variant はここで確定）
-  -> execute_mcu_hybrid()
-       mcu_plan_fingerprint() / plan cache   upload は fingerprint 不一致時のみ
-       stage_mcu_commit_slots()              slot / binding を device へ用意
-       configure_batch_plan / configure_execution / configure_commit_slots
-       GpuMcuPersistentMcu::start()          batch ready epoch を公開して供給
-  -> persistent loop（control WGP 常駐）
-       admission -> plan 解釈 -> kernarg 生成 -> AQL stage/commit
-       -> worker（worker CU）が実行 -> completion marker
-  -> OutputRing -> Host が確定 token を consume
-  -> verify / GDN restore は epilogue node で device 上に完結
+Host
+  -> model / executor resource 構築
+  -> static MCU plan compile
+  -> static plan upload
+  -> request / control / output infrastructure 構築
+  -> persistent MCU state を configure（一度だけ）
+  -> GpuMcuPersistentMcu::start()（一度だけ）
 ```
+
+運転:
+
+```text
+Host                                   Persistent MCU
+  SUBMIT request      ----------------> control / input ring
+                                            -> admission
+                                            -> reconcile / resource reserve
+                                            -> scheduler snapshot
+                                            -> device batch planning
+                                            -> device batch binding
+                                            -> batch_ready_epoch 更新
+                                            -> micro-FSM execution
+                                            -> commit
+                                            -> scheduler
+                                            -> 次の runnable batch
+                                            -> runnable == 0 -> idle / sleep
+  CANCEL              ----------------> control ring
+  output consume      <---------------- OutputRing（進行の prerequisite ではない）
+  event consume       <---------------- event ring
+  telemetry 観測      <---------------- counters
+
+application shutdown
+  -> request_stop()
+  -> wait_stopped()
+```
+
+idle 中の次の SUBMIT は同一 controller を自力で復帰させる。
+request terminal は controller stop を伴わない。
+
+## 既知の差異
+
+以下は現在の contract と実装の差である。
+
+- production の Qwen35 GPU-MCU 経路は §execution model に未到達である。
+  `configure_request_runtime()` を呼ばれず、control ring / ingress / output ring
+  を構築しない。`DeviceBatchContext` と request descriptor を Host が構築して
+  `configure_batch_plan()` へ渡し、`configure_commit_slots()`
+  （`request_runtime_enabled == 0`）を使う。
+  `ContinuousBatcher::step()` → `execute_batch()` → `enqueue_batch()` が
+  `preflight_mcu_plan()` / `compile_mcu_plan()` / per-batch `configure_*` /
+  `start()` / `batches_committed()` ポーリング / `request_stop()` /
+  `wait_stopped()` を forward ごとに行う。
+- `compile_mcu_plan()` は live batch 値（`ctx.actual_rows` /
+  `ctx.actual_outputs` / `batch_context->requests` 等）を参照し、
+  static plan として長寿命で使える構成になっていない。
+- token / terminal の取得が OutputRing ではなく Host の sampled token buffer
+  直読になっている。
 
 ## ヘッダーの分類
 
