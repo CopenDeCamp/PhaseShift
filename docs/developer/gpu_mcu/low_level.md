@@ -283,6 +283,11 @@ contract を文書で守るのではなく、compile 前に落とす。
   rows >= 512 のときの N64K64 / N128K64 / N128K128）を MCU entrypoint で持つ。
   grid は `psq8_rowblock_grid_x/y` / `psq8_prefill2d_grid_x/y` を Host launcher と
   共有し、`Prefill2D` も RowBlock と同じ `Psq8MultiRowBf16Args` と recipe を共有する。
+- `LINEAR_PSQ4` も `Decode1` / `RowBlock1/2/4/8` と `Prefill2D`（同じ rows 条件の
+  K64N64 / K128N64 / K64N128 / K128N128 の 4 config）を MCU entrypoint で持つ。
+  grid は `psq4_prefill2d_grid_x/y` を Host launcher と共有し、
+  `Psq4MultiRowBf16Args` と recipe を共有する。output dtype は args の
+  `output_dtype` を entrypoint が BF16 / F32 へ分岐して吸収する。
 - `select_bf16_gemm_config` / `select_psq8_gemm_config` は Host と MCU で単一実装を
   共有する。selector が保証する割り切り条件（`rows % 256`、`out % ob`、`k % kc`）を
   MCU 側で再判定しない。

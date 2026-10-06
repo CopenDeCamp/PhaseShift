@@ -496,6 +496,8 @@ __device__ __forceinline__ void psq4_local_barrier() {
 }
 
 constexpr uint32_t k2dThreads = 256u;
+static_assert(k2dThreads == kPsq4Prefill2DThreads);
+static_assert(16u * kTileRow == kPsq4Prefill2DRowsPerBlock);
 
 __device__ __forceinline__ bool psq4_prefill_2d_slot_valid(bool guarded, uint32_t o_stage,
                                                            uint32_t out_features) {
@@ -503,7 +505,7 @@ __device__ __forceinline__ bool psq4_prefill_2d_slot_valid(bool guarded, uint32_
 }
 
 template <bool kGuarded, uint32_t kOutBlock, uint32_t kKChunk, Psq4GemmOutputDType kOutputType>
-__global__ void __launch_bounds__(k2dThreads) gemm_psq4_w4a8_wmma_prefill_2d_kernel(
+__device__ __forceinline__ void psq4_prefill2d_body(
     const uint8_t* __restrict__ weight_codes,
     const uint8_t* __restrict__ weight_scales,
     const uint8_t* __restrict__ activation_codes,
@@ -666,6 +668,66 @@ __global__ void __launch_bounds__(k2dThreads) gemm_psq4_w4a8_wmma_prefill_2d_ker
     }
 }
 
+template <bool kGuarded, uint32_t kOutBlock, uint32_t kKChunk, Psq4GemmOutputDType kOutputType>
+__global__ void __launch_bounds__(k2dThreads) gemm_psq4_w4a8_wmma_prefill_2d_kernel(
+    const uint8_t* __restrict__ weight_codes,
+    const uint8_t* __restrict__ weight_scales,
+    const uint8_t* __restrict__ activation_codes,
+    const float* __restrict__ activation_scales,
+    void* __restrict__ output,
+    const uint32_t rows,
+    const uint32_t out_features,
+    const uint32_t k_padded,
+    const uint32_t weight_scale_stride,
+    const uint32_t activation_code_stride,
+    const uint32_t activation_scale_stride,
+    const uint32_t output_row_stride) {
+    psq4_prefill2d_body<kGuarded, kOutBlock, kKChunk, kOutputType>(
+        weight_codes, weight_scales, activation_codes, activation_scales, output,
+        rows, out_features, k_padded, weight_scale_stride,
+        activation_code_stride, activation_scale_stride, output_row_stride);
+}
+
+#define PSQ4_PREFILL2D_ENTRY(NAME, OB, KC)                                      \
+    extern "C" __global__ __launch_bounds__(k2dThreads) void NAME(               \
+        Psq4MultiRowBf16Args args) {                                             \
+        const bool as_bf16 =                                                     \
+            args.output_dtype ==                                                 \
+            static_cast<uint32_t>(Psq4GemmOutputDType::BF16);                    \
+        if (as_bf16) {                                                           \
+            psq4_prefill2d_body<false, (OB), (KC),                               \
+                                Psq4GemmOutputDType::BF16>(                      \
+                static_cast<const uint8_t*>(args.weight_codes),                  \
+                static_cast<const uint8_t*>(args.weight_scales),                 \
+                static_cast<const uint8_t*>(args.activation_codes),              \
+                static_cast<const float*>(args.activation_scales), args.output,  \
+                args.rows, args.out_features, args.k_padded,                     \
+                args.weight_scale_stride, args.activation_code_stride,           \
+                args.activation_scale_stride, args.output_row_stride);           \
+        } else {                                                                 \
+            psq4_prefill2d_body<false, (OB), (KC),                               \
+                                Psq4GemmOutputDType::F32>(                       \
+                static_cast<const uint8_t*>(args.weight_codes),                  \
+                static_cast<const uint8_t*>(args.weight_scales),                 \
+                static_cast<const uint8_t*>(args.activation_codes),              \
+                static_cast<const float*>(args.activation_scales), args.output,  \
+                args.rows, args.out_features, args.k_padded,                     \
+                args.weight_scale_stride, args.activation_code_stride,           \
+                args.activation_scale_stride, args.output_row_stride);           \
+        }                                                                        \
+    }
+
+PSQ4_PREFILL2D_ENTRY(phaseshift_qwen35_psq4_prefill2d_k64n64,
+                     kPsq4GemmPrefill2dBlock64, kPsq4GemmPrefill2dBlock64);
+PSQ4_PREFILL2D_ENTRY(phaseshift_qwen35_psq4_prefill2d_k128n64,
+                     kPsq4GemmPrefill2dBlock64, kPsq4GemmPrefill2dBlock128);
+PSQ4_PREFILL2D_ENTRY(phaseshift_qwen35_psq4_prefill2d_k64n128,
+                     kPsq4GemmPrefill2dBlock128, kPsq4GemmPrefill2dBlock64);
+PSQ4_PREFILL2D_ENTRY(phaseshift_qwen35_psq4_prefill2d_k128n128,
+                     kPsq4GemmPrefill2dBlock128, kPsq4GemmPrefill2dBlock128);
+
+#undef PSQ4_PREFILL2D_ENTRY
+
 namespace {
 
 #define PSQ4_2D_LAUNCH_TYPED(OB, KC, OT)                                        \
@@ -678,11 +740,12 @@ namespace {
 
 #define PSQ4_2D_LAUNCH(OB, KC)                                                  \
     do {                                                                        \
-        if ((rows % (16u * kTileRow)) != 0u ||                                  \
+        if ((rows % kPsq4Prefill2DRowsPerBlock) != 0u ||                        \
             (out_features % (OB)) != 0u ||                                      \
             (k_padded % (KC)) != 0u)                                            \
             return hipErrorNotSupported;                                        \
-        const dim3 grid(out_features / (OB), rows / (16u * kTileRow), 1);       \
+        const dim3 grid(psq4_prefill2d_grid_x(out_features, (OB)),              \
+                        psq4_prefill2d_grid_y(rows), 1);                        \
         if (output_dtype == Psq4GemmOutputDType::BF16)                          \
             PSQ4_2D_LAUNCH_TYPED((OB), (KC), Psq4GemmOutputDType::BF16);        \
         else                                                                    \

@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -68,7 +69,9 @@ struct WeightBuffers {
 };
 
 bool symbol_for_config(kernel::Psq4GemmConfigId id, const char** symbol,
-                       uint32_t* mb_rows, uint32_t* workgroup) {
+                       uint32_t* mb_rows, uint32_t* workgroup,
+                       uint32_t* out_block) {
+    *out_block = 0u;
     switch (id) {
         case kernel::Psq4GemmConfigId::RowBlock1:
             *symbol = kernel::kPsq4RowBlock1Bf16Symbol;
@@ -86,10 +89,30 @@ bool symbol_for_config(kernel::Psq4GemmConfigId id, const char** symbol,
             *symbol = kernel::kPsq4RowBlock8Bf16Symbol;
             *mb_rows = 8u;
             break;
+        case kernel::Psq4GemmConfigId::Prefill2D_K64N64:
+            *symbol = kernel::kPsq4Prefill2DK64N64Symbol;
+            *mb_rows = 0u;
+            *out_block = kernel::kPsq4GemmPrefill2dBlock64;
+            break;
+        case kernel::Psq4GemmConfigId::Prefill2D_K128N64:
+            *symbol = kernel::kPsq4Prefill2DK128N64Symbol;
+            *mb_rows = 0u;
+            *out_block = kernel::kPsq4GemmPrefill2dBlock64;
+            break;
+        case kernel::Psq4GemmConfigId::Prefill2D_K64N128:
+            *symbol = kernel::kPsq4Prefill2DK64N128Symbol;
+            *mb_rows = 0u;
+            *out_block = kernel::kPsq4GemmPrefill2dBlock128;
+            break;
+        case kernel::Psq4GemmConfigId::Prefill2D_K128N128:
+            *symbol = kernel::kPsq4Prefill2DK128N128Symbol;
+            *mb_rows = 0u;
+            *out_block = kernel::kPsq4GemmPrefill2dBlock128;
+            break;
         default:
             return false;
     }
-    *workgroup = 32u;
+    *workgroup = *out_block != 0u ? kernel::kPsq4Prefill2DThreads : 32u;
     return true;
 }
 
@@ -104,8 +127,10 @@ bool run_case(mcu::GpuMcuAqlQueue& queue, const WeightBuffers& w, uint32_t rows,
     const char* symbol = nullptr;
     uint32_t mb_rows = 0u;
     uint32_t workgroup = 0u;
-    if (!symbol_for_config(config->id, &symbol, &mb_rows, &workgroup)) {
-        std::printf("FAIL: %s selector chose a non row-block config\n", name);
+    uint32_t out_block = 0u;
+    if (!symbol_for_config(config->id, &symbol, &mb_rows, &workgroup,
+                           &out_block)) {
+        std::printf("FAIL: %s selector chose an unsupported config\n", name);
         return false;
     }
 
@@ -190,8 +215,15 @@ bool run_case(mcu::GpuMcuAqlQueue& queue, const WeightBuffers& w, uint32_t rows,
     }
     auto region = region_res.release();
 
-    const uint32_t grid_x = (kN + 15u) / 16u;
-    const uint32_t grid_y = (rows + mb_rows * 16u - 1u) / (mb_rows * 16u);
+    uint32_t grid_x = 0u;
+    uint32_t grid_y = 0u;
+    if (out_block != 0u) {
+        grid_x = kernel::psq4_prefill2d_grid_x(kN, out_block);
+        grid_y = kernel::psq4_prefill2d_grid_y(rows);
+    } else {
+        grid_x = (kN + 15u) / 16u;
+        grid_y = (rows + mb_rows * 16u - 1u) / (mb_rows * 16u);
+    }
 
     unsigned char* slot = region.base;
     std::memset(slot, 0, region.slot_stride);
@@ -281,15 +313,23 @@ int main() {
     }
 
     {
-        const q35::McuCompiledVariantKind kinds[4] = {
+        const q35::McuCompiledVariantKind kinds[8] = {
             q35::McuCompiledVariantKind::Psq4RowBlock1Bf16,
             q35::McuCompiledVariantKind::Psq4RowBlock2Bf16,
             q35::McuCompiledVariantKind::Psq4RowBlock4Bf16,
-            q35::McuCompiledVariantKind::Psq4RowBlock8Bf16};
-        const char* symbols[4] = {
+            q35::McuCompiledVariantKind::Psq4RowBlock8Bf16,
+            q35::McuCompiledVariantKind::Psq4Prefill2DK64N64,
+            q35::McuCompiledVariantKind::Psq4Prefill2DK128N64,
+            q35::McuCompiledVariantKind::Psq4Prefill2DK64N128,
+            q35::McuCompiledVariantKind::Psq4Prefill2DK128N128};
+        const char* symbols[8] = {
             kernel::kPsq4RowBlock1Bf16Symbol, kernel::kPsq4RowBlock2Bf16Symbol,
-            kernel::kPsq4RowBlock4Bf16Symbol, kernel::kPsq4RowBlock8Bf16Symbol};
-        for (int i = 0; i < 4; ++i) {
+            kernel::kPsq4RowBlock4Bf16Symbol, kernel::kPsq4RowBlock8Bf16Symbol,
+            kernel::kPsq4Prefill2DK64N64Symbol,
+            kernel::kPsq4Prefill2DK128N64Symbol,
+            kernel::kPsq4Prefill2DK64N128Symbol,
+            kernel::kPsq4Prefill2DK128N128Symbol};
+        for (int i = 0; i < 8; ++i) {
             auto entry = q35::mcu_kernel_code_object(kinds[i]);
             check(entry.ok(), "row-block registry entry resolves");
             if (!entry.ok()) continue;
@@ -322,6 +362,19 @@ int main() {
     (void)run_case(queue, w, 8u, "rowblock_rows8");
     (void)run_case(queue, w, 32u, "rowblock_rows32");
     (void)run_case(queue, w, 26u, "rowblock_mixed26");
+
+    setenv("PHASESHIFT_PSQ_PREFILL_2D", "bk64bn64", 1);
+    (void)run_case(queue, w, 512u, "prefill2d_k64n64_rows512");
+    (void)run_case(queue, w, 768u, "prefill2d_k64n64_rows768");
+    setenv("PHASESHIFT_PSQ_PREFILL_2D", "bk128", 1);
+    (void)run_case(queue, w, 512u, "prefill2d_k128n64_rows512");
+    setenv("PHASESHIFT_PSQ_PREFILL_2D", "bn128", 1);
+    (void)run_case(queue, w, 512u, "prefill2d_k64n128_rows512");
+    (void)run_case(queue, w, 768u, "prefill2d_k64n128_rows768");
+    setenv("PHASESHIFT_PSQ_PREFILL_2D", "bk128bn128", 1);
+    (void)run_case(queue, w, 512u, "prefill2d_k128n128_rows512");
+    (void)run_case(queue, w, 1024u, "prefill2d_k128n128_rows1024");
+    unsetenv("PHASESHIFT_PSQ_PREFILL_2D");
 
     w.free_all();
     check(queue.shutdown().ok(), "queue shutdown");

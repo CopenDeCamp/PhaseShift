@@ -762,6 +762,21 @@ static Status compile_mcu_plan_impl(const Program& program,
                     case PhysicalPsq4Variant::RowBlock8Bf16:
                         multi_kind = McuCompiledVariantKind::Psq4RowBlock8Bf16;
                         break;
+                    case PhysicalPsq4Variant::Prefill2DK64N64:
+                        multi_kind = McuCompiledVariantKind::Psq4Prefill2DK64N64;
+                        break;
+                    case PhysicalPsq4Variant::Prefill2DK128N64:
+                        multi_kind =
+                            McuCompiledVariantKind::Psq4Prefill2DK128N64;
+                        break;
+                    case PhysicalPsq4Variant::Prefill2DK64N128:
+                        multi_kind =
+                            McuCompiledVariantKind::Psq4Prefill2DK64N128;
+                        break;
+                    case PhysicalPsq4Variant::Prefill2DK128N128:
+                        multi_kind =
+                            McuCompiledVariantKind::Psq4Prefill2DK128N128;
+                        break;
                     default:
                         return Status::unsupported(
                             "psq4 physical variant has no mcu entrypoint", __FILE__,

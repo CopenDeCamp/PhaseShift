@@ -356,6 +356,34 @@ Result<PhysicalResolveStatus> resolve_psq4_physical(
                 out.grid_y = (rows + 127u) / 128u;
                 out.workgroup = 32u;
                 break;
+            case ::ps::kernel::Psq4GemmConfigId::Prefill2D_K64N64:
+                out.variant = PhysicalPsq4Variant::Prefill2DK64N64;
+                out.grid = ::ps::kernel::psq4_prefill2d_grid_x(
+                    e.rows, ::ps::kernel::kPsq4GemmPrefill2dBlock64);
+                out.grid_y = ::ps::kernel::psq4_prefill2d_grid_y(rows);
+                out.workgroup = ::ps::kernel::kPsq4Prefill2DThreads;
+                break;
+            case ::ps::kernel::Psq4GemmConfigId::Prefill2D_K128N64:
+                out.variant = PhysicalPsq4Variant::Prefill2DK128N64;
+                out.grid = ::ps::kernel::psq4_prefill2d_grid_x(
+                    e.rows, ::ps::kernel::kPsq4GemmPrefill2dBlock64);
+                out.grid_y = ::ps::kernel::psq4_prefill2d_grid_y(rows);
+                out.workgroup = ::ps::kernel::kPsq4Prefill2DThreads;
+                break;
+            case ::ps::kernel::Psq4GemmConfigId::Prefill2D_K64N128:
+                out.variant = PhysicalPsq4Variant::Prefill2DK64N128;
+                out.grid = ::ps::kernel::psq4_prefill2d_grid_x(
+                    e.rows, ::ps::kernel::kPsq4GemmPrefill2dBlock128);
+                out.grid_y = ::ps::kernel::psq4_prefill2d_grid_y(rows);
+                out.workgroup = ::ps::kernel::kPsq4Prefill2DThreads;
+                break;
+            case ::ps::kernel::Psq4GemmConfigId::Prefill2D_K128N128:
+                out.variant = PhysicalPsq4Variant::Prefill2DK128N128;
+                out.grid = ::ps::kernel::psq4_prefill2d_grid_x(
+                    e.rows, ::ps::kernel::kPsq4GemmPrefill2dBlock128);
+                out.grid_y = ::ps::kernel::psq4_prefill2d_grid_y(rows);
+                out.workgroup = ::ps::kernel::kPsq4Prefill2DThreads;
+                break;
             default:
                 out.variant = PhysicalPsq4Variant::Unsupported;
                 break;

@@ -25,6 +25,14 @@ inline constexpr const char* kPsq4RowBlock4Bf16Symbol =
     "phaseshift_qwen35_psq4_rowblock4_bf16";
 inline constexpr const char* kPsq4RowBlock8Bf16Symbol =
     "phaseshift_qwen35_psq4_rowblock8_bf16";
+inline constexpr const char* kPsq4Prefill2DK64N64Symbol =
+    "phaseshift_qwen35_psq4_prefill2d_k64n64";
+inline constexpr const char* kPsq4Prefill2DK128N64Symbol =
+    "phaseshift_qwen35_psq4_prefill2d_k128n64";
+inline constexpr const char* kPsq4Prefill2DK64N128Symbol =
+    "phaseshift_qwen35_psq4_prefill2d_k64n128";
+inline constexpr const char* kPsq4Prefill2DK128N128Symbol =
+    "phaseshift_qwen35_psq4_prefill2d_k128n128";
 
 struct Psq4MultiRowBf16Args {
     const void* weight_codes = nullptr;
@@ -80,6 +88,19 @@ static_assert(offsetof(Psq4Decode1Bf16Args, weight_scale_stride) == 44);
 
 uint32_t psq4_decode1_block_size() noexcept;
 uint32_t psq4_decode1_grid(uint32_t out_features) noexcept;
+
+inline constexpr uint32_t kPsq4Prefill2DRowsPerBlock =
+    kPsqGemmPrefill2dRowsPerBlock;
+inline constexpr uint32_t kPsq4Prefill2DThreads = 256u;
+
+constexpr uint32_t psq4_prefill2d_grid_x(uint32_t out_features,
+                                         uint32_t out_block) noexcept {
+    return out_features / out_block;
+}
+
+constexpr uint32_t psq4_prefill2d_grid_y(uint32_t rows) noexcept {
+    return rows / kPsq4Prefill2DRowsPerBlock;
+}
 
 __device__ __forceinline__ uint2 psq4_cb10_expand(uint32_t q4) {
     constexpr uint32_t kMags0 = 0x44403800u;

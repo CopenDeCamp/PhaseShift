@@ -89,6 +89,10 @@ enum class McuCompiledVariantKind : uint8_t {
     Psq8Prefill2DN64K64 = 74,
     Psq8Prefill2DN128K64 = 75,
     Psq8Prefill2DN128K128 = 76,
+    Psq4Prefill2DK64N64 = 77,
+    Psq4Prefill2DK128N64 = 78,
+    Psq4Prefill2DK64N128 = 79,
+    Psq4Prefill2DK128N128 = 80,
 };
 
 inline constexpr McuCompiledVariantKind kMcuBf16ExactRowsKinds[16] = {

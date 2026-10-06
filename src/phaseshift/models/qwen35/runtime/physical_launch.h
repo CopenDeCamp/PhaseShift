@@ -88,6 +88,10 @@ enum class PhysicalPsq4Variant : uint8_t {
     RowBlock2Bf16 = 3,
     RowBlock4Bf16 = 4,
     RowBlock8Bf16 = 5,
+    Prefill2DK64N64 = 6,
+    Prefill2DK128N64 = 7,
+    Prefill2DK64N128 = 8,
+    Prefill2DK128N128 = 9,
 };
 
 struct PhysicalPsq4Launch {

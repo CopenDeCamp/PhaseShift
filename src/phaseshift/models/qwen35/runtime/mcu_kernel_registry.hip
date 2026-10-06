@@ -67,6 +67,14 @@ const char* mcu_kernel_variant_kind_name(McuCompiledVariantKind kind) {
             return "Psq4RowBlock4Bf16";
         case McuCompiledVariantKind::Psq4RowBlock8Bf16:
             return "Psq4RowBlock8Bf16";
+        case McuCompiledVariantKind::Psq4Prefill2DK64N64:
+            return "Psq4Prefill2DK64N64";
+        case McuCompiledVariantKind::Psq4Prefill2DK128N64:
+            return "Psq4Prefill2DK128N64";
+        case McuCompiledVariantKind::Psq4Prefill2DK64N128:
+            return "Psq4Prefill2DK64N128";
+        case McuCompiledVariantKind::Psq4Prefill2DK128N128:
+            return "Psq4Prefill2DK128N128";
         case McuCompiledVariantKind::VerifyAcceptPrefix:
             return "VerifyAcceptPrefix";
         case McuCompiledVariantKind::GdnSpecRestore:
@@ -531,6 +539,26 @@ Result<McuKernelCodeObject> mcu_kernel_code_object(McuCompiledVariantKind kind) 
         case McuCompiledVariantKind::Psq4RowBlock8Bf16:
             blob_name = "psq4";
             out.symbol = kernel::kPsq4RowBlock8Bf16Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq4Prefill2DK64N64:
+            blob_name = "psq4";
+            out.symbol = kernel::kPsq4Prefill2DK64N64Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq4Prefill2DK128N64:
+            blob_name = "psq4";
+            out.symbol = kernel::kPsq4Prefill2DK128N64Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq4Prefill2DK64N128:
+            blob_name = "psq4";
+            out.symbol = kernel::kPsq4Prefill2DK64N128Symbol;
+            out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
+            break;
+        case McuCompiledVariantKind::Psq4Prefill2DK128N128:
+            blob_name = "psq4";
+            out.symbol = kernel::kPsq4Prefill2DK128N128Symbol;
             out.kernarg_recipe = mcu::kMcuKernargRecipePsq4MultiRowBf16;
             break;
         case McuCompiledVariantKind::VerifyAcceptPrefix:
