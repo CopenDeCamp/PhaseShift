@@ -450,6 +450,46 @@ static Status compile_mcu_plan_impl(const Program& program,
         ++physical_nodes;
     };
 
+    const auto record_geometry = [&out](uint32_t node_index, McuGeometryAxis axis,
+                                        uint8_t source, uint32_t param) {
+        McuGeometryPatch patch;
+        patch.node_index = node_index;
+        patch.axis = axis;
+        patch.source = source;
+        patch.param = param;
+        out.geometry_patches.push_back(patch);
+    };
+
+    const auto record_row_patch = [&out](McuInvocationTable table,
+                                         uint32_t index, uint8_t source) {
+        McuInvocationRowPatch patch;
+        patch.table = table;
+        patch.source = source;
+        patch.index = index;
+        out.invocation_row_patches.push_back(patch);
+    };
+
+    const auto row_source_for = [&](::ps::runtime::ValueId value,
+                                    uint8_t& source) -> Status {
+        auto resolved = resolve_host_value(program, value, ctx);
+        if (!resolved.ok()) return resolved.status();
+        source = static_cast<uint8_t>(
+            resolved.value().row_domain ==
+                    ::ps::runtime::ValueRowDomain::OUTPUT_ROWS
+                ? mcu::McuInvocationPatchSource::NumOutputs
+                : mcu::McuInvocationPatchSource::ActualRows);
+        return Status::make_ok();
+    };
+
+    const auto scaled_row_source = [](uint8_t source) -> uint8_t {
+        return source == static_cast<uint8_t>(
+                             mcu::McuInvocationPatchSource::NumOutputs)
+                   ? static_cast<uint8_t>(
+                         mcu::McuInvocationPatchSource::NumOutputsTimesParam)
+                   : static_cast<uint8_t>(
+                         mcu::McuInvocationPatchSource::ActualRowsTimesParam);
+    };
+
     const auto emit_embedding = [&](const DispatchBinding& b) -> Status {
         PhysicalEmbeddingLaunch launch{};
         const auto resolved = resolve_embedding_physical(program, b, ctx, launch);
@@ -474,12 +514,20 @@ static Status compile_mcu_plan_impl(const Program& program,
             const uint32_t index =
                 static_cast<uint32_t>(out.embedding_psq8.size());
             out.embedding_psq8.push_back(inv);
+            record_row_patch(McuInvocationTable::EmbeddingPsq8, index,
+                             static_cast<uint8_t>(
+                                 mcu::McuInvocationPatchSource::ActualRows));
             const uint16_t variant_id = mark_variant(
                 out, McuCompiledVariantKind::EmbeddingPsq8, launch.rows,
                 ::ps::kernel::kEmbeddingThreads);
+            const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
             push_dispatch(make_dispatch_node(
                 out.nodes.size(), variant_id,
                 mcu::kMcuKernargRecipeEmbeddingPsq8, index));
+            record_geometry(node_index, McuGeometryAxis::X,
+                            static_cast<uint8_t>(
+                                mcu::McuInvocationPatchSource::ActualRows),
+                            0u);
             return Status::make_ok();
         }
         if (launch.storage != EmbeddingStorage::Bf16)
@@ -496,12 +544,20 @@ static Status compile_mcu_plan_impl(const Program& program,
         inv.output_row_stride = launch.output_row_stride;
         const uint32_t index = static_cast<uint32_t>(out.embedding.size());
         out.embedding.push_back(inv);
+        record_row_patch(McuInvocationTable::EmbeddingBf16, index,
+                         static_cast<uint8_t>(
+                             mcu::McuInvocationPatchSource::ActualRows));
         const uint16_t variant_id =
             mark_variant(out, McuCompiledVariantKind::EmbeddingBf16, launch.rows,
                          ::ps::kernel::kEmbeddingThreads);
+        const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
         push_dispatch(make_dispatch_node(out.nodes.size(), variant_id,
                                          mcu::kMcuKernargRecipeEmbeddingBf16,
                                          index));
+        record_geometry(node_index, McuGeometryAxis::X,
+                        static_cast<uint8_t>(
+                            mcu::McuInvocationPatchSource::ActualRows),
+                        0u);
         return Status::make_ok();
     };
 
@@ -529,10 +585,9 @@ static Status compile_mcu_plan_impl(const Program& program,
         if (src.feature_count == 0u)
             return Status::unsupported("output gather feature count is zero",
                                        __FILE__, __LINE__);
-        if (ctx.batch_context == nullptr ||
-            ctx.batch_context->output_rows == nullptr)
-            return Status::unsupported(
-                "output gather requires a batch context", __FILE__, __LINE__);
+        if (ctx.device_output_rows == nullptr)
+            return Status::unsupported("output gather requires output rows",
+                                       __FILE__, __LINE__);
         const uint32_t num_outputs = ctx.actual_outputs;
         if (num_outputs == 0u)
             return Status::unsupported("output gather output count is zero",
@@ -541,7 +596,7 @@ static Status compile_mcu_plan_impl(const Program& program,
         inv.input = reinterpret_cast<uint64_t>(src.ptr);
         inv.output = reinterpret_cast<uint64_t>(dst.ptr);
         inv.output_rows =
-            reinterpret_cast<uint64_t>(ctx.batch_context->output_rows);
+            reinterpret_cast<uint64_t>(ctx.device_output_rows);
         inv.input_row_stride = src.row_stride;
         inv.output_row_stride = dst.row_stride;
         inv.num_outputs = num_outputs;
@@ -554,9 +609,14 @@ static Status compile_mcu_plan_impl(const Program& program,
         const uint16_t variant_id = mark_variant(
             out, McuCompiledVariantKind::OutputGatherBf16, blocks_x,
             ::ps::kernel::kOutputGatherMcuThreads, num_outputs);
+        const uint32_t gather_node = static_cast<uint32_t>(out.nodes.size());
         push_dispatch(make_dispatch_node(
             out.nodes.size(), variant_id,
             mcu::kMcuKernargRecipeOutputGatherBf16, index));
+        record_geometry(gather_node, McuGeometryAxis::Y,
+                        static_cast<uint8_t>(
+                            mcu::McuInvocationPatchSource::NumOutputs),
+                        0u);
         return Status::make_ok();
     };
 
@@ -592,7 +652,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             gdn.recurrent_slot_stride != 0u &&
             gdn.conv_slot_stride <= 0xFFFFFFFFull &&
             gdn.recurrent_slot_stride <= 0xFFFFFFFFull &&
-            ctx.batch_context->requests != nullptr) {
+            ctx.device_requests != nullptr) {
             auto inv = mcu_plan_value<mcu::GpuMcuGdnResetInvocation>();
             inv.conv_base = reinterpret_cast<uint16_t*>(gdn.conv_base);
             inv.recurrent_base = reinterpret_cast<uint32_t*>(gdn.recurrent_base);
@@ -651,11 +711,25 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.eps = launch.eps;
                 const uint32_t index = static_cast<uint32_t>(out.rms.size());
                 out.rms.push_back(inv);
+                uint8_t rms_row_source = 0u;
+                {
+                    const Status src_st = row_source_for(
+                        ::ps::runtime::ValueId{b.input_slots[0]}, rms_row_source);
+                    if (!src_st.ok()) return src_st;
+                }
+                record_row_patch(McuInvocationTable::RmsNorm, index,
+                                 rms_row_source);
                 const uint16_t variant_id =
                     mark_variant(out, rms_kind, launch.grid, launch.workgroup);
+                const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id,
                     mcu::kMcuKernargRecipeRmsNormBf16PfOnePlus, index));
+                if (launch.group_size != 0u) {
+                    record_geometry(node_index, McuGeometryAxis::X,
+                                    scaled_row_source(rms_row_source),
+                                    launch.features / launch.group_size);
+                }
                 break;
             }
             case KernelId::ACTIVATION_QUANTIZE_W4A8: {
@@ -705,11 +779,21 @@ static Status compile_mcu_plan_impl(const Program& program,
                 const uint32_t index =
                     static_cast<uint32_t>(out.quant_e4m3.size());
                 out.quant_e4m3.push_back(inv);
+                uint8_t quant_row_source = 0u;
+                {
+                    const Status src_st = row_source_for(
+                        ::ps::runtime::ValueId{b.input_slots[0]},
+                        quant_row_source);
+                    if (!src_st.ok()) return src_st;
+                }
                 const uint16_t variant_id = mark_variant(
                     out, quant_kind, launch.grid, launch.workgroup);
+                const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id,
                     mcu::kMcuKernargRecipeActivationQuantizeE4m3K5120, index));
+                record_geometry(node_index, McuGeometryAxis::X, quant_row_source,
+                                0u);
                 break;
             }
             case KernelId::LINEAR_PSQ4: {
@@ -799,6 +883,15 @@ static Status compile_mcu_plan_impl(const Program& program,
                 const uint32_t mindex =
                     static_cast<uint32_t>(out.psq4_multi.size());
                 out.psq4_multi.push_back(minv);
+                uint8_t multi_row_source = 0u;
+                {
+                    const Status src_st = row_source_for(
+                        ::ps::runtime::ValueId{b.output_slots[0]},
+                        multi_row_source);
+                    if (!src_st.ok()) return src_st;
+                }
+                record_row_patch(McuInvocationTable::Psq4MultiRow, mindex,
+                                 multi_row_source);
                 const uint16_t mid = mark_variant(
                     out, multi_kind, launch.grid, launch.workgroup, launch.grid_y,
                     launch.grid_z);
@@ -884,6 +977,15 @@ static Status compile_mcu_plan_impl(const Program& program,
                 const uint32_t mindex =
                     static_cast<uint32_t>(out.psq4_multi.size());
                 out.psq4_multi.push_back(minv);
+                uint8_t multi_row_source = 0u;
+                {
+                    const Status src_st = row_source_for(
+                        ::ps::runtime::ValueId{b.output_slots[0]},
+                        multi_row_source);
+                    if (!src_st.ok()) return src_st;
+                }
+                record_row_patch(McuInvocationTable::Psq4MultiRow, mindex,
+                                 multi_row_source);
                 const uint16_t mid = mark_variant(
                     out, multi_kind, launch.grid, launch.workgroup, launch.grid_y);
                 push_dispatch(make_dispatch_node(
@@ -957,18 +1059,33 @@ static Status compile_mcu_plan_impl(const Program& program,
                     inv.reserved = 1u;
                 const uint32_t index = static_cast<uint32_t>(out.elementwise.size());
                 out.elementwise.push_back(inv);
+                uint8_t ew_row_source = 0u;
+                {
+                    const Status src_st = row_source_for(
+                        ::ps::runtime::ValueId{b.output_slots[0]}, ew_row_source);
+                    if (!src_st.ok()) return src_st;
+                }
+                record_row_patch(McuInvocationTable::Elementwise, index,
+                                 ew_row_source);
                 const uint16_t variant_id =
                     mark_variant(out, kind, launch.grid_x, launch.workgroup,
                                  launch.grid_y);
+                const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id,
                     mcu::kMcuKernargRecipeElementwise, index));
+                record_geometry(node_index, McuGeometryAxis::Y, ew_row_source,
+                                0u);
                 break;
             }
             case KernelId::PAGED_ATTENTION: {
                 PhysicalPagedAttentionPlan plan{};
-                const auto resolved = resolve_paged_attention_physical(
-                    program, i, ctx, plan);
+                const auto resolved =
+                    ctx.static_plan_compile
+                        ? resolve_paged_attention_physical_static_plan(
+                              program, i, ctx, plan)
+                        : resolve_paged_attention_physical(program, i, ctx,
+                                                          plan);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1196,12 +1313,23 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.v_pool = launch.v_pool;
                 const uint32_t index = static_cast<uint32_t>(out.kv_append.size());
                 out.kv_append.push_back(inv);
+                record_row_patch(McuInvocationTable::KvAppend, index,
+                                 static_cast<uint8_t>(
+                                     mcu::McuInvocationPatchSource::ActualRows));
                 const uint16_t variant_id =
                     mark_variant(out, McuCompiledVariantKind::KvAppendBf16,
                                  launch.grid, launch.workgroup);
+                const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id, mcu::kMcuKernargRecipeKvAppend,
                     index));
+                if (launch.common.kv_heads != 0u) {
+                    record_geometry(
+                        node_index, McuGeometryAxis::X,
+                        static_cast<uint8_t>(
+                            mcu::McuInvocationPatchSource::ActualRowsTimesParam),
+                        launch.common.kv_heads);
+                }
                 break;
             }
             case KernelId::ROPE: {
@@ -1227,12 +1355,21 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.features = launch.features;
                 const uint32_t index = static_cast<uint32_t>(out.rope.size());
                 out.rope.push_back(inv);
+                uint8_t rope_row_source = 0u;
+                {
+                    const Status src_st = row_source_for(
+                        ::ps::runtime::ValueId{b.output_slots[0]}, rope_row_source);
+                    if (!src_st.ok()) return src_st;
+                }
                 const uint16_t variant_id =
                     mark_variant(out, McuCompiledVariantKind::RopeF32Bf16Pair,
                                  launch.grid, launch.workgroup);
+                const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id, mcu::kMcuKernargRecipeRope,
                     index));
+                record_geometry(node_index, McuGeometryAxis::X, rope_row_source,
+                                0u);
                 break;
             }
             case KernelId::LINEAR_BF16: {
@@ -1279,6 +1416,15 @@ static Status compile_mcu_plan_impl(const Program& program,
                     const uint32_t windex =
                         static_cast<uint32_t>(out.bf16_wmma.size());
                     out.bf16_wmma.push_back(winv);
+                    uint8_t wmma_row_source = 0u;
+                    {
+                        const Status src_st = row_source_for(
+                            ::ps::runtime::ValueId{b.output_slots[0]},
+                            wmma_row_source);
+                        if (!src_st.ok()) return src_st;
+                    }
+                    record_row_patch(McuInvocationTable::Bf16Wmma, windex,
+                                     wmma_row_source);
                     const uint16_t wid = mark_variant(
                         out, wmma_kind, launch.grid_x, launch.workgroup,
                         launch.grid_y);
@@ -1357,12 +1503,21 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.eps = launch.eps;
                 const uint32_t index = static_cast<uint32_t>(out.l2.size());
                 out.l2.push_back(inv);
+                uint8_t l2_row_source = 0u;
+                {
+                    const Status src_st = row_source_for(
+                        ::ps::runtime::ValueId{b.output_slots[0]}, l2_row_source);
+                    if (!src_st.ok()) return src_st;
+                }
                 const uint16_t variant_id = mark_variant(
                     out, McuCompiledVariantKind::L2NormalizeBf16F32,
                     launch.grid_x, launch.workgroup, launch.grid_y);
+                const uint32_t node_index = static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id,
                     mcu::kMcuKernargRecipeL2Normalize, index));
+                record_geometry(node_index, McuGeometryAxis::Y, l2_row_source,
+                                0u);
                 break;
             }
             case KernelId::EMBEDDING_LOOKUP: {
@@ -1412,9 +1567,15 @@ static Status compile_mcu_plan_impl(const Program& program,
                 const uint16_t variant_id = mark_variant(
                     out, McuCompiledVariantKind::GdnConv1dBf16F32, launch.grid_x,
                     launch.workgroup, launch.grid_y, launch.grid_z);
+                const uint32_t node_index =
+                    static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id,
                     mcu::kMcuKernargRecipeGdnConv1d, index));
+                record_geometry(node_index, McuGeometryAxis::Y,
+                                static_cast<uint8_t>(
+                                    mcu::McuInvocationPatchSource::NumRequests),
+                                0u);
                 break;
             }
             case KernelId::GDN_RECURRENCE: {
@@ -1507,47 +1668,52 @@ static Status compile_mcu_plan_impl(const Program& program,
                     sampled.ptr == nullptr)
                     return Status::unsupported("sampling output value is invalid",
                                                __FILE__, __LINE__);
-                const ::ps::runtime::DeviceBatchContext* bc = ctx.batch_context;
-                if (bc == nullptr || bc->output_sampling_params == nullptr)
+                if (ctx.output_sampling_params == nullptr)
                     return Status::unsupported(
                         "sampling requires output sampling params", __FILE__,
                         __LINE__);
-                const uint32_t outputs =
-                    bc->num_outputs != 0u ? bc->num_outputs : ctx.actual_rows;
+                const uint32_t outputs = ctx.actual_outputs;
                 if (outputs == 0u)
                     return Status::unsupported("sampling output count is zero",
                                                __FILE__, __LINE__);
                 auto inv = mcu_plan_value<mcu::McuArgmaxF32Invocation>();
                 inv.logits = reinterpret_cast<uint64_t>(logits.ptr);
                 inv.sampling =
-                    reinterpret_cast<uint64_t>(bc->output_sampling_params);
+                    reinterpret_cast<uint64_t>(ctx.output_sampling_params);
                 inv.sampled_tokens = reinterpret_cast<uint64_t>(sampled.ptr);
                 inv.outputs = outputs;
                 inv.vocab_size = logits.feature_count;
                 inv.logits_row_stride = logits.row_stride;
-                inv.output_rows = reinterpret_cast<uint64_t>(bc->output_rows);
+                inv.output_rows =
+                    reinterpret_cast<uint64_t>(ctx.device_output_rows);
                 const uint32_t index =
                     static_cast<uint32_t>(out.argmax_f32.size());
                 out.argmax_f32.push_back(inv);
                 const uint16_t variant_id = mark_variant(
                     out, McuCompiledVariantKind::SamplingArgmaxF32, outputs,
                     ::ps::kernel::kArgmaxF32Threads);
+                const uint32_t node_index =
+                    static_cast<uint32_t>(out.nodes.size());
                 push_dispatch(make_dispatch_node(
                     out.nodes.size(), variant_id,
                     mcu::kMcuKernargRecipeArgmaxF32, index));
+                record_geometry(node_index, McuGeometryAxis::X,
+                                static_cast<uint8_t>(
+                                    mcu::McuInvocationPatchSource::NumOutputs),
+                                0u);
                 break;
             }
             case KernelId::VERIFY_ACCEPT: {
                 if (b.input_count != 3u || b.output_count != 1u)
                     return Status::unsupported(
                         "verify accept io count is invalid", __FILE__, __LINE__);
-                const ::ps::runtime::DeviceBatchContext* bc = ctx.batch_context;
-                if (bc == nullptr || bc->requests == nullptr ||
-                    bc->output_rows == nullptr)
+                if (ctx.batch_context == nullptr ||
+                    ctx.device_requests == nullptr ||
+                    ctx.device_output_rows == nullptr)
                     return Status::unsupported(
                         "verify accept requires a batch context", __FILE__,
                         __LINE__);
-                const uint32_t request_count = bc->num_requests;
+                const uint32_t request_count = ctx.staged_request_count;
                 const uint32_t max_candidates = b.rotary_dim;
                 if (request_count == 0u || max_candidates == 0u)
                     return Status::unsupported(
@@ -1580,8 +1746,9 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.request_count = request_count;
                 inv.candidate_stride = max_candidates;
                 inv.max_candidates = max_candidates;
-                inv.requests = reinterpret_cast<uint64_t>(bc->requests);
-                inv.output_rows = reinterpret_cast<uint64_t>(bc->output_rows);
+                inv.requests = reinterpret_cast<uint64_t>(ctx.device_requests);
+                inv.output_rows =
+                    reinterpret_cast<uint64_t>(ctx.device_output_rows);
                 const uint32_t index =
                     static_cast<uint32_t>(out.verify_accept.size());
                 out.verify_accept.push_back(inv);
@@ -1602,7 +1769,7 @@ static Status compile_mcu_plan_impl(const Program& program,
     if (options.verify_committed_counts != nullptr &&
         options.verify_sampled_tokens != nullptr &&
         options.verify_max_candidates != 0u && ctx.batch_context != nullptr &&
-        ctx.batch_context->requests != nullptr) {
+        ctx.device_requests != nullptr) {
         auto inv = mcu_plan_value<mcu::McuVerifyAcceptBatchInvocation>();
         inv.context = reinterpret_cast<uint64_t>(ctx.batch_context);
         inv.sampled_tokens =

@@ -70,6 +70,10 @@ struct HostExecutionContext {
     uint32_t actual_sampled_outputs = 0;
     uint32_t actual_stochastic_outputs = 0;
     const ::ps::runtime::DeviceSamplingParams* output_sampling_params = nullptr;
+    const ::ps::runtime::DeviceRequestDescriptor* device_requests = nullptr;
+    uint32_t* device_output_rows = nullptr;
+    bool static_plan_compile = false;
+    bool static_attention_use_prefill = false;
     bool stochastic_topk_eligible = false;
     uint32_t stochastic_top_k = 0;
     int32_t* stochastic_topk_ids = nullptr;

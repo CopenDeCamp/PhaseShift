@@ -49,7 +49,6 @@ public:
     McuPlanCacheStep observe(McuPlanShape shape,
                              const McuPlanFingerprint& fingerprint) noexcept {
         McuPlanCacheStep step{};
-        ++counters_.plan_compile_count;
         if (active_ && shape == active_shape_ &&
             fingerprint == active_fingerprint_) {
             step.reused = true;
@@ -71,6 +70,7 @@ public:
         return active_fingerprint_;
     }
     const DecodeRuntimeCounters& counters() const noexcept { return counters_; }
+    void note_compile() noexcept { ++counters_.plan_compile_count; }
     void note_host_fallback() noexcept { ++counters_.host_fallback_count; }
     void note_mcu_run() noexcept { ++counters_.mcu_run_count; }
 

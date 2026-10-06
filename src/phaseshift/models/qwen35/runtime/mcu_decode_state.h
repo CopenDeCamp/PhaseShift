@@ -5,14 +5,25 @@
 #include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace ps {
 namespace qwen35 {
 namespace runtime {
 
+struct McuStaticPlanEntry {
+    bool valid = false;
+    uint32_t program_slot = 0;
+    uint32_t attention_plan_key = 0;
+    uint32_t plan_begin = 0;
+    uint32_t plan_end = 0;
+    McuCompiledPlan plan;
+};
+
 struct McuDecodeState {
     McuDecodeRuntime runtime;
     McuPlanCache cache;
+    std::vector<McuStaticPlanEntry> static_plans;
     uint32_t epoch = 0;
     uint32_t fault_code = 0;
     uint32_t fault_epoch = 0;

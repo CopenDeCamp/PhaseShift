@@ -121,9 +121,9 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
     args.output = static_cast<float*>(dst.ptr);
     args.conv_weight = static_cast<const ::ps::bf16_t*>(w_slot.device_ptr);
     args.conv_state = gdn.conv_base;
-    if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
+    if (ctx.device_requests == nullptr)
         return PhysicalResolveStatus::NotApplicable;
-    args.requests = ctx.batch_context->requests;
+    args.requests = ctx.device_requests;
     args.num_requests = num_requests;
     args.actual_rows = actual_rows;
     args.max_request_rows = max_request_rows;

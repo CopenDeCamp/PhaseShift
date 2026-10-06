@@ -118,6 +118,8 @@ int main() {
     ctx.role = rt::ExecutionRole::Verify;
     ctx.numeric_mode = rt::VerifyNumericMode::Exact;
     ctx.batch_context = &batch_ctx;
+    ctx.device_requests = batch_ctx.requests;
+    ctx.device_output_rows = batch_ctx.output_rows;
 
     q35::McuPlanCompileOptions plain_opts{};
     plain_opts.dispatch_begin = 0u;

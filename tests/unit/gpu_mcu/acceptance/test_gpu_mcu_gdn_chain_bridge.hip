@@ -400,6 +400,7 @@ int main() {
 
     q35::HostExecutionContext ctx_host{};
     ctx_host.batch_context = ctx_dev;
+    ctx_host.device_requests = bc.requests;
     ctx_host.external_inputs = ext_inputs;
     ctx_host.external_input_count = 6u;
     ctx_host.external_outputs = ext_out_host;
@@ -462,7 +463,7 @@ int main() {
         std::printf("FAIL: prepare_plan: %s\n", prepared.message().c_str());
         return 1;
     }
-    check(runtime.row_global_patch_count() == 3u,
+    check(runtime.row_global_patch_count() == 6u,
           "runtime derives row-global patches for gdn conv and recurrence");
 
     uint32_t* row_seq_dev = nullptr;

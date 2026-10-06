@@ -113,6 +113,7 @@ int main() {
     q35::McuPlanCache cache{};
     check(!cache.has_active(), "cache starts empty");
 
+    cache.note_compile();
     const q35::McuPlanCacheStep first =
         cache.observe(q35::McuPlanShape::Direct, fp_a);
     check(first.needs_switch && first.needs_upload, "first plan installs");
@@ -127,12 +128,14 @@ int main() {
     check(second.reused, "identical signature is reused");
     check(!second.needs_switch && !second.needs_upload,
           "reuse does not switch or upload");
-    check(cache.counters().plan_compile_count == 2u, "compile counted 2");
+    check(cache.counters().plan_compile_count == 1u,
+          "catalog reuse does not compile");
     check(cache.counters().plan_upload_count == 1u,
           "reuse does not upload the plan");
     check(cache.counters().plan_switch_count == 1u,
           "reuse does not restart the mcu plan");
 
+    cache.note_compile();
     const q35::McuPlanCacheStep third =
         cache.observe(q35::McuPlanShape::Direct, fp_b);
     check(third.needs_switch && third.needs_upload,
@@ -140,6 +143,7 @@ int main() {
     check(cache.counters().plan_upload_count == 2u, "upload counted 2");
     check(cache.counters().plan_switch_count == 2u, "switch counted 2");
 
+    cache.note_compile();
     const q35::McuPlanCacheStep fourth =
         cache.observe(q35::McuPlanShape::Split, fp_b);
     check(fourth.needs_switch && fourth.needs_upload,
@@ -157,10 +161,19 @@ int main() {
     check(cache.counters().plan_switch_count == 3u,
           "reuse keeps the switch count");
 
+    cache.note_compile();
     const q35::McuPlanCacheStep sixth =
         cache.observe(q35::McuPlanShape::Split, fp_rows);
     check(sixth.needs_switch, "row change switches the plan");
     check(cache.counters().plan_switch_count == 4u, "switch counted 4");
+
+    const uint64_t compiles_before_observe =
+        cache.counters().plan_compile_count;
+    (void)cache.observe(q35::McuPlanShape::Split, fp_rows);
+    check(cache.counters().plan_compile_count == compiles_before_observe,
+          "observe alone does not count compiles");
+    check(cache.counters().plan_compile_count == 4u,
+          "compile count tracks real compiles only");
 
     cache.note_mcu_run();
     cache.note_mcu_run();

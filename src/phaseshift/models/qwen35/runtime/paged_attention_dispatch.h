@@ -47,6 +47,7 @@ struct PagedAttentionPlan {
 };
 
 constexpr uint32_t kPagedAttentionPrefillMinRows = 128u;
+constexpr uint32_t kPagedAttentionSplitMinVisible = 2048u;
 
 PagedAttentionPlan plan_paged_attention(
     const PagedAttentionResolvedArgs& args,

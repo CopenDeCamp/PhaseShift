@@ -1,10 +1,18 @@
 #include <phaseshift/models/qwen35/runtime/mcu_decode_runtime.h>
+#include <phaseshift/models/qwen35/kernels/optimized/gdn/recurrence.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <utility>
+
+static_assert(sizeof(::ps::runtime::gpu_mcu::McuGdnRecurrenceInvocation) ==
+              sizeof(::ps::kernel::GdnRecurrenceArgs));
+static_assert(offsetof(::ps::runtime::gpu_mcu::McuGdnRecurrenceInvocation,
+                       capture_verify_only) ==
+              offsetof(::ps::kernel::GdnRecurrenceArgs, capture_verify_only));
 
 namespace ps {
 namespace qwen35 {
@@ -263,11 +271,71 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
         row_global_patches_ = nullptr;
         row_global_patch_count_ = 0u;
     }
-    const uint32_t count = 2u * gdn_conv_count_ + gdn_recur_count_ +
+    uint32_t geometry_patch_count = 0u;
+    if (dynamic_bindings_ != nullptr) {
+        for (const McuGeometryPatch& patch : geometry_patches_) {
+            if (patch.node_index < dynamic_binding_count_) {
+                ++geometry_patch_count;
+            }
+        }
+    }
+    const uint32_t count = 2u * gdn_conv_count_ + 3u * gdn_recur_count_ +
                            argmax_f32_count_ + output_gather_count_ +
                            verify_accept_count_ +
                            static_cast<uint32_t>(attention_regions_.size()) +
-                           static_cast<uint32_t>(bf16_catalogs_.size());
+                           static_cast<uint32_t>(bf16_catalogs_.size()) +
+                           geometry_patch_count +
+                           static_cast<uint32_t>(
+                               invocation_row_patches_.size());
+    const auto row_table = [&](McuInvocationTable table, const void*& base,
+                               std::size_t& stride, std::size_t& offset,
+                               uint32_t& limit) -> bool {
+        switch (table) {
+            case McuInvocationTable::RmsNorm:
+                base = rms_;
+                limit = rms_count_;
+                stride = sizeof(mcu::McuRmsNormInvocation);
+                offset = offsetof(mcu::McuRmsNormInvocation, rows);
+                return true;
+            case McuInvocationTable::Elementwise:
+                base = elementwise_;
+                limit = elementwise_count_;
+                stride = sizeof(mcu::McuElementwiseInvocation);
+                offset = offsetof(mcu::McuElementwiseInvocation, rows);
+                return true;
+            case McuInvocationTable::KvAppend:
+                base = kv_append_;
+                limit = kv_append_count_;
+                stride = sizeof(mcu::McuKvAppendInvocation);
+                offset = offsetof(mcu::McuKvAppendInvocation, rows);
+                return true;
+            case McuInvocationTable::EmbeddingBf16:
+                base = embedding_;
+                limit = embedding_count_;
+                stride = sizeof(mcu::McuEmbeddingBf16Invocation);
+                offset = offsetof(mcu::McuEmbeddingBf16Invocation, rows);
+                return true;
+            case McuInvocationTable::EmbeddingPsq8:
+                base = embedding_psq8_;
+                limit = embedding_psq8_count_;
+                stride = sizeof(mcu::McuEmbeddingPsq8Invocation);
+                offset = offsetof(mcu::McuEmbeddingPsq8Invocation, rows);
+                return true;
+            case McuInvocationTable::Bf16Wmma:
+                base = bf16_wmma_;
+                limit = bf16_wmma_count_;
+                stride = sizeof(mcu::McuBf16WmmaInvocation);
+                offset = offsetof(mcu::McuBf16WmmaInvocation, rows);
+                return true;
+            case McuInvocationTable::Psq4MultiRow:
+                base = psq4_multi_;
+                limit = psq4_multi_count_;
+                stride = sizeof(mcu::McuPsq4MultiRowInvocation);
+                offset = offsetof(mcu::McuPsq4MultiRowInvocation, rows);
+                return true;
+        }
+        return false;
+    };
     if (count == 0u) return Status::make_ok();
     std::vector<mcu::McuInvocationPatch> patches(count);
     uint32_t index = 0u;
@@ -300,6 +368,18 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
             offsetof(mcu::McuGdnRecurrenceInvocation, capture_verify_only));
         patches[index].source =
             static_cast<uint8_t>(mcu::McuInvocationPatchSource::VerifyRequests);
+        ++index;
+        patches[index].target = reinterpret_cast<uint64_t>(
+            reinterpret_cast<unsigned char*>(invocation) +
+            offsetof(::ps::kernel::GdnRecurrenceArgs, actual_rows));
+        patches[index].source =
+            static_cast<uint8_t>(mcu::McuInvocationPatchSource::ActualRows);
+        ++index;
+        patches[index].target = reinterpret_cast<uint64_t>(
+            reinterpret_cast<unsigned char*>(invocation) +
+            offsetof(::ps::kernel::GdnRecurrenceArgs, num_requests));
+        patches[index].source =
+            static_cast<uint8_t>(mcu::McuInvocationPatchSource::NumRequests);
         ++index;
     }
     auto* argmax_base = static_cast<unsigned char*>(argmax_f32_);
@@ -375,6 +455,40 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
         patches[index].source = static_cast<uint8_t>(
             mcu::McuInvocationPatchSource::Bf16ExactRowsVariant);
         patches[index].param = catalog.variant_base;
+        ++index;
+    }
+    for (const McuGeometryPatch& patch : geometry_patches_) {
+        if (dynamic_bindings_ == nullptr ||
+            patch.node_index >= dynamic_binding_count_) {
+            continue;
+        }
+        std::size_t offset = offsetof(mcu::McuDynamicNodeBinding,
+                                      workgroup_count_x);
+        if (patch.axis == McuGeometryAxis::Y) {
+            offset = offsetof(mcu::McuDynamicNodeBinding, workgroup_count_y);
+        } else if (patch.axis == McuGeometryAxis::Z) {
+            offset = offsetof(mcu::McuDynamicNodeBinding, workgroup_count_z);
+        }
+        patches[index].target = reinterpret_cast<uint64_t>(
+            binding_base +
+            static_cast<std::size_t>(patch.node_index) *
+                sizeof(mcu::McuDynamicNodeBinding) +
+            offset);
+        patches[index].source = patch.source;
+        patches[index].param = patch.param;
+        ++index;
+    }
+    for (const McuInvocationRowPatch& patch : invocation_row_patches_) {
+        const void* base = nullptr;
+        std::size_t stride = 0u;
+        std::size_t offset = 0u;
+        uint32_t limit = 0u;
+        if (!row_table(patch.table, base, stride, offset, limit)) continue;
+        if (base == nullptr || patch.index >= limit) continue;
+        patches[index].target = reinterpret_cast<uint64_t>(
+            static_cast<const unsigned char*>(base) +
+            static_cast<std::size_t>(patch.index) * stride + offset);
+        patches[index].source = patch.source;
         ++index;
     }
     if (index != count) {
@@ -548,6 +662,8 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     }
     attention_regions_ = plan.attention_regions;
     bf16_catalogs_ = plan.bf16_variant_catalogs;
+    geometry_patches_ = plan.geometry_patches;
+    invocation_row_patches_ = plan.invocation_row_patches;
     if (!plan.nodes.empty()) {
         std::vector<mcu::McuDynamicNodeBinding> bindings(plan.nodes.size());
         for (std::size_t i = 0; i < plan.nodes.size(); ++i) {
@@ -1033,6 +1149,8 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     row_global_patch_count_ = other.row_global_patch_count_;
     attention_regions_ = std::move(other.attention_regions_);
     bf16_catalogs_ = std::move(other.bf16_catalogs_);
+    geometry_patches_ = std::move(other.geometry_patches_);
+    invocation_row_patches_ = std::move(other.invocation_row_patches_);
     dynamic_bindings_ = other.dynamic_bindings_;
     dynamic_binding_count_ = other.dynamic_binding_count_;
     gdn_recur_ = other.gdn_recur_;

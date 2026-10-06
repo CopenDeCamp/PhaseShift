@@ -135,6 +135,35 @@ struct McuBf16VariantCatalog {
     uint32_t variant_base = 0;
 };
 
+enum class McuGeometryAxis : uint8_t {
+    X = 0,
+    Y = 1,
+    Z = 2,
+};
+
+struct McuGeometryPatch {
+    uint32_t node_index = 0;
+    McuGeometryAxis axis = McuGeometryAxis::X;
+    uint8_t source = 0;
+    uint32_t param = 0;
+};
+
+enum class McuInvocationTable : uint8_t {
+    RmsNorm = 0,
+    Elementwise = 1,
+    KvAppend = 2,
+    EmbeddingBf16 = 3,
+    EmbeddingPsq8 = 4,
+    Bf16Wmma = 5,
+    Psq4MultiRow = 6,
+};
+
+struct McuInvocationRowPatch {
+    McuInvocationTable table = McuInvocationTable::RmsNorm;
+    uint8_t source = 0;
+    uint32_t index = 0;
+};
+
 struct McuRuntimeEpilogue {
     bool verify_accept_capable = false;
     bool gdn_restore_capable = false;
@@ -181,6 +210,8 @@ struct McuCompiledPlan {
         gdn_spec_restore_from_counts;
     std::vector<McuAttentionRegion> attention_regions;
     std::vector<McuBf16VariantCatalog> bf16_variant_catalogs;
+    std::vector<McuGeometryPatch> geometry_patches;
+    std::vector<McuInvocationRowPatch> invocation_row_patches;
     McuRuntimeEpilogue epilogue;
     std::vector<::ps::runtime::gpu_mcu::McuGdnConv1dInvocation> gdn_conv1d;
     std::vector<::ps::runtime::gpu_mcu::McuGdnRecurrenceInvocation> gdn_recurrence;

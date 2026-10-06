@@ -218,6 +218,7 @@ select_psq4_gemm_config(const Psq4GemmSelectorInput& input) {
     }
 
     const bool use_2d_prefill =
+        input.allow_unguarded_prefill2d &&
         (input.rows % ps::kernel::kPsqGemmPrefill2dRowsPerBlock) == 0u &&
         input.rows >= ps::kernel::kPsqGemmPrefill2dMinRows &&
         input.out_features >= ps::kernel::kPsqGemmPrefill2dMinOutFeatures;
@@ -278,6 +279,7 @@ select_psq8_gemm_config(const Psq8GemmSelectorInput& input) {
     }
 
     const bool use_2d_prefill =
+        input.allow_unguarded_prefill2d &&
         (input.k_padded % ps::kernel::kPsq8GemmPrefill2dKChunk) == 0u &&
         (input.rows % ps::kernel::kPsqGemmPrefill2dRowsPerBlock) == 0u &&
         (input.out_features % ps::kernel::kPsq8GemmPrefill2dOutBlock) == 0u &&

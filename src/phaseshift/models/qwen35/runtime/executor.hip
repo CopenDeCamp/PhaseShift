@@ -359,6 +359,10 @@ Status build_host_execution_context(
     ctx.output_sampling_params =
         executor.batch_context_storage.output_sampling_params
             .data<::ps::runtime::DeviceSamplingParams>();
+    ctx.device_requests = executor.batch_context_storage.requests
+                              .data<::ps::runtime::DeviceRequestDescriptor>();
+    ctx.device_output_rows =
+        executor.batch_context_storage.output_rows.data<uint32_t>();
     ctx.stochastic_topk_eligible = stochastic_topk_eligible;
     ctx.stochastic_top_k = stochastic_top_k;
     ctx.stochastic_topk_ids = executor.stochastic_topk_ids.data<int32_t>();
@@ -610,7 +614,7 @@ Status preflight_mcu_plan(
         return Status::unsupported("mcu body range is not available", __FILE__,
                                    __LINE__);
     }
-    const runtime::McuDecodeState& state = *executor.mcu_state;
+    runtime::McuDecodeState& state = *executor.mcu_state;
     runtime::McuPlanCompileOptions compile_options{};
     compile_options.dispatch_begin = 0u;
     compile_options.dispatch_end = dispatch_count;
@@ -625,9 +629,100 @@ Status preflight_mcu_plan(
     compile_options.verify_conv_history_stride = gdn_history.conv_row_stride;
     compile_options.verify_recurrent_history_stride =
         gdn_history.recurrent_row_stride;
+    const uint32_t row_capacity =
+        ::ps::runtime::row_bucket_limit(program.row_bucket);
+    const uint32_t request_capacity =
+        executor.config.max_scheduled_requests != 0u
+            ? executor.config.max_scheduled_requests
+            : 1u;
+    const uint32_t slot_capacity =
+        executor.sequence_pool != nullptr
+            ? executor.sequence_pool->max_sequences()
+            : request_capacity;
+    std::vector<::ps::runtime::DeviceRequestDescriptor> plan_requests(
+        request_capacity);
+    for (uint32_t i = 0u; i < request_capacity; ++i) {
+        plan_requests[i].request_handle.slot =
+            slot_capacity != 0u ? i % slot_capacity : 0u;
+        plan_requests[i].row_count = i == 0u ? row_capacity : 1u;
+    }
+    runtime::HostExecutionContext plan_ctx = ctx;
+    plan_ctx.actual_rows = row_capacity;
+    plan_ctx.actual_outputs = executor.config.max_scheduled_output_rows;
+    plan_ctx.staged_requests = plan_requests.data();
+    plan_ctx.staged_request_count = request_capacity;
+
+    plan_ctx.static_plan_compile = true;
+    uint32_t batch_topology = 0u;
+    bool prefill_shape_ok = ctx.staged_request_count == 1u;
+    if (ctx.staged_requests != nullptr) {
+        for (uint32_t i = 0u; i < ctx.staged_request_count; ++i) {
+            const auto& req = ctx.staged_requests[i];
+            const bool is_prefill =
+                req.execution_class == ::ps::runtime::ExecutionClass::PREFILL;
+            batch_topology |= is_prefill ? 1u : 2u;
+            prefill_shape_ok = prefill_shape_ok && is_prefill &&
+                               req.row_begin == 0u &&
+                               req.row_count >= ctx.actual_rows;
+        }
+    } else {
+        prefill_shape_ok = false;
+    }
+    const bool static_prefill_shape =
+        batch_topology == 1u && prefill_shape_ok &&
+        ctx.actual_rows >= runtime::kPagedAttentionPrefillMinRows;
+    plan_ctx.static_attention_use_prefill = static_prefill_shape;
+
+    size_t attention_dispatch = program.dispatches.size();
+    for (size_t i = 0u; i < program.dispatches.size(); ++i) {
+        if (program.dispatches[i].kernel_id ==
+            ::ps::runtime::KernelId::PAGED_ATTENTION) {
+            attention_dispatch = i;
+            break;
+        }
+    }
+    const bool has_paged_attention = attention_dispatch != program.dispatches.size();
+    uint32_t attention_plan_key = 0u;
+    if (has_paged_attention) {
+        runtime::HostExecutionContext probe_ctx = ctx;
+        probe_ctx.actual_rows = row_capacity;
+        const Result<uint32_t> sig = runtime::paged_attention_plan_signature(
+            program, attention_dispatch, probe_ctx, static_prefill_shape);
+        if (!sig.ok()) return sig.status();
+        attention_plan_key = sig.value();
+        const uint32_t splits = (attention_plan_key >> 2) & 0xFFFFu;
+        if ((attention_plan_key & 1u) == 0u) {
+            return Status::unsupported(
+                "mcu static attention topology unavailable", __FILE__,
+                __LINE__);
+        }
+        if (splits > 1u && splits != 16u) {
+            return Status::unsupported(
+                "mcu static attention split topology unsupported", __FILE__,
+                __LINE__);
+        }
+    }
+    if (has_paged_attention &&
+        ((attention_plan_key >> 2) & 0xFFFFu) >= 16u) {
+        plan_ctx.max_visible_tokens =
+            runtime::kPagedAttentionSplitMinVisible;
+    } else {
+        plan_ctx.max_visible_tokens = 1u;
+    }
+
+    for (const runtime::McuStaticPlanEntry& entry : state.static_plans) {
+        if (entry.valid && entry.program_slot == bucket &&
+            entry.attention_plan_key == attention_plan_key) {
+            out.plan = entry.plan;
+            out.plan_begin = entry.plan_begin;
+            out.plan_end = entry.plan_end;
+            return Status::make_ok();
+        }
+    }
+
     runtime::McuCompiledPlan plan{};
     const Status full_st =
-        runtime::compile_mcu_plan(program, ctx, compile_options, plan);
+        runtime::compile_mcu_plan(program, plan_ctx, compile_options, plan);
     Status st = full_st;
     uint32_t plan_begin = 0u;
     uint32_t plan_end = dispatch_count;
@@ -635,15 +730,25 @@ Status preflight_mcu_plan(
         compile_options.dispatch_begin = range.region_begin;
         compile_options.dispatch_end = range.body_end;
         plan = runtime::McuCompiledPlan{};
-        st = runtime::compile_mcu_plan(program, ctx, compile_options, plan);
+        st = runtime::compile_mcu_plan(program, plan_ctx, compile_options,
+                                       plan);
         plan_begin = range.region_begin;
         plan_end = range.body_end;
     }
     if (!st.ok()) return st;
     if (!full_st.ok()) report_full_plan_reject(full_st);
+    state.cache.note_compile();
     out.plan = std::move(plan);
     out.plan_begin = plan_begin;
     out.plan_end = plan_end;
+    runtime::McuStaticPlanEntry entry;
+    entry.valid = true;
+    entry.program_slot = bucket;
+    entry.attention_plan_key = attention_plan_key;
+    entry.plan_begin = plan_begin;
+    entry.plan_end = plan_end;
+    entry.plan = out.plan;
+    state.static_plans.push_back(std::move(entry));
     return Status::make_ok();
 }
 

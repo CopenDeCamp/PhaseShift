@@ -961,20 +961,28 @@ __device__ __noinline__ bool mcu_override_geometry(
         mcu_recipe_explicit_args_bytes(node.kernarg_recipe);
     if (explicit_bytes == 0u) return false;
     const McuKernelVariantDesc& variant = state->variants[node.variant_id];
+    const uint32_t count_x = workgroup_count_x != 0u
+                                 ? workgroup_count_x
+                                 : variant.workgroup_count_x;
+    const uint32_t count_y = workgroup_count_y != 0u
+                                 ? workgroup_count_y
+                                 : variant.workgroup_count_y;
+    const uint32_t count_z = workgroup_count_z != 0u
+                                 ? workgroup_count_z
+                                 : variant.workgroup_count_z;
     auto* args = mcu_kernarg_slot(state, slot);
     GpuAqlDispatchDesc desc{};
-    desc.global_work_items_x = workgroup_count_x * variant.workgroup_x;
-    desc.global_work_items_y = workgroup_count_y * variant.workgroup_y;
-    desc.global_work_items_z = workgroup_count_z * variant.workgroup_z;
+    desc.global_work_items_x = count_x * variant.workgroup_x;
+    desc.global_work_items_y = count_y * variant.workgroup_y;
+    desc.global_work_items_z = count_z * variant.workgroup_z;
     desc.workgroup_size_x = static_cast<uint16_t>(variant.workgroup_x);
     desc.workgroup_size_y = static_cast<uint16_t>(variant.workgroup_y);
     desc.workgroup_size_z = static_cast<uint16_t>(variant.workgroup_z);
     if (!mcu_apply_hidden_args(variant, args, explicit_bytes, desc)) {
         return false;
     }
-    build_aql_launch_metadata(args, variant.kernarg_size, workgroup_count_x,
-                              workgroup_count_y, workgroup_count_z,
-                              variant.workgroup_x);
+    build_aql_launch_metadata(args, variant.kernarg_size, count_x, count_y,
+                              count_z, variant.workgroup_x);
     __threadfence_system();
     return true;
 }

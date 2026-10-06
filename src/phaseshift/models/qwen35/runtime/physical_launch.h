@@ -453,6 +453,12 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical(
     const HostExecutionContext& ctx,
     PhysicalPagedAttentionPlan& out);
 
+Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_plan(
+    const ::ps::runtime::Program& program,
+    size_t dispatch_index,
+    const HostExecutionContext& ctx,
+    PhysicalPagedAttentionPlan& out);
+
 hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& plan,
                                            hipStream_t stream);
 

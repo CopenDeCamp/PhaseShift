@@ -21,6 +21,10 @@ __host__ __device__ __forceinline__ uint32_t gpu_mcu_patch_source_value(
             return context->num_requests;
         case McuInvocationPatchSource::NumOutputs:
             return context->num_outputs;
+        case McuInvocationPatchSource::ActualRowsTimesParam:
+            return context->actual_rows * param;
+        case McuInvocationPatchSource::NumOutputsTimesParam:
+            return context->num_outputs * param;
         case McuInvocationPatchSource::VerifyRequests:
             return context->num_verify_requests != 0u ? 1u : 0u;
         case McuInvocationPatchSource::Bf16ExactRowsVariant: {

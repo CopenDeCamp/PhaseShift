@@ -893,6 +893,8 @@ enum class McuInvocationPatchSource : uint8_t {
     AttentionRegionRows = 3,
     VerifyRequests = 4,
     Bf16ExactRowsVariant = 5,
+    ActualRowsTimesParam = 6,
+    NumOutputsTimesParam = 7,
 };
 
 struct alignas(16) McuInvocationPatch {

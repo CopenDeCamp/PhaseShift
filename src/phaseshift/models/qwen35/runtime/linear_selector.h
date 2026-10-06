@@ -30,6 +30,7 @@ struct Psq4GemmSelectorInput {
     uint32_t out_features = 0;
     uint32_t k = 0;
     uint32_t k_padded = 0;
+    bool allow_unguarded_prefill2d = true;
 };
 
 struct Psq8GemmSelectorInput {
@@ -37,6 +38,7 @@ struct Psq8GemmSelectorInput {
     uint32_t out_features = 0;
     uint32_t k = 0;
     uint32_t k_padded = 0;
+    bool allow_unguarded_prefill2d = true;
 };
 
 struct Fp8Block128GemmSelectorInput {

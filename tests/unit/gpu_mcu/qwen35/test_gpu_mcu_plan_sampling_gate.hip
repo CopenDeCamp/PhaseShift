@@ -81,6 +81,8 @@ ps::Status compile_once(SamplingProgram& p, uint32_t stochastic_outputs,
 
     q35::HostExecutionContext ctx{};
     ctx.batch_context = &bc;
+    ctx.device_output_rows = bc.output_rows;
+    ctx.output_sampling_params = bc.output_sampling_params;
     ctx.external_outputs = p.external_outputs;
     ctx.external_output_count = 2u;
     ctx.actual_rows = 1u;

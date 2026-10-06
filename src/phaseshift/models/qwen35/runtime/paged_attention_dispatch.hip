@@ -203,8 +203,6 @@ Result<PagedAttentionResolvedArgs> resolve_paged_attention_args(
     return out_args;
 }
 
-constexpr uint32_t kPagedAttentionSplitMinVisible = 2048u;
-
 PagedAttentionPlan plan_paged_attention(
     const PagedAttentionResolvedArgs& args,
     const HostExecutionContext& ctx,
@@ -471,9 +469,17 @@ PhysicalResolveStatus append_prefill_region(
 
 }  // namespace
 
-Result<PhysicalResolveStatus> resolve_paged_attention_physical(
+namespace {
+
+enum class PagedAttentionResolveMode : uint8_t {
+    DynamicHost = 0,
+    StaticPlan = 1,
+};
+
+Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     const ::ps::runtime::Program& program, size_t dispatch_index,
-    const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
+    const HostExecutionContext& ctx, PagedAttentionResolveMode mode,
+    PhysicalPagedAttentionPlan& out) {
     out = PhysicalPagedAttentionPlan{};
     auto res = resolve_paged_attention_args(program, dispatch_index, ctx);
     if (!res.ok()) return res.status();
@@ -481,12 +487,15 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical(
     if (a.common.rows == 0u) return PhysicalResolveStatus::Skipped;
 
     const auto* bc = ctx.batch_context;
-    const bool mixed =
-        bc != nullptr && bc->requests != nullptr && bc->num_requests > 1u;
+    const bool static_plan = mode == PagedAttentionResolveMode::StaticPlan;
+    const bool mixed = !static_plan && bc != nullptr &&
+                       bc->requests != nullptr && bc->num_requests > 1u;
 
     if (!mixed) {
         const bool use_prefill =
-            should_use_paged_attention_prefill(a.common.rows, ctx);
+            static_plan ? ctx.static_attention_use_prefill
+                        : should_use_paged_attention_prefill(a.common.rows,
+                                                             ctx);
         const PagedAttentionPlan plan = plan_paged_attention(a, ctx, use_prefill);
         if (!plan.optimized) return PhysicalResolveStatus::NotApplicable;
         out.optimized = true;
@@ -554,6 +563,24 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical(
     }
     if (out.physical_count == 0u) return PhysicalResolveStatus::NotApplicable;
     return PhysicalResolveStatus::Applicable;
+}
+
+}  // namespace
+
+Result<PhysicalResolveStatus> resolve_paged_attention_physical(
+    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
+    return resolve_paged_attention_physical_impl(
+        program, dispatch_index, ctx, PagedAttentionResolveMode::DynamicHost,
+        out);
+}
+
+Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_plan(
+    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
+    return resolve_paged_attention_physical_impl(
+        program, dispatch_index, ctx, PagedAttentionResolveMode::StaticPlan,
+        out);
 }
 
 hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& plan,

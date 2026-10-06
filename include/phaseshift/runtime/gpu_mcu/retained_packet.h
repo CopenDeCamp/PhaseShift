@@ -43,14 +43,17 @@ __device__ __forceinline__ void expand_retained_packet(
     }
     uint64_t at8 = templ.at8;
     AqlU32x4 at16 = templ.at16;
-    if (workgroup_count_x != 0u || workgroup_count_y != 0u ||
-        workgroup_count_z != 0u) {
+    if (workgroup_count_x != 0u) {
         const uint32_t workgroup_x = templ.at4 & 0xffffu;
-        const uint32_t workgroup_y = (templ.at4 >> 16) & 0xffffu;
-        const uint32_t workgroup_z = static_cast<uint32_t>(templ.at8 & 0xffffu);
         at8 = (at8 & 0xffffffffull) |
               (static_cast<uint64_t>(workgroup_count_x * workgroup_x) << 32);
+    }
+    if (workgroup_count_y != 0u) {
+        const uint32_t workgroup_y = (templ.at4 >> 16) & 0xffffu;
         at16.x = workgroup_count_y * workgroup_y;
+    }
+    if (workgroup_count_z != 0u) {
+        const uint32_t workgroup_z = static_cast<uint32_t>(templ.at8 & 0xffffu);
         at16.y = workgroup_count_z * workgroup_z;
     }
     __atomic_store_n(

@@ -1,6 +1,8 @@
 #include "unit/gpu_mcu/gpu_mcu_real_chain_fixture.h"
 
 #include <phaseshift/models/qwen35/runtime/mcu_decode_runtime.h>
+#include <phaseshift/models/qwen35/kernels/optimized/linear/config.h>
+#include <phaseshift/models/qwen35/runtime/linear_selector.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
 #include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
@@ -34,7 +36,7 @@ void check(bool condition, const char* message) {
 }
 
 constexpr uint32_t kMaxRows = 26u;
-constexpr uint32_t kLoopRows = 13u;
+constexpr size_t kWorkspaceRedzone = 256u;
 
 constexpr uint32_t kFeatures = chain::kFeatures;
 constexpr uint32_t kN = chain::kN;
@@ -154,6 +156,16 @@ bool wait_for(const mcu::GpuMcuPersistentMcu& persistent, uint64_t target,
     return true;
 }
 
+size_t activation_code_offset(uint32_t row, uint32_t feature,
+                              uint32_t code_row_stride) {
+    return static_cast<size_t>(row >> 4) *
+               static_cast<size_t>(code_row_stride) * 16u +
+           static_cast<size_t>(feature >> 5) * 512u +
+           static_cast<size_t>((feature & 31u) >> 4) * 256u +
+           static_cast<size_t>(row & 15u) * 16u +
+           static_cast<size_t>(feature & 15u);
+}
+
 bool rows_equal(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b,
                 uint32_t rows, size_t row_bytes) {
     for (uint32_t r = 0u; r < rows; ++r) {
@@ -203,8 +215,8 @@ int main() {
         hipMalloc(&rms_weight_dev, rms_weight_bytes) != hipSuccess ||
         hipMalloc(&w_codes_dev, w_codes_bytes) != hipSuccess ||
         hipMalloc(&w_scales_dev, w_scales_bytes) != hipSuccess ||
-        hipMalloc(&ws_host, ws_bytes) != hipSuccess ||
-        hipMalloc(&ws_mcu, ws_bytes) != hipSuccess ||
+        hipMalloc(&ws_host, ws_bytes + kWorkspaceRedzone) != hipSuccess ||
+        hipMalloc(&ws_mcu, ws_bytes + kWorkspaceRedzone) != hipSuccess ||
         hipMalloc(&out_host, out_total) != hipSuccess ||
         hipMalloc(&out_mcu, out_total) != hipSuccess) {
         std::printf("FAIL: buffer alloc\n");
@@ -288,6 +300,7 @@ int main() {
     q35::HostExecutionContext ctx_mcu = ctx_host;
     ctx_mcu.workspace = static_cast<uint8_t*>(ws_mcu);
     ctx_mcu.external_outputs = ext_out_mcu;
+    ctx_mcu.static_plan_compile = true;
 
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
@@ -320,7 +333,56 @@ int main() {
         return 1;
     }
     check(plan.physical_dispatch_count == 3u, "three physical dispatches");
+    for (const q35::McuCompiledVariant& v : plan.variants) {    }
+    for (const q35::McuGeometryPatch& g : plan.geometry_patches) {    }
+    for (const q35::McuInvocationRowPatch& r : plan.invocation_row_patches) {    }
     check(plan.psq4_multi.size() == 1u, "row-block linear invocation emitted");
+    check(plan.invocation_row_patches.size() == 2u,
+          "row patch metadata for rmsnorm and row-block linear");
+    bool rms_row_patch = false;
+    bool psq_row_patch = false;
+    for (const q35::McuInvocationRowPatch& p : plan.invocation_row_patches) {
+        const bool actual_rows =
+            p.source == static_cast<uint8_t>(
+                            mcu::McuInvocationPatchSource::ActualRows);
+        if (p.table == q35::McuInvocationTable::RmsNorm)
+            rms_row_patch = p.index == 0u && actual_rows;
+        if (p.table == q35::McuInvocationTable::Psq4MultiRow)
+            psq_row_patch = p.index == 0u && actual_rows;
+    }
+    check(rms_row_patch, "rmsnorm rows patch reads actual rows");
+    check(psq_row_patch, "row-block linear rows patch reads actual rows");
+    check(plan.geometry_patches.size() == 2u, "geometry metadata emitted");
+    bool rms_geometry = false;
+    bool quant_geometry = false;
+    for (const q35::McuGeometryPatch& g : plan.geometry_patches) {
+        if (g.axis != q35::McuGeometryAxis::X) continue;
+        if (g.source == static_cast<uint8_t>(
+                            mcu::McuInvocationPatchSource::ActualRowsTimesParam) &&
+            g.param == kFeatures / kFeatures && g.node_index == 0u)
+            rms_geometry = true;
+        if (g.source == static_cast<uint8_t>(
+                            mcu::McuInvocationPatchSource::ActualRows) &&
+            g.param == 0u && g.node_index == 1u)
+            quant_geometry = true;
+    }
+    check(rms_geometry, "rmsnorm grid scales actual rows by group count");
+    check(quant_geometry, "activation quantize grid follows actual rows");
+
+    q35::Psq4GemmSelectorInput policy{};
+    policy.rows = 512u;
+    policy.out_features = 512u;
+    policy.k = 512u;
+    policy.k_padded = 512u;
+    policy.allow_unguarded_prefill2d = false;
+    const std::optional<ps::kernel::Psq4GemmConfig> guarded =
+        q35::select_psq4_gemm_config(policy);
+    check(!guarded.has_value() ||
+              guarded->id == ps::kernel::Psq4GemmConfigId::RowBlock1 ||
+              guarded->id == ps::kernel::Psq4GemmConfigId::RowBlock2 ||
+              guarded->id == ps::kernel::Psq4GemmConfigId::RowBlock4 ||
+              guarded->id == ps::kernel::Psq4GemmConfigId::RowBlock8,
+          "static plan never selects unguarded prefill2d");
 
     q35::McuDecodeRuntimeOptions options{};
     options.device = 0;
@@ -338,8 +400,8 @@ int main() {
         std::printf("FAIL: prepare_plan: %s\n", prepared.message().c_str());
         return 1;
     }
-    check(runtime.row_global_patch_count() == 0u,
-          "row-block rows are fixed by the prepared plan");
+    check(runtime.row_global_patch_count() == 4u,
+          "row and geometry patches derived from the static plan");
 
     rt::DeviceBatchContext* ctx_dev = nullptr;
     rt::DeviceRequestDescriptor* req_dev = nullptr;
@@ -414,7 +476,7 @@ int main() {
                                            runtime.row_global_patch_count())
               .ok(),
           "configure execution patches");
-    check(persistent.execution_patch_count() == 0u, "patch table recorded");
+    check(persistent.execution_patch_count() == 4u, "patch table recorded");
 
     uint64_t ready = 1u;
     (void)hipMemcpy(ready_dev, &ready, sizeof(ready), hipMemcpyHostToDevice);
@@ -442,26 +504,203 @@ int main() {
     check(rows_equal(host_out, mcu_out, kMaxRows, out_bytes),
           "26-row chain host vs persistent mcu byte exact");
 
-    ctx.actual_rows = kLoopRows;
-    ready = 2u;
-    (void)hipMemcpyAsync(ctx_dev, &ctx, sizeof(ctx), hipMemcpyHostToDevice,
-                         update_stream);
-    (void)hipMemcpyAsync(ready_dev, &ready, sizeof(ready), hipMemcpyHostToDevice,
-                         update_stream);
-    (void)hipStreamSynchronize(update_stream);
-    check(wait_for(persistent, 2u, 10000u), "reduced-row loop completed");
+    constexpr uint8_t kCanary = 0xABu;
+    const uint32_t code_stride = act_layout().code_row_stride_bytes;
+    const uint32_t scale_stride = act_layout().scale_row_stride_bytes;
+    const uint32_t k_padded = act_layout().k_padded;
+    const size_t act_base = act_offset();
+    const size_t codes_bytes = static_cast<size_t>(act_layout().codes_bytes());
+    const size_t codes_base = act_base;
+    const size_t scales_base =
+        act_base + static_cast<size_t>(act_layout().scales_offset);
+    const size_t rms_row_stride =
+        static_cast<size_t>(kFeatures) * sizeof(uint16_t);
+    const size_t ws_alloc = ws_bytes + kWorkspaceRedzone;
+    const uint32_t padded_capacity = (kMaxRows + 15u) & ~15u;
 
-    std::fill(mcu_out.begin(), mcu_out.end(), 0u);
-    (void)hipMemcpyAsync(mcu_out.data(), out_mcu, out_total,
+    std::vector<uint8_t> host_ws(ws_bytes, 0u);
+    (void)hipMemcpyAsync(host_ws.data(), ws_host, ws_bytes,
                          hipMemcpyDeviceToHost, update_stream);
     (void)hipStreamSynchronize(update_stream);
-    check(rows_equal(host_out, mcu_out, kLoopRows, out_bytes),
-          "reduced rows match the reference without re-prepare");
+
+    const uint32_t loop_cases[] = {1u, 8u,  13u, 15u, 16u,
+                                   17u, 20u, 25u, 26u};
+    uint64_t batch_index = 1u;
+    uint32_t ready_value = 1u;
+    for (uint32_t rows : loop_cases) {
+        (void)hipMemsetAsync(ws_mcu, kCanary, ws_alloc, update_stream);
+        (void)hipMemsetAsync(out_mcu, kCanary, out_total, update_stream);
+        ctx.actual_rows = rows;
+        ++batch_index;
+        ++ready_value;
+        (void)hipMemcpyAsync(ctx_dev, &ctx, sizeof(ctx), hipMemcpyHostToDevice,
+                             update_stream);
+        (void)hipMemcpyAsync(ready_dev, &ready_value, sizeof(ready_value),
+                             hipMemcpyHostToDevice, update_stream);
+        (void)hipStreamSynchronize(update_stream);
+        if (!wait_for(persistent, batch_index, 10000u)) {
+            check(false, "layout aware activation canary loop completed");
+            break;
+        }
+
+        std::vector<uint8_t> mcu_ws(ws_alloc, 0u);
+        std::vector<uint8_t> mcu_out(out_total, 0u);
+        (void)hipMemcpyAsync(mcu_ws.data(), ws_mcu, ws_alloc,
+                             hipMemcpyDeviceToHost, update_stream);
+        (void)hipMemcpyAsync(mcu_out.data(), out_mcu, out_total,
+                             hipMemcpyDeviceToHost, update_stream);
+        (void)hipStreamSynchronize(update_stream);
+
+        uint32_t bad_row = 0u;
+        uint32_t bad_feature = 0u;
+        bool codes_untouched = true;
+        for (uint32_t row = rows; row < padded_capacity && codes_untouched;
+             ++row) {
+            for (uint32_t f = 0u; f < k_padded; ++f) {
+                const size_t rel = activation_code_offset(row, f, code_stride);
+                if (rel >= codes_bytes ||
+                    mcu_ws[codes_base + rel] != kCanary) {
+                    bad_row = row;
+                    bad_feature = f;
+                    codes_untouched = false;
+                    break;
+                }
+            }
+        }
+        if (!codes_untouched)
+            std::printf(
+                "  codes changed: logical row=%u feature=%u offset=%zu\n",
+                bad_row, bad_feature,
+                codes_base +
+                    activation_code_offset(bad_row, bad_feature, code_stride));
+        check(codes_untouched, "inactive logical activation codes untouched");
+
+        uint32_t bad_scale_row = 0u;
+        bool scales_untouched = true;
+        for (uint32_t row = rows; row < kMaxRows && scales_untouched; ++row) {
+            const size_t base =
+                scales_base + static_cast<size_t>(row) * scale_stride;
+            for (uint32_t i = 0u; i < scale_stride; ++i) {
+                if (mcu_ws[base + i] != kCanary) {
+                    bad_scale_row = row;
+                    scales_untouched = false;
+                    break;
+                }
+            }
+        }
+        if (!scales_untouched)
+            std::printf("  scales changed: logical row=%u\n", bad_scale_row);
+        check(scales_untouched, "inactive activation scales untouched");
+
+        uint32_t bad_rms_row = 0u;
+        bool rms_untouched = true;
+        for (uint32_t row = rows; row < kMaxRows && rms_untouched; ++row) {
+            const size_t base = static_cast<size_t>(row) * rms_row_stride;
+            for (size_t i = 0u; i < rms_row_stride; ++i) {
+                if (mcu_ws[base + i] != kCanary) {
+                    bad_rms_row = row;
+                    rms_untouched = false;
+                    break;
+                }
+            }
+        }
+        if (!rms_untouched)
+            std::printf("  rmsnorm output changed: logical row=%u\n",
+                        bad_rms_row);
+        check(rms_untouched, "inactive rmsnorm output rows untouched");
+
+        uint32_t bad_out_row = 0u;
+        bool out_untouched = true;
+        for (uint32_t row = rows; row < kMaxRows && out_untouched; ++row) {
+            const size_t base = static_cast<size_t>(row) * out_bytes;
+            for (size_t i = 0u; i < out_bytes; ++i) {
+                if (mcu_out[base + i] != kCanary) {
+                    bad_out_row = row;
+                    out_untouched = false;
+                    break;
+                }
+            }
+        }
+        if (!out_untouched)
+            std::printf("  linear output changed: logical row=%u\n",
+                        bad_out_row);
+        check(out_untouched, "inactive linear output rows untouched");
+
+        bool redzone_untouched = true;
+        for (size_t i = 0u; i < kWorkspaceRedzone; ++i) {
+            if (mcu_ws[ws_bytes + i] != kCanary) redzone_untouched = false;
+        }
+        check(redzone_untouched, "workspace allocation redzone untouched");
+
+        uint32_t bad_active_row = 0u;
+        uint32_t bad_active_feature = 0u;
+        bool codes_match = true;
+        for (uint32_t row = 0u; row < rows && codes_match; ++row) {
+            for (uint32_t f = 0u; f < k_padded; ++f) {
+                const size_t rel = activation_code_offset(row, f, code_stride);
+                if (mcu_ws[codes_base + rel] != host_ws[codes_base + rel]) {
+                    bad_active_row = row;
+                    bad_active_feature = f;
+                    codes_match = false;
+                    break;
+                }
+            }
+        }
+        if (!codes_match)
+            std::printf(
+                "  active codes differ: logical row=%u feature=%u offset=%zu\n",
+                bad_active_row, bad_active_feature,
+                codes_base + activation_code_offset(bad_active_row,
+                                                    bad_active_feature,
+                                                    code_stride));
+        check(codes_match, "active activation codes match host");
+
+        bool scales_match = true;
+        for (uint32_t row = 0u; row < rows && scales_match; ++row) {
+            const size_t base =
+                scales_base + static_cast<size_t>(row) * scale_stride;
+            for (uint32_t i = 0u; i < scale_stride; ++i) {
+                if (mcu_ws[base + i] != host_ws[base + i]) {
+                    scales_match = false;
+                    break;
+                }
+            }
+        }
+        check(scales_match, "active activation scales match host");
+
+        bool rms_match = true;
+        for (uint32_t row = 0u; row < rows && rms_match; ++row) {
+            const size_t base = static_cast<size_t>(row) * rms_row_stride;
+            for (size_t i = 0u; i < rms_row_stride; ++i) {
+                if (mcu_ws[base + i] != host_ws[base + i]) {
+                    rms_match = false;
+                    break;
+                }
+            }
+        }
+        check(rms_match, "active rmsnorm output matches host");
+
+        const bool out_match = rows_equal(mcu_out, host_out, rows, out_bytes);
+        check(out_match, "active linear output matches host");
+
+        std::printf(
+            "activation canary rows=%u codes=%s scales=%s rms=%s out=%s "
+            "redzone=%s active_codes=%s active_scales=%s active_rms=%s "
+            "active_out=%s\n",
+            rows, codes_untouched ? "ok" : "DIRTY",
+            scales_untouched ? "ok" : "DIRTY",
+            rms_untouched ? "ok" : "DIRTY",
+            out_untouched ? "ok" : "DIRTY",
+            redzone_untouched ? "ok" : "DIRTY",
+            codes_match ? "match" : "DIFF", scales_match ? "match" : "DIFF",
+            rms_match ? "match" : "DIFF", out_match ? "match" : "DIFF");
+    }
+
     check(persistent.batches_failed() == 0u, "no fault");
     check(runtime.execution_state()->plans_started >= 2u,
           "prepared fsm served both loops");
-    std::printf("multirow chain: rows=%u->%u patches=%u plans=%llu\n", kMaxRows,
-                kLoopRows, runtime.row_global_patch_count(),
+    std::printf("multirow chain: patches=%u plans=%llu\n",
+                runtime.row_global_patch_count(),
                 static_cast<unsigned long long>(
                     runtime.execution_state()->plans_started));
 

@@ -289,7 +289,8 @@ Result<PhysicalResolveStatus> resolve_psq4_physical(
     if (rows > b.activation_max_rows)
         return Status::invalid_state("psq4 linear: rows out of range", __FILE__,
                                      __LINE__);
-    const Psq4GemmSelectorInput lin{rows, e.rows, e.cols, wkp};
+    Psq4GemmSelectorInput lin{rows, e.rows, e.cols, wkp};
+    lin.allow_unguarded_prefill2d = !ctx.static_plan_compile;
     const auto config = select_psq4_gemm_config(lin);
     if (!config) {
         linear_record_fallback(LinearFamilyRef::Fp4,
@@ -474,7 +475,8 @@ Result<PhysicalResolveStatus> resolve_psq8_physical(
     if (rows > b.activation_max_rows)
         return Status::invalid_state("psq8 linear: rows out of range", __FILE__,
                                      __LINE__);
-    const Psq8GemmSelectorInput lin{rows, e.rows, e.cols, wkp};
+    Psq8GemmSelectorInput lin{rows, e.rows, e.cols, wkp};
+    lin.allow_unguarded_prefill2d = !ctx.static_plan_compile;
     const auto config = select_psq8_gemm_config(lin);
     if (!config) {
         linear_record_fallback(LinearFamilyRef::Fp8,

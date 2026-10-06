@@ -113,6 +113,8 @@ private:
     uint32_t row_global_patch_count_ = 0;
     std::vector<McuAttentionRegion> attention_regions_;
     std::vector<McuBf16VariantCatalog> bf16_catalogs_;
+    std::vector<McuGeometryPatch> geometry_patches_;
+    std::vector<McuInvocationRowPatch> invocation_row_patches_;
     void* dynamic_bindings_ = nullptr;
     uint32_t dynamic_binding_count_ = 0;
 

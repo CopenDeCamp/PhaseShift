@@ -945,6 +945,10 @@ int main() {
 
     q35::HostExecutionContext ctx_host{};
     ctx_host.batch_context = ctx_dev;
+    ctx_host.device_requests = bc.requests;
+    ctx_host.device_output_rows = bc.output_rows;
+    ctx_host.output_sampling_params = bc.output_sampling_params;
+    ctx_host.staged_request_count = bc.num_requests;
     ctx_host.workspace = static_cast<uint8_t*>(ws_host);
     ctx_host.workspace_bytes = ws_bytes;
     ctx_host.external_inputs = ext_inputs;

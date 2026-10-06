@@ -166,10 +166,10 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
     c.a_log = static_cast<const bf16_t*>(al_slot.device_ptr);
     c.recurrent_state = gdn.recurrent_base;
     c.output = static_cast<float*>(out.ptr);
-    if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
+    if (ctx.device_requests == nullptr)
         return Status::invalid_state("gdn-recurrence: device requests null",
                                      __FILE__, __LINE__);
-    c.requests = ctx.batch_context->requests;
+    c.requests = ctx.device_requests;
     c.num_requests = num_requests;
     c.actual_rows = actual_rows;
     c.q_row_stride = q.row_stride;
