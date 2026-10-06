@@ -176,8 +176,12 @@ __host__ __device__ __forceinline__ bool gpu_mcu_descriptor_validate(
         return false;
     }
     if (descriptor.max_sequence_length == 0u) return false;
-    if (descriptor.prompt_length > descriptor.max_sequence_length) return false;
     if (descriptor.prompt_length == 0u) return false;
+    if (static_cast<uint64_t>(descriptor.prompt_length) +
+            static_cast<uint64_t>(descriptor.max_new_tokens) >
+        static_cast<uint64_t>(descriptor.max_sequence_length)) {
+        return false;
+    }
     return true;
 }
 

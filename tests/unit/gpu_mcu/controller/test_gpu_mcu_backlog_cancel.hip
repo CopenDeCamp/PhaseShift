@@ -355,7 +355,7 @@ int main() {
         uint64_t backlog_descriptor = 0u;
         for (uint32_t i = 0u; i < 5u; ++i) {
             const uint32_t handle = push_submit(
-                ring, arena, 12000u + i, 1u, 0u, 100000u, 64u);
+                ring, arena, 12000u + i, 1u, 0u, 100000u, 200000u);
             if (i == 4u) backlog_descriptor = handle;
         }
 

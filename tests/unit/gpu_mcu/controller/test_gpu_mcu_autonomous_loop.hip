@@ -385,7 +385,7 @@ int main() {
 
     // Scenario 6: cancel at the loop boundary. The current transaction finishes
     // and the slot leaves the following snapshots.
-    check(push_submit(ring, arena, 9003u, 1u, 100u) != 0u, "submit cancel");
+    check(push_submit(ring, arena, 9003u, 1u, 40u) != 0u, "submit cancel");
     rt::RequestHandle cancel_handle{};
     bool claimed = false;
     check(wait_until(

@@ -385,6 +385,34 @@ int main() {
               "prompt longer than max sequence is rejected");
     }
     {
+        mcu::GpuMcuRequestDescriptor descriptor{};
+        descriptor.prompt_length = 8u;
+        descriptor.max_new_tokens = 4u;
+        descriptor.max_sequence_length = 12u;
+        check(mcu::gpu_mcu_descriptor_validate(descriptor),
+              "prompt plus max new equals the sequence limit");
+        descriptor.max_new_tokens = 5u;
+        check(!mcu::gpu_mcu_descriptor_validate(descriptor),
+              "prompt plus max new beyond the sequence limit");
+    }
+    {
+        mcu::GpuMcuRequestDescriptor descriptor{};
+        descriptor.prompt_length = 0xFFFFFF00u;
+        descriptor.max_new_tokens = 0x200u;
+        descriptor.max_sequence_length = 0xFFFFFFFFu;
+        check(!mcu::gpu_mcu_descriptor_validate(descriptor),
+              "a wrapped prompt plus max new sum is rejected");
+    }
+    {
+        push_submit(h.ring, h.arena, 3004u, 8u, 0u, 5u, 12u);
+        h.process();
+        const EventOut event = pop_event(h.ring);
+        check(event.ok && event.event.reason ==
+                              static_cast<uint32_t>(
+                                  mcu::GpuMcuRejectReason::invalid_descriptor),
+              "prompt plus max new beyond the limit is rejected on submit");
+    }
+    {
         mcu::GpuMcuControlCommand command{};
         command.opcode = static_cast<uint32_t>(mcu::GpuMcuControlOpcode::submit);
         command.version = mcu::kGpuMcuControlVersion + 7u;

@@ -303,8 +303,6 @@ remaining budget = 2、tokens = A B EOS
 
 以下は現在の contract と実装の差である。
 
-- `max_sequence_length` の admission 保証（`prompt + max_new_tokens`）が
-  GPU-MCU ingress 側で未設定である。
 - Host backend から GPU-MCU への cancel command 送信経路が未実装である。
   `GpuMcuControlOpcode::cancel` の生成は現在テストのみで存在し、
   Host の cancel は GPU-MCU backend に伝わらない。
