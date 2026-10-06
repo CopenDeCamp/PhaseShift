@@ -35,12 +35,6 @@ struct ContinuousBatcherConfig {
     KVAdmissionPolicy admission_policy = KVAdmissionPolicy::BankerSafe;
 };
 
-struct StepResult {
-    bool executed = false;
-    uint32_t num_tokens = 0;
-    uint32_t num_requests = 0;
-};
-
 class ContinuousBatcher {
  public:
     ContinuousBatcher(

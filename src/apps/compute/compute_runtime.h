@@ -4,6 +4,7 @@
 #include <phaseshift/models/qwen35/runtime/continuous_batcher.h>
 #include <phaseshift/models/qwen35/runtime/decode_backend.h>
 #include <phaseshift/models/qwen35/runtime/executor.h>
+#include <phaseshift/models/qwen35/runtime/gpu_mcu_runtime.h>
 #include <phaseshift/models/qwen35/runtime/sampling_params.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
@@ -126,6 +127,7 @@ class Qwen35ComputeRuntime {
     std::optional<qwen35::PagedKVPool> kv_pool_;
     qwen35::Executor executor_;
     std::unique_ptr<qwen35::runtime::ContinuousBatcher> batcher_;
+    std::unique_ptr<qwen35::runtime::GpuMcuRuntime> gpu_mcu_runtime_;
 };
 
 }  // namespace app

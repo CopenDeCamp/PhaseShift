@@ -186,6 +186,28 @@ Status Qwen35ComputeRuntime::initialize(const Qwen35RuntimeConfig& config) {
     }
     executor_ = std::move(exec_result.release());
 
+    if (config_.decode_backend == qwen35::runtime::DecodeBackend::GpuMcu) {
+        qwen35::runtime::GpuMcuRuntimeConfig mcu_config;
+        mcu_config.max_scheduled_tokens = exec_config.max_scheduled_tokens;
+        mcu_config.max_scheduled_requests = exec_config.max_scheduled_requests;
+        mcu_config.max_seq_len = max_seq;
+        mcu_config.page_tokens = config_.page_tokens;
+        mcu_config.eos_token_ids = text_config.stop_tokens;
+        gpu_mcu_runtime_ = std::make_unique<
+            qwen35::runtime::GpuMcuRuntime>(
+            executor_, *slot_pool_, *gdn_pool_, *kv_pool_,
+            std::move(mcu_config), stream_);
+        if (gpu_mcu_runtime_ == nullptr) {
+            return Status::insufficient_memory(
+                "gpu-mcu runtime allocation failed", __FILE__,
+                __LINE__);
+        }
+        const Status mcu_resources =
+            gpu_mcu_runtime_->allocate_controller_resources(config_.device);
+        if (!mcu_resources.ok()) return mcu_resources;
+        return Status::make_ok();
+    }
+
     qwen35::runtime::ContinuousBatcherConfig batcher_config;
     batcher_config.max_scheduled_tokens = exec_config.max_scheduled_tokens;
     batcher_config.max_scheduled_requests = exec_config.max_scheduled_requests;
@@ -203,6 +225,10 @@ Result<uint64_t> Qwen35ComputeRuntime::submit(
     std::vector<int32_t> input_ids,
     uint32_t max_new_tokens,
     const qwen35::runtime::SamplingConfig& sampling) {
+    if (gpu_mcu_runtime_ != nullptr) {
+        return gpu_mcu_runtime_->submit(std::move(input_ids), max_new_tokens,
+                                        sampling);
+    }
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
@@ -210,6 +236,9 @@ Result<uint64_t> Qwen35ComputeRuntime::submit(
 }
 
 Result<qwen35::runtime::StepResult> Qwen35ComputeRuntime::step() {
+    if (gpu_mcu_runtime_ != nullptr) {
+        return gpu_mcu_runtime_->step();
+    }
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
@@ -217,10 +246,12 @@ Result<qwen35::runtime::StepResult> Qwen35ComputeRuntime::step() {
 }
 
 bool Qwen35ComputeRuntime::has_pending() const {
+    if (gpu_mcu_runtime_ != nullptr) return gpu_mcu_runtime_->has_pending();
     return batcher_ != nullptr && batcher_->has_pending();
 }
 
 const qwen35::runtime::RuntimeRequest* Qwen35ComputeRuntime::request(uint64_t id) const {
+    if (gpu_mcu_runtime_ != nullptr) return gpu_mcu_runtime_->request(id);
     if (batcher_ == nullptr) {
         return nullptr;
     }
@@ -228,6 +259,7 @@ const qwen35::runtime::RuntimeRequest* Qwen35ComputeRuntime::request(uint64_t id
 }
 
 Status Qwen35ComputeRuntime::cancel_all() {
+    if (gpu_mcu_runtime_ != nullptr) return gpu_mcu_runtime_->cancel_all();
     if (batcher_ == nullptr) {
         return Status::make_ok();
     }
@@ -235,6 +267,7 @@ Status Qwen35ComputeRuntime::cancel_all() {
 }
 
 Status Qwen35ComputeRuntime::cancel(uint64_t id) {
+    if (gpu_mcu_runtime_ != nullptr) return gpu_mcu_runtime_->cancel(id);
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
@@ -242,6 +275,7 @@ Status Qwen35ComputeRuntime::cancel(uint64_t id) {
 }
 
 Status Qwen35ComputeRuntime::retire(uint64_t id) {
+    if (gpu_mcu_runtime_ != nullptr) return gpu_mcu_runtime_->retire(id);
     if (batcher_ == nullptr) {
         return Status::invalid_state("runtime not initialized", __FILE__, __LINE__);
     }
@@ -265,6 +299,11 @@ Status Qwen35ComputeRuntime::shutdown() {
         return Status::make_ok();
     }
     Status first_error = Status::make_ok();
+
+    if (gpu_mcu_runtime_ != nullptr) {
+        Status st = gpu_mcu_runtime_->shutdown();
+        if (!st.ok() && first_error.ok()) first_error = st;
+    }
 
     if (batcher_ != nullptr) {
         Status st = batcher_->cancel_all();

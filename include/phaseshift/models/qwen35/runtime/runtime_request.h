@@ -56,6 +56,12 @@ Status admit_request(
     PagedKVPool& kv_pool,
     hipStream_t stream);
 
+struct StepResult {
+    bool executed = false;
+    uint32_t num_tokens = 0;
+    uint32_t num_requests = 0;
+};
+
 enum class CommitAction : uint8_t {
     Continue,
     Finished,

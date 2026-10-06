@@ -188,6 +188,7 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/tensor_parallel.cpp
     src/phaseshift/models/qwen35/runtime/program_executor.hip
     src/phaseshift/models/qwen35/runtime/executor.hip
+    src/phaseshift/models/qwen35/runtime/gpu_mcu_runtime.hip
     src/phaseshift/models/qwen35/runtime/spec_decode.cpp
     src/phaseshift/models/qwen35/runtime/dflash2_spec_decoder.cpp
     src/phaseshift/models/qwen35/runtime/gdn_spec_history.hip
