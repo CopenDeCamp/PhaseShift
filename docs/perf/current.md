@@ -60,6 +60,39 @@ run 間のばらつきは 0.15%。
 run 間のばらつきは 0.15%。
 `GREEDY_TOKEN_SUM=2446188` は全 rep で一致する。
 
+## GPU-MCU decode backend（pp2048・tg128）
+
+`--decode-backend gpu-mcu` を有効にした revision で 2026-10-06 に計測した。
+Host と交互3rep（methodology §2）、内側の runs / warmup / shape は上表と同じ。
+GPU[1] を隔離して使用し、Host 値は同一セッションで再現した
+（pp 2309.31、tg 27.56、いずれも既存 baseline との差 +0.3% 以内）。
+この表は「計測断面」の measurement revision とは異なる revision の値である。
+
+### pp2048（gpu_tokens_per_sec、外側3rep 中央値）
+
+| backend | rep1 | rep2 | rep3 | 中央値 | Host 比 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| host | 2333.70 | 2307.84 | 2309.31 | 2309.31 | 100% |
+| gpu-mcu | 1923.67 | 1917.44 | 1907.72 | **1917.44** | **83.0%** |
+
+### tg128 / ctx2048（gpu_tokens_per_sec、外側3rep 中央値）
+
+| backend | rep1 | rep2 | rep3 | 中央値 | Host 比 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| host | 27.60 | 27.56 | 27.56 | 27.56 | 100% |
+| gpu-mcu | 18.92 | 18.91 | 18.92 | **18.92** | **68.7%** |
+
+run 間のばらつきはいずれも 0.1% 未満。
+
+GPU-MCU の値は PSQ8 / PSQ4 の Prefill2D・embedding・BF16 Wmma・multi-row
+entrypoint を通る plan compile と実行を含む。正しさは
+`test_gpu_mcu_production_decode` の Host との byte 比較と AQL 単体検証で担保する。
+tg の Host 比が pp より低いのは、decode の dispatch 数あたりの GPU 時間が短く
+MCU submission overhead（`queue_ahead_depth=4` と packet ごとの doorbell）の
+比率が大きくなるためである。この構造は
+[../rnd/gpu_mcu/full_transformer_static_region.md](../rnd/gpu_mcu/full_transformer_static_region.md)
+の region starvation 計測と一致する。
+
 ## DFlash2 speculative decode（prose K7 256）
 
 `--dflash2-drafts 7`、256 new tokens、3 rep 中央値。
@@ -102,6 +135,8 @@ DFlash2 自体は A/B を行っていないので推定にとどめる。
 速度の数値は生成結果が一致している rep からのみ採用する。
 
 - `phaseshift-bench tg` — `GREEDY_TOKEN_SUM=2446188` が全 rep で一致。
+- `phaseshift-bench tg --decode-backend gpu-mcu` — 同じく `GREEDY_TOKEN_SUM=2446188`
+  と `GREEDY_FIRST_TOKENS` が Host と全 rep で一致する（2026-10-06 計測）。
 - `phaseshift-compute`（DFlash2）— `GENERATED_IDS` の sha1 先頭 12 桁
   `47aebe55d048`、`DFLASH2_ROUNDS=84`、`DFLASH2_ACCEPTED_DRAFTS=171` が全 rep で一致。
 - `phaseshift-bench pp` — `--mode forward` のため生成結果を持たない。
@@ -125,6 +160,15 @@ grep '^GENERATED_IDS=' <output> | sed 's/^GENERATED_IDS=//' | sha1sum
 ./build-gfx1201/phaseshift-bench tg --model-dir models/Qwen3.8-27B-PSQ --mode greedy \
   --context 2048 --tokens 128 --prefill-chunk 2048 --compute-logits 1 \
   --page-tokens 16 --arena-gib 24 --warmup 2 --device 1
+
+# pp2048 / tg128（gpu-mcu）— 上記に --decode-backend gpu-mcu を付ける
+./build-gfx1201/phaseshift-bench pp --model-dir models/Qwen3.8-27B-PSQ \
+  --prompt-tokens 2048 --mode forward --page-tokens 16 --arena-gib 24 \
+  --runs 3 --warmup 1 --device 1 --decode-backend gpu-mcu
+
+./build-gfx1201/phaseshift-bench tg --model-dir models/Qwen3.8-27B-PSQ --mode greedy \
+  --context 2048 --tokens 128 --prefill-chunk 2048 --compute-logits 1 \
+  --page-tokens 16 --arena-gib 24 --warmup 2 --device 1 --decode-backend gpu-mcu
 
 # DFlash2 prose K7 256
 ./build-gfx1201/phaseshift-compute --model-dir models/Qwen3.8-27B-PSQ \
