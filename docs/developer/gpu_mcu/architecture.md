@@ -124,31 +124,60 @@ sentinel semantics は変更しない。
 
 ## 責務境界
 
-### GPU-MCU substrate（model-independent）
+### GPU-MCU の責務ディレクトリ
 
 対象: `include/phaseshift/runtime/gpu_mcu/**` と `src/phaseshift/runtime/gpu_mcu/**`。
+直下には責務ディレクトリのみを置く。雑然とした header / source を直下に置かない。
 
-| 責務 | header |
-|---|---|
-| AQL packet / queue / kernarg region | `aql.h`, `retained_packet.h` |
-| control ring（host ⇄ device SPSC） | `control_ring.h`, `request_ingress.h` |
-| slot table / binding / runtime | `slot_table.h`, `slot_binding.h`, `slot_runtime.h` |
-| batch substrate | `batch_planner.h`, `batch_binding.h`, `batch_commit.h` |
-| KV page / sequence resource | `kv_page_allocator.h`, `sequence_resource.h` |
-| output ring | `output_ring.h` |
-| persistent controller | `persistent_mcu.h`, `execution_bridge.h` |
-| micro FSM | `micro_fsm.h` |
-| worker image / CU partition / wall clock | `worker_image.h`, `fsm_worker.h`, `cu_partition.h`, `wall_clock.h` |
-| completion | `completion.h`, `device_completion.h` |
+```text
+GPU-MCU
+│
+├── Infrastructure
+│   AQL / HSA / CU / completion
+│
+├── I/O
+│   control ingress / output
+│
+├── Scheduling
+│   slot / batch / sequence / KV resource
+│
+├── Binding
+│   logical → physical invocation
+│
+├── Execution
+│   Persistent MCU / FSM
+│
+├── Commit
+│   lifecycle / token / terminal
+│
+└── Model Hooks
+    temporary architectural debt
+```
 
-- substrate は Qwen3.5 を参照しない。`test_architecture_boundaries` が
-  `include/phaseshift/runtime/**` と `src/phaseshift/runtime/**` を走査して検証する。
-- 消費者は Qwen3.5 GPU-MCU backend、`phaseshift-bench` の GPU-MCU subcommand、
-  GPU-MCU テストのみ。
-- stream bridge は GPU-MCU 固有ではなく generic runtime 側にある
-  （`include/phaseshift/runtime/stream_bridge.h`、`ps::runtime`）。GPU-MCU と
-  Host runtime は同じ `stream_signal_alloc` / `stream_write_value32` /
-  `stream_wait_value32` を使う。
+| ディレクトリ | 責務 | header |
+|---|---|---|
+| `infrastructure/` | AQL queue / packet publication / doorbell / kernarg region / CU-WGP partition / completion primitive / worker HSACO / wall clock。LLM・request・batch・token を知らない | `aql.h`, `retained_packet.h`, `completion.h`, `device_completion.h`, `cu_partition.h`, `wall_clock.h`, `worker_image.h`, `fsm_worker.h` |
+| `io/` | Host ⇄ Persistent MCU の通信境界。「次に何を実行するか」は判断しない | `control_ring.h`, `request_ingress.h`, `output_ring.h` |
+| `scheduling/` | 何を実行するか（what should run next）。AQL packet は発行しない | `slot_table.h`, `batch_planner.h`, `kv_page_allocator.h`, `sequence_resource.h` |
+| `binding/` | logical work を physical execution へ変換する（runtime pointer・actual rows・shape・invocation index・kernarg source） | `slot_binding.h`, `batch_binding.h`, `plan_binder.h` |
+| `execution/` | GPU execution progression の owner。`src/` 側の `execution/detail/` は micro FSM の内部構成 | `persistent_mcu.h`, `micro_fsm.h`, `execution_bridge.h` |
+| `commit/` | kernel 実行完了後の状態更新（token commit・sequence advance・terminal decision・slot lifecycle・output publication） | `stop_conditions.h`, `slot_runtime.h`, `batch_commit.h` |
+| `model_hooks/` | substrate に残るモデル固有処理の隔離先。extension point ではなく既知の負債の隔離先であり、新規追加は禁止 | `gdn_reset.h` |
+
+依存の方向は下位から上位へ。
+
+- `infrastructure/` は上位のいずれのディレクトリも include しない。
+- `scheduling/` は `execution/` を include しない。
+- `infrastructure/` `io/` `scheduling/` `binding/` `commit/` は Qwen35 を参照しない。
+- `binding/` → `execution/` は現状存在する。
+  `binding/plan_binder.h` が patch ABI の型
+  （`McuInvocationPatch` / `McuInvocationPatchSource` / `McuDynamicNodeBinding`）を
+  `execution/micro_fsm.h` から得ているため。
+  これらは binding の契約であり、切り出し候補である。
+
+上位3規則と `model_hooks/` の allowlist は
+`test_architecture_boundaries` が検査する。
+Qwen35 非参照は `include/phaseshift/runtime/**` の再帰走査で担保する。
 
 ### Qwen35 GPU-MCU backend
 
@@ -165,6 +194,7 @@ Qwen3.5 kernel の standalone HSACO。
 | KV addressing の接続 | `mcu_kv_binding.h` |
 | body range | `mcu_layer_range.h`, `mcu_plan_value.h` |
 | backend 選択 policy | `decode_backend.h/.cpp` |
+| embedded HSACO inventory | `gpu_mcu/embedded_kernels.h/.cpp` |
 | controller 起動・static plan・request ingress・output の所有 | GPU-MCU production runtime owner（Qwen35 Executor/backend boundary。§既知の差異参照） |
 
 backend は substrate の AQL / FSM / persistent controller をそのまま使い、
@@ -381,15 +411,15 @@ request terminal は controller stop を伴わない。
 ## ヘッダーの分類
 
 `include/phaseshift/runtime/gpu_mcu/` の全 header を、外部からの include 実績で分類した。
-移動の可否は「どの public header が include しているか」で決め、
+header は責務ディレクトリ配下に置く。移動の可否は「どの public header が include しているか」で決め、
 未使用だから private という推測では決めない。
 
 | 分類 | header |
 |---|---|
-| 1. 外部 target が直接使う正式 contract | `aql.h`, `cu_partition.h`, `worker_image.h`, `fsm_worker.h`, `persistent_mcu.h`, `micro_fsm.h`, `completion.h`, `device_completion.h`, `retained_packet.h`, `embedded_kernels.h` |
+| 1. 外部 target が直接使う正式 contract | `aql.h`, `cu_partition.h`, `worker_image.h`, `fsm_worker.h`, `persistent_mcu.h`, `micro_fsm.h`, `completion.h`, `device_completion.h`, `retained_packet.h` |
 | 2. substrate 内部 contract（他 header からのみ include） | `slot_table.h`, `slot_binding.h`, `slot_runtime.h`, `batch_planner.h`, `batch_binding.h`, `batch_commit.h`, `control_ring.h`, `request_ingress.h`, `output_ring.h`, `sequence_resource.h`, `kv_page_allocator.h`, `gdn_reset.h`, `wall_clock.h`, `execution_bridge.h` |
-| 3. implementation detail | `src/phaseshift/runtime/gpu_mcu/detail/*.h`（`micro_fsm.hip` の内部構成。public include tree には置かない） |
-| 4. Qwen3.5 backend 固有の contract を含む | `gdn_reset.h`（GDN state reset）、`embedded_kernels.h`（Qwen3.5 kernel blob）。`micro_fsm.h` は Qwen3.5 の kernarg recipe と invocation struct を含む |
+| 3. implementation detail | `src/phaseshift/runtime/gpu_mcu/execution/detail/*.h`（`micro_fsm.hip` の内部構成。public include tree には置かない） |
+| 4. Qwen3.5 backend 固有の contract を含む | `micro_fsm.h`（Qwen3.5 の kernarg recipe と invocation struct）。`model_hooks/gdn_reset.h` は Qwen3.5 固有だが substrate の負債として隔離済み。`embedded_kernels.h` は Qwen3.5 runtime 側にある |
 | 5. test-only contract | **なし**。全 header が production か、それを include する public header から参照される |
 
 この結果、public include tree から private へ移動すべき header は無い。
@@ -402,7 +432,7 @@ request terminal は controller stop を伴わない。
 - Qwen3.5 の correctness kernel は `kernels/correctness/`（1 TU + `detail/*.inc`）に置く。
 - optimized kernel は implementation family ごとに 1 ファイル。
 - substrate 側で唯一 model semantics を持つ kernel（`gdn_reset.hip`）は
-  `src/phaseshift/runtime/gpu_mcu/` に置く。FSM が recipe として参照するためで、
+  `src/phaseshift/runtime/gpu_mcu/model_hooks/` に置く。FSM が recipe として参照するためで、
   Qwen3.5 kernels ツリーから外してはならない。
 
 ## tests の分類

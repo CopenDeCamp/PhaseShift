@@ -125,6 +125,47 @@ void check_no_server_deps(const fs::path& root) {
 
 }
 
+void check_gpu_mcu_layering(const fs::path& root) {
+    const fs::path inc = root / "include/phaseshift/runtime/gpu_mcu";
+    const fs::path src = root / "src/phaseshift/runtime/gpu_mcu";
+
+    const std::vector<const char*> infra_upper = {
+        "runtime/gpu_mcu/io/",
+        "runtime/gpu_mcu/scheduling/",
+        "runtime/gpu_mcu/binding/",
+        "runtime/gpu_mcu/execution/",
+        "runtime/gpu_mcu/commit/",
+        "runtime/gpu_mcu/model_hooks/",
+    };
+    scan_clean(inc / "infrastructure", infra_upper);
+    scan_clean(src / "infrastructure", infra_upper);
+
+    const std::vector<const char*> no_execution = {
+        "runtime/gpu_mcu/execution/",
+    };
+    scan_clean(inc / "scheduling", no_execution);
+    scan_clean(src / "scheduling", no_execution);
+}
+
+void check_gpu_mcu_model_hooks(const fs::path& root) {
+    const std::set<std::string> allowed = {"gdn_reset.h", "gdn_reset.hip"};
+    const std::vector<fs::path> dirs = {
+        root / "include/phaseshift/runtime/gpu_mcu/model_hooks",
+        root / "src/phaseshift/runtime/gpu_mcu/model_hooks",
+    };
+    for (const auto& dir : dirs) {
+        if (!fs::exists(dir)) continue;
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            const std::string name = entry.path().filename().string();
+            if (allowed.find(name) == allowed.end()) {
+                fail("model_hooks quarantine violation: " + name);
+            }
+        }
+        ++passed;
+    }
+}
+
 int main() {
     const fs::path root(PHASESHIFT_SOURCE_ROOT);
 
@@ -180,6 +221,9 @@ int main() {
                    {"models/qwen35/runtime", "Executor", "HostExecutionContext",
                     "ContinuousBatcher"});
     }
+
+    check_gpu_mcu_layering(root);
+    check_gpu_mcu_model_hooks(root);
 
     check_correctness_location(root);
     check_correctness_layout(root);
