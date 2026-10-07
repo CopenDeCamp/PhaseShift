@@ -1,12 +1,5 @@
 #pragma once
 
-// Transitional model-specific hook.
-//
-// This dependency is intentionally quarantined from the generic GPU-MCU
-// substrate. Do not add new model-specific operations here.
-// A later architecture refactor must move this responsibility into the
-// model backend or replace it with a generic invocation mechanism.
-
 #include <phaseshift/runtime/batch/device_batch_context.h>
 
 #include <cstdint>

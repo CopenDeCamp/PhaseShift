@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.h>
+#include <phaseshift/models/qwen35/kernels/optimized/gdn/reset.h>
 
 #include <hip/hip_runtime.h>
 

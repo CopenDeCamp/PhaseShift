@@ -187,7 +187,7 @@ phaseshift_add_hsaco(gpu_mcu_hsaco_gdn_recurrence
 set(PS_GPU_MCU_GDN_RECURRENCE_HSACO "${gpu_mcu_hsaco_gdn_recurrence_HSACO}")
 
 phaseshift_add_hsaco(gpu_mcu_hsaco_gdn_reset
-    src/phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.hip
-    "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.h"
+    src/phaseshift/models/qwen35/kernels/optimized/gdn/reset.hip
+    "${CMAKE_SOURCE_DIR}/include/phaseshift/models/qwen35/kernels/optimized/gdn/reset.h"
     "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/batch/device_batch_context.h")
 set(PS_GPU_MCU_GDN_RESET_HSACO "${gpu_mcu_hsaco_gdn_reset_HSACO}")

@@ -5,7 +5,7 @@
 #include <phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/device_completion.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h>
-#include <phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.h>
+#include <phaseshift/models/qwen35/kernels/optimized/gdn/reset.h>
 #include <phaseshift/models/qwen35/runtime/gpu_mcu/invocation_abi.h>
 #include <phaseshift/models/qwen35/runtime/gpu_mcu/kernarg_recipe.h>
 #include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
