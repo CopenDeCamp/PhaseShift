@@ -321,7 +321,12 @@ bool run_scenario(const Scenario& s) {
     opts.marker_workgroup = 64u;
     output_ptrs[0] = out_mcu;
     q35::McuCompiledPlan plan;
-    const ps::Status plan_status = q35::compile_mcu_plan(program, ctx, opts, plan);
+    const q35::McuStaticPlanCompileContext ctx_static =
+        q35::make_static_plan_compile_context(
+            ctx, ctx.actual_rows, ctx.actual_outputs,
+            ctx.staged_request_count,
+            ctx.actual_stochastic_outputs);
+    const ps::Status plan_status = q35::compile_mcu_plan(program,ctx_static, opts, plan);
     if (!plan_status.ok()) {
         std::printf("FAIL: %s plan: %s\n", s.name, plan_status.message().c_str());
         check(false, "mcu region plan compiled");

@@ -95,7 +95,12 @@ ps::Status compile_once(SamplingProgram& p, uint32_t stochastic_outputs,
     options.dispatch_end = 1u;
     options.marker_grid = 1u;
     options.marker_workgroup = 64u;
-    return q35::compile_mcu_plan(p.program, ctx, options, out);
+    const q35::McuStaticPlanCompileContext ctx_static =
+        q35::make_static_plan_compile_context(
+            ctx, ctx.actual_rows, ctx.actual_outputs,
+            ctx.staged_request_count,
+            ctx.actual_stochastic_outputs);
+    return q35::compile_mcu_plan(p.program,ctx_static, options, out);
 }
 
 }  // namespace

@@ -254,7 +254,12 @@ int main() {
         opts.dispatch_begin = 0u;
         opts.dispatch_end = 1u;
         q35::McuCompiledPlan plan{};
-        const ps::Status st = q35::compile_mcu_plan(program, ctx, opts, plan);
+        const q35::McuStaticPlanCompileContext ctx_static =
+            q35::make_static_plan_compile_context(
+                ctx, ctx.actual_rows, ctx.actual_outputs,
+                ctx.staged_request_count,
+                ctx.actual_stochastic_outputs);
+        const ps::Status st = q35::compile_mcu_plan(program,ctx_static, opts, plan);
         if (!st.ok()) std::printf("compile error: %s\n", st.message().c_str());
         check(st.ok(), "bf16 lm-head plan compiles");
         check(plan.bf16_variant_catalogs.size() == 1u,

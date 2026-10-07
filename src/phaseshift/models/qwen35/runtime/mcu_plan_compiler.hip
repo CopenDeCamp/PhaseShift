@@ -428,7 +428,7 @@ Status find_dispatch_range_for_graph_prefix(
 }
 
 static Status compile_mcu_plan_impl(const Program& program,
-                                    const HostExecutionContext& ctx,
+                                    const McuStaticPlanCompileContext& sc,
                                     const McuPlanCompileOptions& options,
                                     McuCompiledPlan& out) {
     out = McuCompiledPlan{};
@@ -438,6 +438,10 @@ static Status compile_mcu_plan_impl(const Program& program,
                                         __LINE__);
     if (options.dispatch_begin == options.dispatch_end)
         return Status::invalid_argument("empty dispatch range", __FILE__, __LINE__);
+
+    const McuStaticResolveView resolve_view =
+        make_static_resolve_view(sc, options.static_plan);
+    const HostExecutionContext& ctx = resolve_view.ctx;
 
     const uint16_t marker_variant =
         mark_variant(out, McuCompiledVariantKind::CompletionMarker,
@@ -504,7 +508,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             inv.scales = launch.scales;
             inv.token_ids = launch.token_ids;
             inv.output = launch.output;
-            inv.error_word = reinterpret_cast<uint64_t>(ctx.error_word);
+            inv.error_word = reinterpret_cast<uint64_t>(sc.error_word);
             inv.codes_row_stride_bytes = launch.codes_row_stride_bytes;
             inv.scale_row_stride_bytes = launch.scale_row_stride_bytes;
             inv.rows = launch.rows;
@@ -537,7 +541,7 @@ static Status compile_mcu_plan_impl(const Program& program,
         inv.table = launch.table;
         inv.token_ids = launch.token_ids;
         inv.output = launch.output;
-        inv.error_word = reinterpret_cast<uint64_t>(ctx.error_word);
+        inv.error_word = reinterpret_cast<uint64_t>(sc.error_word);
         inv.rows = launch.rows;
         inv.vocab_size = launch.vocab_size;
         inv.hidden_size = launch.hidden_size;
@@ -585,10 +589,10 @@ static Status compile_mcu_plan_impl(const Program& program,
         if (src.feature_count == 0u)
             return Status::unsupported("output gather feature count is zero",
                                        __FILE__, __LINE__);
-        if (ctx.device_output_rows == nullptr)
+        if (sc.device_output_rows == nullptr)
             return Status::unsupported("output gather requires output rows",
                                        __FILE__, __LINE__);
-        const uint32_t num_outputs = ctx.actual_outputs;
+        const uint32_t num_outputs = sc.output_capacity;
         if (num_outputs == 0u)
             return Status::unsupported("output gather output count is zero",
                                        __FILE__, __LINE__);
@@ -596,7 +600,7 @@ static Status compile_mcu_plan_impl(const Program& program,
         inv.input = reinterpret_cast<uint64_t>(src.ptr);
         inv.output = reinterpret_cast<uint64_t>(dst.ptr);
         inv.output_rows =
-            reinterpret_cast<uint64_t>(ctx.device_output_rows);
+            reinterpret_cast<uint64_t>(sc.device_output_rows);
         inv.input_row_stride = src.row_stride;
         inv.output_row_stride = dst.row_stride;
         inv.num_outputs = num_outputs;
@@ -646,17 +650,17 @@ static Status compile_mcu_plan_impl(const Program& program,
         }
     }
     if (range_touches_gdn_state) {
-        const ::ps::qwen35::GdnStatePoolDeviceView& gdn = ctx.model_state.gdn;
-        if (ctx.batch_context != nullptr && gdn.conv_base != nullptr &&
+        const ::ps::qwen35::GdnStatePoolDeviceView& gdn = sc.model_state.gdn;
+        if (sc.batch_context != nullptr && gdn.conv_base != nullptr &&
             gdn.recurrent_base != nullptr && gdn.conv_slot_stride != 0u &&
             gdn.recurrent_slot_stride != 0u &&
             gdn.conv_slot_stride <= 0xFFFFFFFFull &&
             gdn.recurrent_slot_stride <= 0xFFFFFFFFull &&
-            ctx.device_requests != nullptr) {
+            sc.device_requests != nullptr) {
             auto inv = mcu_plan_value<mcu::GpuMcuGdnResetInvocation>();
             inv.conv_base = reinterpret_cast<uint16_t*>(gdn.conv_base);
             inv.recurrent_base = reinterpret_cast<uint32_t*>(gdn.recurrent_base);
-            inv.context = ctx.batch_context;
+            inv.context = sc.batch_context;
             inv.conv_slot_stride = gdn.conv_slot_stride;
             inv.recurrent_slot_stride = gdn.recurrent_slot_stride;
             inv.conv_slot_count = static_cast<uint32_t>(gdn.conv_slot_stride);
@@ -1081,7 +1085,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::PAGED_ATTENTION: {
                 PhysicalPagedAttentionPlan plan{};
                 const auto resolved =
-                    ctx.static_plan_compile
+                    options.static_plan
                         ? resolve_paged_attention_physical_static_plan(
                               program, i, ctx, plan)
                         : resolve_paged_attention_physical(program, i, ctx,
@@ -1645,7 +1649,7 @@ static Status compile_mcu_plan_impl(const Program& program,
                 break;
             }
             case KernelId::SAMPLING: {
-                if (ctx.actual_stochastic_outputs != 0u)
+                if (sc.stochastic_output_capacity != 0u)
                     return Status::unsupported(
                         "stochastic sampling has no mcu entrypoint", __FILE__,
                         __LINE__);
@@ -1668,24 +1672,24 @@ static Status compile_mcu_plan_impl(const Program& program,
                     sampled.ptr == nullptr)
                     return Status::unsupported("sampling output value is invalid",
                                                __FILE__, __LINE__);
-                if (ctx.output_sampling_params == nullptr)
+                if (sc.output_sampling_params == nullptr)
                     return Status::unsupported(
                         "sampling requires output sampling params", __FILE__,
                         __LINE__);
-                const uint32_t outputs = ctx.actual_outputs;
+                const uint32_t outputs = sc.output_capacity;
                 if (outputs == 0u)
                     return Status::unsupported("sampling output count is zero",
                                                __FILE__, __LINE__);
                 auto inv = mcu_plan_value<mcu::McuArgmaxF32Invocation>();
                 inv.logits = reinterpret_cast<uint64_t>(logits.ptr);
                 inv.sampling =
-                    reinterpret_cast<uint64_t>(ctx.output_sampling_params);
+                    reinterpret_cast<uint64_t>(sc.output_sampling_params);
                 inv.sampled_tokens = reinterpret_cast<uint64_t>(sampled.ptr);
                 inv.outputs = outputs;
                 inv.vocab_size = logits.feature_count;
                 inv.logits_row_stride = logits.row_stride;
                 inv.output_rows =
-                    reinterpret_cast<uint64_t>(ctx.device_output_rows);
+                    reinterpret_cast<uint64_t>(sc.device_output_rows);
                 const uint32_t index =
                     static_cast<uint32_t>(out.argmax_f32.size());
                 out.argmax_f32.push_back(inv);
@@ -1707,13 +1711,13 @@ static Status compile_mcu_plan_impl(const Program& program,
                 if (b.input_count != 3u || b.output_count != 1u)
                     return Status::unsupported(
                         "verify accept io count is invalid", __FILE__, __LINE__);
-                if (ctx.batch_context == nullptr ||
-                    ctx.device_requests == nullptr ||
-                    ctx.device_output_rows == nullptr)
+                if (sc.batch_context == nullptr ||
+                    sc.device_requests == nullptr ||
+                    sc.device_output_rows == nullptr)
                     return Status::unsupported(
                         "verify accept requires a batch context", __FILE__,
                         __LINE__);
-                const uint32_t request_count = ctx.staged_request_count;
+                const uint32_t request_count = sc.request_capacity;
                 const uint32_t max_candidates = b.rotary_dim;
                 if (request_count == 0u || max_candidates == 0u)
                     return Status::unsupported(
@@ -1746,9 +1750,9 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.request_count = request_count;
                 inv.candidate_stride = max_candidates;
                 inv.max_candidates = max_candidates;
-                inv.requests = reinterpret_cast<uint64_t>(ctx.device_requests);
+                inv.requests = reinterpret_cast<uint64_t>(sc.device_requests);
                 inv.output_rows =
-                    reinterpret_cast<uint64_t>(ctx.device_output_rows);
+                    reinterpret_cast<uint64_t>(sc.device_output_rows);
                 const uint32_t index =
                     static_cast<uint32_t>(out.verify_accept.size());
                 out.verify_accept.push_back(inv);
@@ -1768,10 +1772,10 @@ static Status compile_mcu_plan_impl(const Program& program,
     }
     if (options.verify_committed_counts != nullptr &&
         options.verify_sampled_tokens != nullptr &&
-        options.verify_max_candidates != 0u && ctx.batch_context != nullptr &&
-        ctx.device_requests != nullptr) {
+        options.verify_max_candidates != 0u && sc.batch_context != nullptr &&
+        sc.device_requests != nullptr) {
         auto inv = mcu_plan_value<mcu::McuVerifyAcceptBatchInvocation>();
-        inv.context = reinterpret_cast<uint64_t>(ctx.batch_context);
+        inv.context = reinterpret_cast<uint64_t>(sc.batch_context);
         inv.sampled_tokens =
             reinterpret_cast<uint64_t>(options.verify_sampled_tokens);
         inv.committed_counts =
@@ -1794,27 +1798,27 @@ static Status compile_mcu_plan_impl(const Program& program,
     }
 
     if (options.verify_conv_history != nullptr &&
-        options.verify_recurrent_history != nullptr && ctx.batch_context != nullptr &&
-        ctx.model_state.gdn.conv_base != nullptr &&
-        ctx.model_state.gdn.recurrent_base != nullptr) {
+        options.verify_recurrent_history != nullptr && sc.batch_context != nullptr &&
+        sc.model_state.gdn.conv_base != nullptr &&
+        sc.model_state.gdn.recurrent_base != nullptr) {
         auto inv =
             mcu_plan_value<mcu::McuGdnSpecRestoreFromCountsInvocation>();
-        inv.context = reinterpret_cast<uint64_t>(ctx.batch_context);
+        inv.context = reinterpret_cast<uint64_t>(sc.batch_context);
         inv.committed_counts =
             reinterpret_cast<uint64_t>(options.verify_committed_counts);
         inv.conv_history = reinterpret_cast<uint64_t>(options.verify_conv_history);
         inv.recurrent_history =
             reinterpret_cast<uint64_t>(options.verify_recurrent_history);
-        inv.conv_pool = reinterpret_cast<uint64_t>(ctx.model_state.gdn.conv_base);
+        inv.conv_pool = reinterpret_cast<uint64_t>(sc.model_state.gdn.conv_base);
         inv.recurrent_pool =
-            reinterpret_cast<uint64_t>(ctx.model_state.gdn.recurrent_base);
-        inv.conv_slot_stride = ctx.model_state.gdn.conv_slot_stride;
-        inv.recurrent_slot_stride = ctx.model_state.gdn.recurrent_slot_stride;
+            reinterpret_cast<uint64_t>(sc.model_state.gdn.recurrent_base);
+        inv.conv_slot_stride = sc.model_state.gdn.conv_slot_stride;
+        inv.recurrent_slot_stride = sc.model_state.gdn.recurrent_slot_stride;
         inv.conv_history_stride = options.verify_conv_history_stride;
         inv.recurrent_history_stride = options.verify_recurrent_history_stride;
-        inv.conv_elems = static_cast<uint32_t>(ctx.model_state.gdn.conv_slot_stride);
+        inv.conv_elems = static_cast<uint32_t>(sc.model_state.gdn.conv_slot_stride);
         inv.recurrent_elems =
-            static_cast<uint32_t>(ctx.model_state.gdn.recurrent_slot_stride);
+            static_cast<uint32_t>(sc.model_state.gdn.recurrent_slot_stride);
         inv.max_candidates = options.verify_max_candidates;
         const uint32_t index = static_cast<uint32_t>(
             out.gdn_spec_restore_from_counts.size());
@@ -1866,10 +1870,12 @@ static Status compile_mcu_plan_impl(const Program& program,
     return Status::make_ok();
 }
 
-Status compile_mcu_plan(const Program& program, const HostExecutionContext& ctx,
+Status compile_mcu_plan(const Program& program,
+                        const McuStaticPlanCompileContext& static_ctx,
                         const McuPlanCompileOptions& options,
                         McuCompiledPlan& out) {
-    const Status status = compile_mcu_plan_impl(program, ctx, options, out);
+    const Status status =
+        compile_mcu_plan_impl(program, static_ctx, options, out);
     const char* plan_dump = std::getenv("PHASESHIFT_MCU_PLAN_DUMP");
     if (plan_dump != nullptr && plan_dump[0] != '\0') {
         std::fprintf(stderr, "MCU_PLAN_DUMP status=%s variants=%zu nodes=%zu\n",

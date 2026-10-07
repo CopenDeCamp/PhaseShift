@@ -300,7 +300,6 @@ int main() {
     q35::HostExecutionContext ctx_mcu = ctx_host;
     ctx_mcu.workspace = static_cast<uint8_t*>(ws_mcu);
     ctx_mcu.external_outputs = ext_out_mcu;
-    ctx_mcu.static_plan_compile = true;
 
     hipStream_t stream = nullptr;
     if (hipStreamCreate(&stream) != hipSuccess) {
@@ -326,8 +325,14 @@ int main() {
     opts.dispatch_end = 3u;
     opts.marker_grid = 1u;
     opts.marker_workgroup = 64u;
+    opts.static_plan = true;
     q35::McuCompiledPlan plan;
-    const ps::Status plan_status = q35::compile_mcu_plan(program, ctx_mcu, opts, plan);
+    const q35::McuStaticPlanCompileContext ctx_mcu_static =
+        q35::make_static_plan_compile_context(
+            ctx_mcu, ctx_mcu.actual_rows, ctx_mcu.actual_outputs,
+            ctx_mcu.staged_request_count,
+            ctx_mcu.actual_stochastic_outputs);
+    const ps::Status plan_status = q35::compile_mcu_plan(program,ctx_mcu_static, opts, plan);
     if (!plan_status.ok()) {
         std::printf("FAIL: plan: %s\n", plan_status.message().c_str());
         return 1;

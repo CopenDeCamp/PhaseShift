@@ -5,14 +5,13 @@
 #include <phaseshift/models/qwen35/runtime/gpu_mcu/kernarg_recipe.h>
 #include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <phaseshift/models/qwen35/kernels/optimized/gdn/reset.h>
+#include <phaseshift/models/qwen35/runtime/mcu_plan_compile_context.h>
 #include <phaseshift/runtime/program/program.h>
 
 #include <cstdint>
 #include <vector>
 
 namespace ps::qwen35::runtime {
-
-struct HostExecutionContext;
 
 enum class McuCompiledVariantKind : uint8_t {
     CompletionMarker = 0,
@@ -239,10 +238,11 @@ struct McuPlanCompileOptions {
     const void* verify_recurrent_history = nullptr;
     uint64_t verify_conv_history_stride = 0;
     uint64_t verify_recurrent_history_stride = 0;
+    bool static_plan = false;
 };
 
 Status compile_mcu_plan(const ::ps::runtime::Program& program,
-                        const HostExecutionContext& ctx,
+                        const McuStaticPlanCompileContext& static_ctx,
                         const McuPlanCompileOptions& options,
                         McuCompiledPlan& out);
 

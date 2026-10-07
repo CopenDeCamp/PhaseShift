@@ -629,6 +629,7 @@ Status preflight_mcu_plan(
     compile_options.verify_conv_history_stride = gdn_history.conv_row_stride;
     compile_options.verify_recurrent_history_stride =
         gdn_history.recurrent_row_stride;
+    compile_options.static_plan = true;
     const uint32_t row_capacity =
         ::ps::runtime::row_bucket_limit(program.row_bucket);
     const uint32_t request_capacity =
@@ -639,20 +640,11 @@ Status preflight_mcu_plan(
         executor.sequence_pool != nullptr
             ? executor.sequence_pool->max_sequences()
             : request_capacity;
-    std::vector<::ps::runtime::DeviceRequestDescriptor> plan_requests(
-        request_capacity);
-    for (uint32_t i = 0u; i < request_capacity; ++i) {
-        plan_requests[i].request_handle.slot =
-            slot_capacity != 0u ? i % slot_capacity : 0u;
-        plan_requests[i].row_count = i == 0u ? row_capacity : 1u;
-    }
-    runtime::HostExecutionContext plan_ctx = ctx;
-    plan_ctx.actual_rows = row_capacity;
-    plan_ctx.actual_outputs = executor.config.max_scheduled_output_rows;
-    plan_ctx.staged_requests = plan_requests.data();
-    plan_ctx.staged_request_count = request_capacity;
-
-    plan_ctx.static_plan_compile = true;
+    runtime::McuStaticPlanCompileContext plan_ctx =
+        runtime::make_static_plan_compile_context(
+            ctx, row_capacity, executor.config.max_scheduled_output_rows,
+            request_capacity, ctx.actual_stochastic_outputs);
+    plan_ctx.slot_capacity = slot_capacity;
 
     const Result<runtime::McuStaticAttentionPlanClass> attn_class =
         runtime::classify_static_attention_plan(program, ctx, row_capacity);

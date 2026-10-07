@@ -358,8 +358,13 @@ int main() {
         probe_options.marker_grid = 1u;
         probe_options.marker_workgroup = 64u;
         ps::qwen35::runtime::McuCompiledPlan probe_plan;
+        const ps::qwen35::runtime::McuStaticPlanCompileContext ctx_static =
+            ps::qwen35::runtime::make_static_plan_compile_context(
+                ctx, ctx.actual_rows, ctx.actual_outputs,
+                ctx.staged_request_count,
+                ctx.actual_stochastic_outputs);
         const ps::Status status = ps::qwen35::runtime::compile_mcu_plan(
-            program, ctx, probe_options, probe_plan);
+            program,ctx_static, probe_options, probe_plan);
         const char* verdict = nullptr;
         if (status.ok()) {
             verdict = "yes";
@@ -578,8 +583,13 @@ int main() {
         one_opts.marker_grid = 1u;
         one_opts.marker_workgroup = 64u;
         ps::qwen35::runtime::McuCompiledPlan one_plan;
+        const ps::qwen35::runtime::McuStaticPlanCompileContext ctx_static2 =
+            ps::qwen35::runtime::make_static_plan_compile_context(
+                ctx, ctx.actual_rows, ctx.actual_outputs,
+                ctx.staged_request_count,
+                ctx.actual_stochastic_outputs);
         const ps::Status one_status = ps::qwen35::runtime::compile_mcu_plan(
-            program, ctx, one_opts, one_plan);
+            program,ctx_static2, one_opts, one_plan);
         if (!one_status.ok()) {
             std::printf("FAIL: L0 plan: %s\n", one_status.message().c_str());
             ++g_failed;

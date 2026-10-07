@@ -440,8 +440,13 @@ int main() {
         probe_options.marker_grid = 1u;
         probe_options.marker_workgroup = 64u;
         ps::qwen35::runtime::McuCompiledPlan probe_plan;
+        const ps::qwen35::runtime::McuStaticPlanCompileContext ctx_static =
+            ps::qwen35::runtime::make_static_plan_compile_context(
+                ctx, ctx.actual_rows, ctx.actual_outputs,
+                ctx.staged_request_count,
+                ctx.actual_stochastic_outputs);
         const ps::Status status = ps::qwen35::runtime::compile_mcu_plan(
-            program, ctx, probe_options, probe_plan);
+            program,ctx_static, probe_options, probe_plan);
         const char* verdict = nullptr;
         if (status.ok()) {
             verdict = "yes";
@@ -666,8 +671,13 @@ int main() {
             probe.marker_grid = 1u;
             probe.marker_workgroup = 64u;
             ps::qwen35::runtime::McuCompiledPlan p;
+            const ps::qwen35::runtime::McuStaticPlanCompileContext ctx_static2 =
+                ps::qwen35::runtime::make_static_plan_compile_context(
+                    ctx, ctx.actual_rows, ctx.actual_outputs,
+                    ctx.staged_request_count,
+                    ctx.actual_stochastic_outputs);
             const ps::Status st =
-                ps::qwen35::runtime::compile_mcu_plan(program, ctx, probe, p);
+                ps::qwen35::runtime::compile_mcu_plan(program,ctx_static2, probe, p);
             if (st.ok()) {
                 ++ok_count;
             } else if (st.code() == ps::Status::Code::unsupported) {
@@ -692,8 +702,13 @@ int main() {
         opts.marker_grid = 1u;
         opts.marker_workgroup = 64u;
         ps::qwen35::runtime::McuCompiledPlan plan;
+        const ps::qwen35::runtime::McuStaticPlanCompileContext ctx_static3 =
+            ps::qwen35::runtime::make_static_plan_compile_context(
+                ctx, ctx.actual_rows, ctx.actual_outputs,
+                ctx.staged_request_count,
+                ctx.actual_stochastic_outputs);
         const ps::Status st =
-            ps::qwen35::runtime::compile_mcu_plan(program, ctx, opts, plan);
+            ps::qwen35::runtime::compile_mcu_plan(program,ctx_static3, opts, plan);
         if (st.ok()) {
             const size_t inv_total = plan.rms.size() +
                                      plan.quant_e4m3.size() +
@@ -740,8 +755,13 @@ int main() {
             bo.marker_grid = 1u;
             bo.marker_workgroup = 64u;
             ps::qwen35::runtime::McuCompiledPlan bp;
+            const ps::qwen35::runtime::McuStaticPlanCompileContext ctx_static4 =
+                ps::qwen35::runtime::make_static_plan_compile_context(
+                    ctx, ctx.actual_rows, ctx.actual_outputs,
+                    ctx.staged_request_count,
+                    ctx.actual_stochastic_outputs);
             const ps::Status bps =
-                ps::qwen35::runtime::compile_mcu_plan(program, ctx, bo, bp);
+                ps::qwen35::runtime::compile_mcu_plan(program,ctx_static4, bo, bp);
             std::printf(
                 "body compile: logical=%u physical=%u nodes=%zu variants=%zu "
                 "kernarg_slots=%u invocations=%zu\n",
