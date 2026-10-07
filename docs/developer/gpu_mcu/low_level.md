@@ -351,6 +351,9 @@ contract を文書で守るのではなく、compile 前に落とす。
 - invocation struct は production args と同じレイアウト・サイズ（static_assert 対応）。
   `kernarg_segment_size` は必ず Code Object metadata の値を使い、`sizeof(args)` を
   allocation size に使わない。`build_aql_hidden_args` と `build_aql_launch_metadata` は維持する。
+- recipe ID は Qwen35 backend（`models/qwen35/runtime/gpu_mcu/kernarg_recipe.h`）の識別子である。
+  executor は recipe を解釈せず、backend が組み立てた `McuKernargSourceDesc` の
+  `source` と `explicit_args_bytes` を読むだけである。
 
 ## embedding prefix
 
@@ -367,8 +370,10 @@ contract を文書で守るのではなく、compile 前に落とす。
 - selector / weight encoding / shape / pointer 解決は Host resolver
   （`resolve_embedding_physical`）と共有する。Host と MCU で selector 条件を別実装しない。
 - invocation の `token_ids` は compile 時に resolve した安定 device pointer を既定値とし、
-  kernarg 生成時に `state->batch_input != 0` なら device batch context の token buffer で
-  上書きする。HostStream と external persistent の両経路に対応する。
+  external persistent 経路では `McuInvocationPatchSource::BatchTokenIds` の
+  pointer 幅 patch で device batch context の token buffer へ上書きする。
+  patch は `null_guard` を立てており、null pointer では既定値を保持する。
+  HostStream 経路では patch を通らないため既定値がそのまま使われる。
 - `rows` / `grid.x` は **actual launch rows** を使い、bucket max へ丸めない。
   stable kernel 側に `row >= args.rows` guard を残す。
 - `EmbeddingStorage::Psq8` も MCU で compile でき、`kMcuKernargRecipeEmbeddingPsq8`
@@ -522,7 +527,10 @@ inference progression の所有者は §execution model を定める。
   `McuInvocationPatch` の overlay で device 側の dispatch 直前に書く。Host は再 compile /
   再 upload しない。
 - `McuInvocationPatchSource` は `ActualRows` / `NumRequests` / `NumOutputs` /
-  `AttentionRegionRows` / `VerifyRequests` / `Bf16ExactRowsVariant`。`param` は source 固有で、
+  `AttentionRegionRows` / `VerifyRequests` / `Bf16ExactRowsVariant` /
+  `ActualRowsTimesParam` / `NumOutputsTimesParam` / `BatchTokenIds`。
+  `width == 8` の patch は 64 bit を書き、`null_guard` は解決値が 0 のときに
+  store を省略する。既定の `width == 0` は 32 bit store である。`param` は source 固有で、
   `AttentionRegionRows` は低 16 bit = region の `row_begin`、高 16 bit = region の
   compile 時 `rows` を表し、batch context の request 列のうち region の row 範囲と重なる
   行数を返す。`VerifyRequests` は `context->num_verify_requests != 0` を 1 / 0 で返し、

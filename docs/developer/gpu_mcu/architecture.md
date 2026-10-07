@@ -147,11 +147,8 @@ GPU-MCU
 ├── Execution
 │   Persistent MCU / FSM
 │
-├── Commit
-│   lifecycle / token / terminal
-│
-└── Model Hooks
-    temporary architectural debt
+└── Commit
+    lifecycle / token / terminal
 ```
 
 | ディレクトリ | 責務 | header |
@@ -159,41 +156,40 @@ GPU-MCU
 | `infrastructure/` | AQL queue / packet publication / doorbell / kernarg region / CU-WGP partition / completion primitive / worker HSACO / wall clock。LLM・request・batch・token を知らない | `aql.h`, `retained_packet.h`, `completion.h`, `device_completion.h`, `cu_partition.h`, `wall_clock.h`, `worker_image.h`, `fsm_worker.h` |
 | `io/` | Host ⇄ Persistent MCU の通信境界。「次に何を実行するか」は判断しない | `control_ring.h`, `request_ingress.h`, `output_ring.h` |
 | `scheduling/` | 何を実行するか（what should run next）。AQL packet は発行しない | `slot_table.h`, `batch_planner.h`, `kv_page_allocator.h`, `sequence_resource.h` |
-| `binding/` | logical work を physical execution へ変換する（runtime pointer・actual rows・shape・invocation index・kernarg source） | `slot_binding.h`, `batch_binding.h`, `plan_binder.h`, `plan_binding_contract.h` |
-| `execution/` | GPU execution progression の owner。`src/` 側の `execution/detail/` は micro FSM の内部構成 | `persistent_mcu.h`, `micro_fsm.h`, `execution_bridge.h`, `fsm_contract.h`, `invocation_abi.h`, `kernarg_recipe.h` |
+| `binding/` | logical work を physical execution へ変換する（runtime pointer・actual rows・shape・invocation index・kernarg source） | `slot_binding.h`, `batch_binding.h`, `plan_binder.h`, `plan_binding_contract.h`, `kernarg_source_contract.h` |
+| `execution/` | GPU execution progression の owner。`src/` 側の `execution/detail/` は micro FSM の内部構成 | `persistent_mcu.h`, `micro_fsm.h`, `execution_bridge.h`, `fsm_contract.h` |
 | `commit/` | kernel 実行完了後の状態更新（token commit・sequence advance・terminal decision・slot lifecycle・output publication） | `stop_conditions.h`, `slot_runtime.h`, `batch_commit.h` |
-| `model_hooks/` | substrate に残るモデル固有処理の隔離先。**DO NOT ADD NEW MODEL HOOKS**。extension point ではなく既知の負債の隔離先であり、新規ファイル追加は `test_architecture_boundaries` が失敗させる | `gdn_reset.h` |
 
 #### dependency matrix
 
 依存は下位から上位へ。実際の責務に対して**禁止する依存**を明記するのが目的であり、
 完全な layered architecture に適合させることではない。
 
-| from \\ to | infrastructure | io | scheduling | binding | execution | commit | model_hooks |
-|---|---|---|---|---|---|---|---|
-| `infrastructure/` | 許容 | 禁止 | 禁止 | 禁止 | 禁止 | 禁止 | 禁止 |
-| `io/` | 現状なし | 許容 | 許容 | 許容 | **禁止** | 現状なし | 現状なし |
-| `scheduling/` | 現状なし | 現状なし | 許容 | 現状なし | **禁止** | 現状なし | 現状なし |
-| `binding/` | 現状なし | 現状なし | 許容 | 許容 | **禁止** | 現状なし | 現状なし |
-| `commit/` | 現状なし | 許容 | 許容 | 許容 | 現状なし | 許容 | 現状なし |
-| `execution/` | 許容 | 許容 | 許容 | 許容 | 許容 | 許容 | 許容 |
-| `model_hooks/` | 現状なし | 現状なし | 現状なし | 現状なし | 現状なし | 現状なし | 許容 |
+| from \\ to | infrastructure | io | scheduling | binding | execution | commit |
+|---|---|---|---|---|---|---|
+| `infrastructure/` | 許容 | 禁止 | 禁止 | 禁止 | 禁止 | 禁止 |
+| `io/` | 現状なし | 許容 | 許容 | 許容 | **禁止** | 現状なし |
+| `scheduling/` | 現状なし | 現状なし | 許容 | 現状なし | **禁止** | 現状なし |
+| `binding/` | 現状なし | 現状なし | 許容 | 許容 | **禁止** | 現状なし |
+| `commit/` | 現状なし | 許容 | 許容 | 許容 | 現状なし | 許容 |
+| `execution/` | 許容 | 許容 | 許容 | 許容 | 許容 | 許容 |
 
 - `execution/` はループの owner であり、上位すべてを知ってよい。
-- `model_hooks/` は transitional な隔離先である。
 - 「現状なし」は将来禁止を保証しないが、追加時はこの表を更新する。
 
-Qwen35 参照は `infrastructure` `io` `scheduling` `binding` `commit` で禁止する。
-これは `include/phaseshift/runtime/**` の再帰走査で担保しており、
-`model_hooks/` を含む全ディレクトリに効く。
+Qwen35 参照は `runtime/` 全ディレクトリで禁止する。
+これは `include/phaseshift/runtime/**` と `src/phaseshift/runtime/**` の
+再帰走査で担保している。
 
 `test_architecture_boundaries` が検査する禁止依存:
 
-- `infrastructure/` → 上位 6 ディレクトリ
+- `runtime/**` → `qwen35` / `phaseshift/models/`
+- `runtime/gpu_mcu/**` → model invocation type / kernarg recipe id
+- `runtime/gpu_mcu/**` → `model_hooks/` の再作成
+- `infrastructure/` → 上位 5 ディレクトリ
 - `scheduling/` → `execution/`
 - `binding/` → `execution/`
 - `io/` → `execution/`
-- `model_hooks/` に allowlist (`gdn_reset.h` / `gdn_reset.hip`) 外のファイル追加
 
 `binding/` → `execution/` はかつて存在した。
 `plan_binder.h` が static plan と runtime binding の間の契約を
@@ -206,31 +202,34 @@ Qwen35 参照は `infrastructure` `io` `scheduling` `binding` `commit` で禁止
 
 | header | 内容 | model 識別子 |
 |---|---|---|
-| `micro_fsm.h` | `GpuMcuFsmState` / `GpuMcuFsmRunContext` / `GpuMcuFsmConfig` / `GpuMcuFsm` と FSM public entry point | 容量定数にのみ |
+| `micro_fsm.h` | `GpuMcuFsmState` / `GpuMcuFsmRunContext` / `GpuMcuFsmConfig` / `GpuMcuFsm` と FSM public entry point | **なし** |
 | `fsm_contract.h` | `McuSupervisorState` / `McuFaultCode` / `McuDoorbellMode` / `McuLogEvent` / `McuLogRecord` / `McuDispatchRecord` / `McuPlanNode` / `McuKernelVariantDesc` / `McuDispatchTiming` と node・record・log の flag | **なし** |
-| `invocation_abi.h` | `Mcu*Invocation` 24 構造体とその `static_assert` | 多数 |
-| `kernarg_recipe.h` | `kMcuKernargRecipe*` の番号表（`None = 0` … `Count = 29`） | 多数 |
 | `binding/plan_binding_contract.h` | `McuDynamicNodeBinding` / `McuInvocationPatchSource` / `McuInvocationPatch` | なし |
+| `binding/kernarg_source_contract.h` | `McuKernargSourceDesc` とその flag | なし |
 
-recipe ID と `static_assert` は ABI であり、値・型・member 順・padding を変えてはならない。
+`McuPlanNode::kernarg_recipe` と `McuKernelVariantDesc::kernarg_recipe` は
+layout を保つための field であり、executor は読まない。
+recipe ID と `Mcu*Invocation` の `static_assert` は Qwen35 backend の ABI で、
+値・型・member 順・padding を変えてはならない。
 
 #### model-specific 識別子の所在
 
-`Gdn` `Qwen` `RmsNorm` `Psq4` `Attention` `Embedding` `Rope` `KvAppend` `Argmax` を含む件数:
+`runtime/gpu_mcu/**` に model invocation type（`Mcu*Invocation`）、
+kernarg recipe id（`kMcuKernargRecipe*`）、`phaseshift/models/` 参照は存在しない。
+`test_architecture_boundaries` が再帰走査して保証する。
 
-| location | 件数 |
+model ABI の所在は次のとおりである。
+
+| 内容 | 所在 |
 |---|---|
-| `execution/invocation_abi.h` | 208 |
-| `src/execution/detail/micro_fsm_kernarg.h` | 111 |
-| `execution/micro_fsm.h` | 45（容量定数） |
-| `execution/kernarg_recipe.h` | 18 |
-| `src/execution/detail/micro_fsm_host.h` | 18 |
-| `model_hooks/gdn_reset.*` | 5 |
-| `execution/fsm_contract.h` | **0** |
+| `Mcu*Invocation` 構造体と `static_assert` | `include/phaseshift/models/qwen35/runtime/gpu_mcu/invocation_abi.h` |
+| `kMcuKernargRecipe*` 番号表 | `include/phaseshift/models/qwen35/runtime/gpu_mcu/kernarg_recipe.h` |
+| GDN reset kernel とその kernarg | `include/phaseshift/models/qwen35/kernels/optimized/gdn/reset.h` / `src/.../gdn/reset.hip` |
 
-`invocation_abi.h` と `kernarg_recipe.h` は `runtime/gpu_mcu` 配下に置いたままとする。
-generic FSM 実装が kernarg recipe を直接解釈しているため、
-ここで `models/qwen35/` へ移すと `execution → models/qwen35` という、より悪い依存を作る。
+`runtime/gpu_mcu` 側に残るのは `McuPlanNode::kernarg_recipe` という
+uint16_t の field と、`McuKernelVariantDesc::kernarg_recipe` のみである。
+executor はこの field を読まず、backend が recipe から
+`McuKernargSourceDesc` を組み立てる。
 
 #### コンポーネントの所属分類
 
@@ -264,10 +263,11 @@ Qwen35 固有の識別子を1件も含まないことを確認済みで、
 |---|---|
 | GPU-MCU Core | `infrastructure/`、`execution/micro_fsm.h`・`fsm_contract.h`、`io/control_ring.h`、`binding/` |
 | Inference Runtime | `scheduling/`、`commit/`、`io/request_ingress.h`・`output_ring.h` |
-| Qwen35 Backend | `model_hooks/`、Qwen35 runtime 全体 |
-| transitional | `execution/invocation_abi.h`、`execution/kernarg_recipe.h`（generic FSM が recipe を直接解釈しているため runtime/gpu_mcu に残す） |
+| Qwen35 Backend | `models/qwen35/runtime/gpu_mcu/invocation_abi.h`、`models/qwen35/runtime/gpu_mcu/kernarg_recipe.h`、`models/qwen35/kernels/optimized/gdn/reset.*`、Qwen35 runtime 全体 |
 
-移動は本フェーズでは行わない。まず分類し、architecture decision を経てから動かす。
+`invocation_abi.h` / `kernarg_recipe.h` / `gdn_reset.*` は generic executor 化に合わせて
+Qwen35 側へ移した。
+`scheduling/` と `commit/` は Inference Runtime に分類したまま物理移動していない。
 
 ### Qwen35 GPU-MCU backend
 
@@ -347,6 +347,16 @@ phaseshift_qwen35_runtime     Qwen3.5 runtime
   `gpu_mcu_fsm_kernel` → `mcu_control_loop` → `mcu_run_once` は維持するが、
   production は persistent loop 経路を使う。
 - shutdown 順序は stop request → wait stopped → stream sync。destructor は最終 fallback。
+- **stop 確認なしの resource release は禁止** である。`wait_stopped()` が失敗したら
+  stop をもう一度通知して再試行し、それでも停止しなければ
+  `GpuMcuPersistentMcu::shutdown()` / `GpuMcuFsm::shutdown()` /
+  `McuDecodeRuntime::shutdown()` は host state・invocation table・kernarg source table を
+  解放せず `invalid_state` を返す。device loop が生存しているのにその足場を抜くと、
+  wave が解放済みメモリへアクセスして GPU を wedge させるためである。
+- 停止位置の観測は `GpuMcuPersistentState::stage_trace`
+  （`infrastructure/stage_trace.h`）を使う。device 側が `stage` / `seq` と、最後に触った
+  patch の `index` / `source` / `width` / `target` を書き、`dump_state()` が
+  `[mcu-persistent] stage=<name>(<id>) seq=... patch=...` として出力する。
 - 同期 API の制約と実測は [low_level.md](low_level.md) の `persistent MCU lifecycle` を参照。
 
 ### persistent controller の目標境界
@@ -374,8 +384,8 @@ publish completion/event
 - attention semantics
 - tokenizer semantics
 
-現状は `execution/invocation_abi.h` と `execution/kernarg_recipe.h` が
-kernel field の意味を substrate 内に持つ。これが達成を妨げている。
+`invocation_abi.h` と `kernarg_recipe.h` は substrate 外にあり、
+executor は recipe を解釈しないため、この境界は達成している。
 
 ## AQL queue の役割
 
@@ -438,10 +448,54 @@ Program (lower_to_primitives の出力)
   （`gpu_mcu_bind_execution_plan()` の契約）。
 - plan node は `McuPlanNode`（variant_id / next / kernarg_recipe / completion_slot 等）。
   interpreter は `variant_id` のみ解決し、`kernel_object` を持たない。
+  `kernarg_recipe` と `invocation_index` は backend が
+  `McuKernargSourceDesc` を組み立てるための入力であり、executor は読まない。
 - verify acceptance は runtime transaction であり Program graph には入れない。
   `McuCompiledPlan::epilogue` として runtime が node を積む。
 - plan を 1 つも compile できなければ compile の `Status` をそのまま返す。
   Host 経路へは戻らない。
+
+## generic kernarg source execution model
+
+GPU-MCU executor は kernel の意味を知らない。
+kernarg の意味を定義するのは Qwen35 backend であり、executor は bytes を materialize するだけである。
+
+```text
+Qwen35 plan compiler
+  -> typed invocation（`Mcu*Invocation`）を `McuCompiledPlan` に積む
+Qwen35 decode runtime（`McuDecodeRuntime::prepare_plan()`）
+  -> typed invocation table を device memory へ upload
+  -> recipe / invocation index から `McuKernargSourceDesc` を組み立てて upload
+Generic GPU-MCU
+  -> source address と explicit byte size だけを読む
+  -> explicit args を kernarg slot へ byte copy
+  -> hidden args を適用
+  -> AQL launch metadata を構築
+  -> dispatch
+```
+
+`McuKernargSourceDesc`（`binding/kernarg_source_contract.h`）は
+`source` / `explicit_args_bytes` / `flags` の 3 field のみを持ち、
+kernel 固有の field を持たない。
+
+| flag | 意味 |
+|---|---|
+| `kMcuKernargSourcePrepared` | `source` が完成済みの explicit kernarg bytes を指す |
+| `kMcuKernargSourceSupervisorProbe` | MCU 自身の supervisor probe 用。`source` は null |
+
+- descriptor index は node index である。`kernarg_sources[node_index]` がその node の source になる。
+- `source` は immutable template ではない。`gpu_mcu_bind_execution_plan()` が invocation table の
+  row-global field を patch した後の、その dispatch 時点で完成済みの explicit kernarg を指す。
+- dynamic patch は従来どおり `McuInvocationPatch` で行う。patch は invocation table を書き換え、
+  executor はその後を copy するだけである。pointer 幅の patch は
+  `McuInvocationPatch::width == 8` で表し、`null_guard` で null pointer の上書きを避ける。
+- hidden args（`mcu_apply_hidden_args()`）と AQL launch metadata（`build_aql_launch_metadata()`）は
+  AMD kernel launch ABI に属するため executor が持つ。
+- recipe → invocation table の対応は backend 側にある。
+  production では `McuDecodeRuntime::prepare_plan()`、
+  test では `tests/unit/gpu_mcu/gpu_mcu_fsm_test_util.h` が持つ。
+- supervisor probe は GPU-MCU 内部 kernel であるため prepared source に統合せず、
+  `kMcuKernargSourceSupervisorProbe` として executor 内部で組み立てる。
 
 ## kernel registry と embedded HSACO
 
@@ -535,9 +589,9 @@ header は責務ディレクトリ配下に置く。移動の可否は「どの 
 | 分類 | header |
 |---|---|
 | 1. 外部 target が直接使う正式 contract | `aql.h`, `cu_partition.h`, `worker_image.h`, `fsm_worker.h`, `persistent_mcu.h`, `micro_fsm.h`, `completion.h`, `device_completion.h`, `retained_packet.h` |
-| 2. substrate 内部 contract（他 header からのみ include） | `slot_table.h`, `slot_binding.h`, `slot_runtime.h`, `batch_planner.h`, `batch_binding.h`, `batch_commit.h`, `control_ring.h`, `request_ingress.h`, `output_ring.h`, `sequence_resource.h`, `kv_page_allocator.h`, `gdn_reset.h`, `wall_clock.h`, `execution_bridge.h`, `plan_binding_contract.h`, `fsm_contract.h`, `invocation_abi.h`, `kernarg_recipe.h` |
+| 2. substrate 内部 contract（他 header からのみ include） | `slot_table.h`, `slot_binding.h`, `slot_runtime.h`, `batch_planner.h`, `batch_binding.h`, `batch_commit.h`, `control_ring.h`, `request_ingress.h`, `output_ring.h`, `sequence_resource.h`, `kv_page_allocator.h`, `wall_clock.h`, `execution_bridge.h`, `plan_binding_contract.h`, `kernarg_source_contract.h`, `fsm_contract.h` |
 | 3. implementation detail | `src/phaseshift/runtime/gpu_mcu/execution/detail/*.h`（`micro_fsm.hip` の内部構成。public include tree には置かない） |
-| 4. Qwen3.5 backend 固有の contract を含む | `execution/invocation_abi.h` と `execution/kernarg_recipe.h`（kernel ABI と recipe 番号表）。`model_hooks/gdn_reset.h` は Qwen3.5 固有だが substrate の負債として隔離済み。`embedded_kernels.h` は Qwen3.5 runtime 側にある。`micro_fsm.h` と `fsm_contract.h` は該当なし |
+| 4. Qwen3.5 backend 固有の contract を含む | **public include tree には無い**。`models/qwen35/runtime/gpu_mcu/invocation_abi.h`、`models/qwen35/runtime/gpu_mcu/kernarg_recipe.h`、`models/qwen35/kernels/optimized/gdn/reset.h` が該当し、いずれも `include/phaseshift/models/qwen35/` 配下にある。`micro_fsm.h` と `fsm_contract.h` は該当なし |
 | 5. test-only contract | **なし**。全 header が production か、それを include する public header から参照される |
 
 この結果、public include tree から private へ移動すべき header は無い。
@@ -549,9 +603,8 @@ header は責務ディレクトリ配下に置く。移動の可否は「どの 
 
 - Qwen3.5 の correctness kernel は `kernels/correctness/`（1 TU + `detail/*.inc`）に置く。
 - optimized kernel は implementation family ごとに 1 ファイル。
-- substrate 側で唯一 model semantics を持つ kernel（`gdn_reset.hip`）は
-  `src/phaseshift/runtime/gpu_mcu/model_hooks/` に置く。FSM が recipe として参照するためで、
-  Qwen3.5 kernels ツリーから外してはならない。
+- `runtime/gpu_mcu` に kernel を置かない。GDN reset を含む全 kernel は
+  `src/phaseshift/models/qwen35/kernels/` 配下にある。
 
 ## tests の分類
 
