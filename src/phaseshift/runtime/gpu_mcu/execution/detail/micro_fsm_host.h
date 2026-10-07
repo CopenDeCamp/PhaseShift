@@ -98,6 +98,33 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
         config.retained == nullptr || config.completions == nullptr) {
         return Status::invalid_argument("null fsm table", __FILE__, __LINE__);
     }
+    if (config.kernarg_source_count > kMcuMaxNodes) {
+        return Status::invalid_argument("invalid kernarg source count", __FILE__,
+                                        __LINE__);
+    }
+    if (config.kernarg_source_count != 0u &&
+        config.kernarg_sources == nullptr) {
+        return Status::invalid_argument("null kernarg source table", __FILE__,
+                                        __LINE__);
+    }
+    for (uint32_t i = 0; i < config.kernarg_source_count; ++i) {
+        const McuKernargSourceDesc& source = config.kernarg_sources[i];
+        if ((source.flags & ~(kMcuKernargSourcePrepared |
+                              kMcuKernargSourceSupervisorProbe)) != 0u) {
+            return Status::invalid_argument("unknown kernarg source flags",
+                                            __FILE__, __LINE__);
+        }
+        if ((source.flags & kMcuKernargSourcePrepared) != 0u &&
+            (source.source == 0ull || source.explicit_args_bytes == 0u)) {
+            return Status::invalid_argument("incomplete prepared kernarg source",
+                                            __FILE__, __LINE__);
+        }
+        if ((source.flags & kMcuKernargSourceSupervisorProbe) != 0u &&
+            source.source != 0ull) {
+            return Status::invalid_argument("supervisor probe source must be empty",
+                                            __FILE__, __LINE__);
+        }
+    }
     if (config.rmsnorm_invocation_count > kMcuMaxRmsNormInvocations) {
         return Status::invalid_argument("invalid rmsnorm invocation count",
                                         __FILE__, __LINE__);
@@ -326,16 +353,30 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
                 "kernarg slot stride does not cover a variant segment", __FILE__,
                 __LINE__);
         }
-        if (static_cast<AqlHiddenArgsPolicy>(v.hidden_args_policy) ==
+    }
+    for (uint32_t i = 0; i < config.node_count; ++i) {
+        const McuPlanNode& node = config.plan[i];
+        if (node.variant_id >= config.variant_count) continue;
+        const McuKernelVariantDesc& v = config.variants[node.variant_id];
+        if (static_cast<AqlHiddenArgsPolicy>(v.hidden_args_policy) !=
             AqlHiddenArgsPolicy::Required) {
-            const std::size_t explicit_bytes =
-                mcu_recipe_explicit_args_bytes(v.kernarg_recipe);
-            if (explicit_bytes == 0u ||
-                !aql_hidden_args_fits(explicit_bytes, v.kernarg_size)) {
-                return Status::invalid_state(
-                    "hidden args Required policy exceeds the kernarg segment",
-                    __FILE__, __LINE__);
-            }
+            continue;
+        }
+        const McuKernargSourceDesc* source =
+            config.kernarg_sources != nullptr && i < config.kernarg_source_count
+                ? &config.kernarg_sources[i]
+                : nullptr;
+        std::size_t explicit_bytes = 0u;
+        if (source != nullptr && source->explicit_args_bytes != 0u) {
+            explicit_bytes = source->explicit_args_bytes;
+        } else {
+            explicit_bytes = mcu_recipe_explicit_args_bytes(node.kernarg_recipe);
+        }
+        if (explicit_bytes == 0u ||
+            !aql_hidden_args_fits(explicit_bytes, v.kernarg_size)) {
+            return Status::invalid_state(
+                "hidden args Required policy exceeds the kernarg segment",
+                __FILE__, __LINE__);
         }
     }
     if (config.retained_count < config.variant_count) {
@@ -370,6 +411,8 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
     s->variant_count = config.variant_count;
     s->dynamic_node_bindings = config.dynamic_node_bindings;
     s->dynamic_node_binding_count = config.dynamic_node_binding_count;
+    s->kernarg_sources = config.kernarg_sources;
+    s->kernarg_source_count = config.kernarg_source_count;
     s->rmsnorm_invocations = config.rmsnorm_invocations;
     s->rmsnorm_invocation_count = config.rmsnorm_invocation_count;
     s->quantize_invocations = config.quantize_invocations;

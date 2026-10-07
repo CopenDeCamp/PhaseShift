@@ -260,7 +260,7 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
                               kernarg_slot, 0u);
                 if (grid_override_x != 0u || grid_override_y != 0u ||
                     grid_override_z != 0u) {
-                    if (!mcu_override_geometry(state, node, kernarg_slot,
+                    if (!mcu_override_geometry(state, node, pc, kernarg_slot,
                                                grid_override_x,
                                                grid_override_y,
                                                grid_override_z)) {
@@ -490,6 +490,7 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
                     if (next_grid_x != 0u || next_grid_y != 0u ||
                         next_grid_z != 0u) {
                         if (!mcu_override_geometry(state, next_node,
+                                                   next_pc_dispatch,
                                                    next_kernarg_slot,
                                                    next_grid_x, next_grid_y,
                                                    next_grid_z)) {

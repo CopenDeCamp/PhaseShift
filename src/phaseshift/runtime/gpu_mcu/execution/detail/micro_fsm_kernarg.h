@@ -88,6 +88,32 @@ __device__ __forceinline__ unsigned char* mcu_kernarg_slot(
            static_cast<uint64_t>(slot) * state->kernarg_slot_stride;
 }
 
+__device__ __forceinline__ const McuKernargSourceDesc* mcu_kernarg_source(
+    const GpuMcuFsmState* state,
+    uint32_t node_index) {
+    if (state->kernarg_sources == nullptr) return nullptr;
+    if (node_index >= state->kernarg_source_count) return nullptr;
+    return &state->kernarg_sources[node_index];
+}
+
+__device__ __forceinline__ void mcu_copy_explicit_args(void* dst_ptr,
+                                                       const void* src_ptr,
+                                                       uint32_t bytes) {
+    auto* dst = static_cast<unsigned char*>(dst_ptr);
+    const auto* src = static_cast<const unsigned char*>(src_ptr);
+    uint32_t i = 0u;
+    while (i + 4u <= bytes) {
+        uint32_t word = 0u;
+        __builtin_memcpy(&word, src + i, sizeof(word));
+        __builtin_memcpy(dst + i, &word, sizeof(word));
+        i += 4u;
+    }
+    while (i < bytes) {
+        dst[i] = src[i];
+        ++i;
+    }
+}
+
 __device__ __forceinline__ bool mcu_apply_hidden_args(
     const McuKernelVariantDesc& variant,
     void* kernarg_slot,
@@ -164,6 +190,17 @@ constexpr std::size_t mcu_recipe_explicit_args_bytes(uint16_t recipe) {
     }
 }
 
+__device__ __forceinline__ std::size_t mcu_node_explicit_args_bytes(
+    const GpuMcuFsmState* state,
+    const McuPlanNode& node,
+    uint32_t node_index) {
+    const McuKernargSourceDesc* source = mcu_kernarg_source(state, node_index);
+    if (source != nullptr && source->explicit_args_bytes != 0u) {
+        return source->explicit_args_bytes;
+    }
+    return mcu_recipe_explicit_args_bytes(node.kernarg_recipe);
+}
+
 __device__ __forceinline__ bool mcu_write_probe_kernarg(
     const GpuMcuFsmState* state,
     const McuPlanNode& node,
@@ -222,6 +259,35 @@ __device__ __forceinline__ void mcu_variant_dispatch_geometry(
     desc.workgroup_size_x = static_cast<uint16_t>(variant.workgroup_x);
     desc.workgroup_size_y = static_cast<uint16_t>(variant.workgroup_y);
     desc.workgroup_size_z = static_cast<uint16_t>(variant.workgroup_z);
+}
+
+__device__ __forceinline__ bool mcu_write_prepared_kernarg(
+    const GpuMcuFsmState* state,
+    const McuPlanNode& node,
+    uint32_t node_index,
+    uint32_t slot) {
+    const McuKernargSourceDesc* source = mcu_kernarg_source(state, node_index);
+    if (source == nullptr) return false;
+    if ((source->flags & kMcuKernargSourcePrepared) == 0u) return false;
+    if (source->source == 0ull) return false;
+    const std::size_t explicit_bytes = source->explicit_args_bytes;
+    if (explicit_bytes == 0u) return false;
+    const McuKernelVariantDesc& variant = state->variants[node.variant_id];
+    if (explicit_bytes > variant.kernarg_size) return false;
+    auto* args = mcu_kernarg_slot(state, slot);
+    mcu_copy_explicit_args(args, reinterpret_cast<const void*>(source->source),
+                           static_cast<uint32_t>(explicit_bytes));
+    GpuAqlDispatchDesc desc{};
+    mcu_variant_dispatch_geometry(variant, desc);
+    if (!mcu_apply_hidden_args(variant, args, explicit_bytes, desc)) {
+        return false;
+    }
+    build_aql_launch_metadata(args, variant.kernarg_size,
+                              variant.workgroup_count_x,
+                              variant.workgroup_count_y,
+                              variant.workgroup_count_z, variant.workgroup_x);
+    __threadfence_system();
+    return true;
 }
 
 __device__ __forceinline__ bool mcu_write_rmsnorm_kernarg(
@@ -888,6 +954,16 @@ __device__ __noinline__ bool mcu_build_kernarg(const GpuMcuFsmState* state,
                                                   uint32_t node_index,
                                                   uint32_t slot,
                                                   uint32_t generation) {
+    const McuKernargSourceDesc* source = mcu_kernarg_source(state, node_index);
+    if (source != nullptr && source->source != 0ull &&
+        (source->flags & kMcuKernargSourcePrepared) != 0u) {
+        return mcu_write_prepared_kernarg(state, node, node_index, slot);
+    }
+    if (source != nullptr && source->source == 0ull &&
+        (source->flags & kMcuKernargSourceSupervisorProbe) != 0u) {
+        return mcu_write_probe_kernarg(state, node, node_index, slot,
+                                       generation);
+    }
     switch (node.kernarg_recipe) {
         case kMcuKernargRecipeProbe:
             return mcu_write_probe_kernarg(state, node, node_index, slot,
@@ -953,12 +1029,13 @@ __device__ __noinline__ bool mcu_build_kernarg(const GpuMcuFsmState* state,
 __device__ __noinline__ bool mcu_override_geometry(
     const GpuMcuFsmState* state,
     const McuPlanNode& node,
+    uint32_t node_index,
     uint32_t slot,
     uint32_t workgroup_count_x,
     uint32_t workgroup_count_y,
     uint32_t workgroup_count_z) {
     const std::size_t explicit_bytes =
-        mcu_recipe_explicit_args_bytes(node.kernarg_recipe);
+        mcu_node_explicit_args_bytes(state, node, node_index);
     if (explicit_bytes == 0u) return false;
     const McuKernelVariantDesc& variant = state->variants[node.variant_id];
     const uint32_t count_x = workgroup_count_x != 0u

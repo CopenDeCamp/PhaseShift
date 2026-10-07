@@ -1,6 +1,7 @@
 #pragma once
 
 #include <phaseshift/core/status.h>
+#include <phaseshift/runtime/gpu_mcu/binding/kernarg_source_contract.h>
 #include <phaseshift/runtime/gpu_mcu/binding/plan_binding_contract.h>
 #include <phaseshift/runtime/gpu_mcu/execution/kernarg_recipe.h>
 #include <phaseshift/runtime/gpu_mcu/execution/invocation_abi.h>
@@ -143,6 +144,9 @@ struct alignas(64) GpuMcuFsmState {
     const McuGdnRecurrenceInvocation* gdn_recurrence_invocations = nullptr;
     uint32_t gdn_reset_invocation_count = 0;
     const GpuMcuGdnResetInvocation* gdn_reset_invocations = nullptr;
+    const McuKernargSourceDesc* kernarg_sources = nullptr;
+    uint32_t kernarg_source_count = 0;
+    uint32_t reserved0 = 0;
     uint64_t kernarg_base = 0;
     uint64_t kernarg_slot_stride = 0;
     uint32_t kernarg_slot_count = 0;
@@ -257,6 +261,8 @@ struct GpuMcuFsmConfig {
     const McuGdnRecurrenceInvocation* gdn_recurrence_invocations = nullptr;
     uint32_t gdn_reset_invocation_count = 0;
     const GpuMcuGdnResetInvocation* gdn_reset_invocations = nullptr;
+    const McuKernargSourceDesc* kernarg_sources = nullptr;
+    uint32_t kernarg_source_count = 0;
     const GpuMcuRetainedPacket* retained = nullptr;
     uint32_t retained_count = 0;
     uint64_t kernarg_base = 0;
