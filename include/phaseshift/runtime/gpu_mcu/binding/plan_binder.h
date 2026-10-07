@@ -1,7 +1,7 @@
 #pragma once
 
 #include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/binding/plan_binding_contract.h>
 
 #include <hip/hip_runtime.h>
 
