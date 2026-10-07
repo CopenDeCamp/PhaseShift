@@ -74,13 +74,6 @@ __device__ __forceinline__ bool mcu_reserve_kernarg_slot(
     return true;
 }
 
-__device__ __forceinline__ bool mcu_kernarg_recipe_supported(
-    const GpuMcuFsmState*,
-    const McuPlanNode& node) {
-    return node.kernarg_recipe > kMcuKernargRecipeNone &&
-           node.kernarg_recipe < kMcuKernargRecipeCount;
-}
-
 __device__ __forceinline__ unsigned char* mcu_kernarg_slot(
     const GpuMcuFsmState* state,
     uint32_t slot) {
@@ -116,6 +109,20 @@ __device__ __forceinline__ void mcu_copy_explicit_args(void* dst_ptr,
     }
 }
 
+__device__ __forceinline__ bool mcu_kernarg_source_supported(
+    const GpuMcuFsmState* state,
+    uint32_t node_index) {
+    const McuKernargSourceDesc* source = mcu_kernarg_source(state, node_index);
+    if (source == nullptr) return false;
+    if ((source->flags & kMcuKernargSourcePrepared) != 0u) {
+        return source->source != 0ull && source->explicit_args_bytes != 0u;
+    }
+    if ((source->flags & kMcuKernargSourceSupervisorProbe) != 0u) {
+        return source->source == 0ull;
+    }
+    return false;
+}
+
 __device__ __forceinline__ bool mcu_apply_hidden_args(
     const McuKernelVariantDesc& variant,
     void* kernarg_slot,
@@ -131,76 +138,11 @@ __device__ __forceinline__ bool mcu_apply_hidden_args(
     return policy != AqlHiddenArgsPolicy::Required;
 }
 
-constexpr std::size_t mcu_recipe_explicit_args_bytes(uint16_t recipe) {
-    switch (recipe) {
-        case kMcuKernargRecipeProbe:
-            return sizeof(GpuMcuFsmWorkerArgs);
-        case kMcuKernargRecipeRmsNormBf16PfOnePlus:
-            return sizeof(McuRmsNormInvocation);
-        case kMcuKernargRecipeActivationQuantizeA8:
-            return sizeof(McuActivationQuantizeInvocation);
-        case kMcuKernargRecipeActivationQuantizeE4m3K5120:
-            return sizeof(McuActivationQuantizeE4m3Invocation);
-        case kMcuKernargRecipePsq4Decode1Bf16U16:
-        case kMcuKernargRecipePsq4Decode1Bf16U8:
-        case kMcuKernargRecipePsq8Decode1Bf16U8:
-            return sizeof(McuPsq4Decode1Invocation);
-        case kMcuKernargRecipePsq4MultiRowBf16:
-            return sizeof(McuPsq4MultiRowInvocation);
-        case kMcuKernargRecipeVerifyAcceptPrefix:
-            return sizeof(McuVerifyAcceptPrefixInvocation);
-        case kMcuKernargRecipeVerifyAcceptBatch:
-            return sizeof(McuVerifyAcceptBatchInvocation);
-        case kMcuKernargRecipeGdnSpecRestoreFromCounts:
-            return sizeof(McuGdnSpecRestoreFromCountsInvocation);
-        case kMcuKernargRecipeGdnSpecRestore:
-            return sizeof(McuGdnSpecRestoreInvocation);
-        case kMcuKernargRecipeArgmaxF32:
-            return sizeof(McuArgmaxF32Invocation);
-        case kMcuKernargRecipeElementwise:
-            return sizeof(McuElementwiseInvocation);
-        case kMcuKernargRecipeRope:
-            return sizeof(McuRopeInvocation);
-        case kMcuKernargRecipeKvAppend:
-            return sizeof(McuKvAppendInvocation);
-        case kMcuKernargRecipeAttentionPaged:
-            return sizeof(McuPagedAttentionInvocation);
-        case kMcuKernargRecipeAttentionPagedSplit:
-            return sizeof(McuPagedAttentionSplitInvocation);
-        case kMcuKernargRecipeAttentionPagedReduce:
-            return sizeof(McuPagedAttentionReduceInvocation);
-        case kMcuKernargRecipeBf16ExactRows:
-            return sizeof(McuBf16ExactRowsInvocation);
-        case kMcuKernargRecipeBf16Wmma:
-            return sizeof(McuBf16WmmaInvocation);
-        case kMcuKernargRecipeL2Normalize:
-            return sizeof(McuL2NormalizeInvocation);
-        case kMcuKernargRecipeEmbeddingBf16:
-            return sizeof(McuEmbeddingBf16Invocation);
-        case kMcuKernargRecipeEmbeddingPsq8:
-            return sizeof(McuEmbeddingPsq8Invocation);
-        case kMcuKernargRecipeOutputGatherBf16:
-            return sizeof(McuOutputGatherBf16Invocation);
-        case kMcuKernargRecipeGdnConv1d:
-            return sizeof(McuGdnConv1dInvocation);
-        case kMcuKernargRecipeGdnRecurrence:
-            return sizeof(McuGdnRecurrenceInvocation);
-        case kMcuKernargRecipeGdnReset:
-            return sizeof(GpuMcuGdnResetInvocation);
-        default:
-            return 0u;
-    }
-}
-
-__device__ __forceinline__ std::size_t mcu_node_explicit_args_bytes(
+__device__ __forceinline__ std::size_t mcu_kernarg_explicit_bytes(
     const GpuMcuFsmState* state,
-    const McuPlanNode& node,
     uint32_t node_index) {
     const McuKernargSourceDesc* source = mcu_kernarg_source(state, node_index);
-    if (source != nullptr && source->explicit_args_bytes != 0u) {
-        return source->explicit_args_bytes;
-    }
-    return mcu_recipe_explicit_args_bytes(node.kernarg_recipe);
+    return source != nullptr ? source->explicit_args_bytes : 0u;
 }
 
 __device__ __forceinline__ bool mcu_write_probe_kernarg(
@@ -317,7 +259,7 @@ __device__ __noinline__ bool mcu_override_geometry(
     uint32_t workgroup_count_y,
     uint32_t workgroup_count_z) {
     const std::size_t explicit_bytes =
-        mcu_node_explicit_args_bytes(state, node, node_index);
+        mcu_kernarg_explicit_bytes(state, node_index);
     if (explicit_bytes == 0u) return false;
     const McuKernelVariantDesc& variant = state->variants[node.variant_id];
     const uint32_t count_x = workgroup_count_x != 0u

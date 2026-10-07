@@ -153,16 +153,12 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
             config.kernarg_sources != nullptr && i < config.kernarg_source_count
                 ? &config.kernarg_sources[i]
                 : nullptr;
-        std::size_t explicit_bytes = 0u;
-        if (source != nullptr && source->explicit_args_bytes != 0u) {
-            explicit_bytes = source->explicit_args_bytes;
-        } else {
-            explicit_bytes = mcu_recipe_explicit_args_bytes(node.kernarg_recipe);
-        }
+        const std::size_t explicit_bytes =
+            source != nullptr ? source->explicit_args_bytes : 0u;
         if (explicit_bytes == 0u ||
             !aql_hidden_args_fits(explicit_bytes, v.kernarg_size)) {
             return Status::invalid_state(
-                "hidden args Required policy exceeds the kernarg segment",
+                "kernarg source does not cover the required hidden args",
                 __FILE__, __LINE__);
         }
     }

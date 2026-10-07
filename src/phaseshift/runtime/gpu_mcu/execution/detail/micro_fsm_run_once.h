@@ -170,7 +170,7 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
                 faulted = true;
                 break;
             }
-            if (!mcu_kernarg_recipe_supported(state, node)) {
+            if (!mcu_kernarg_source_supported(state, pc)) {
                 mcu_fault(state, McuFaultCode::invalid_node, pc,
                           node.variant_id, 0u);
                 faulted = true;
@@ -448,7 +448,7 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
                     kernarg_slot_count != 0u &&
                     next_node.completion_slot < completion_count &&
                     next_node.variant_id < retained_count &&
-                    mcu_kernarg_recipe_supported(state, next_node)) {
+                    mcu_kernarg_source_supported(state, next_pc_dispatch)) {
                     const uint32_t next_generation =
                         static_cast<uint32_t>(ctx.dispatch_seq + 1u);
                     uint32_t next_grid_x = 0u;
