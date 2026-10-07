@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/output_ring.h>
+#include <phaseshift/runtime/gpu_mcu/io/output_ring.h>
 
 #include <atomic>
 #include <cstddef>

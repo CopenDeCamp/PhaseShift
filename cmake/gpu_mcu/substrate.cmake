@@ -47,10 +47,10 @@ add_custom_command(
 add_library(phaseshift_gpu_mcu STATIC
     src/phaseshift/runtime/gpu_mcu/infrastructure/aql.hip
     src/phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.hip
-    src/phaseshift/runtime/gpu_mcu/control_ring.hip
-    src/phaseshift/runtime/gpu_mcu/output_ring.hip
+    src/phaseshift/runtime/gpu_mcu/io/control_ring.hip
+    src/phaseshift/runtime/gpu_mcu/io/output_ring.hip
     src/phaseshift/runtime/gpu_mcu/slot_table.hip
-    src/phaseshift/runtime/gpu_mcu/request_ingress.hip
+    src/phaseshift/runtime/gpu_mcu/io/request_ingress.hip
     src/phaseshift/runtime/gpu_mcu/batch_planner.hip
     src/phaseshift/runtime/gpu_mcu/slot_binding.hip
     src/phaseshift/runtime/gpu_mcu/batch_binding.hip

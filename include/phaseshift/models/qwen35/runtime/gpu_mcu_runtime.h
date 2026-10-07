@@ -5,9 +5,9 @@
 #include <phaseshift/models/qwen35/stop_tokens.h>
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/gpu_mcu/control_ring.h>
-#include <phaseshift/runtime/gpu_mcu/output_ring.h>
-#include <phaseshift/runtime/gpu_mcu/request_ingress.h>
+#include <phaseshift/runtime/gpu_mcu/io/control_ring.h>
+#include <phaseshift/runtime/gpu_mcu/io/output_ring.h>
+#include <phaseshift/runtime/gpu_mcu/io/request_ingress.h>
 #include <phaseshift/runtime/gpu_mcu/slot_runtime.h>
 #include <phaseshift/runtime/gpu_mcu/slot_table.h>
 #include <hip/hip_runtime.h>

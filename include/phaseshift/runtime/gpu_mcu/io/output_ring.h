@@ -1,7 +1,7 @@
 #pragma once
 
 #include <phaseshift/core/status.h>
-#include <phaseshift/runtime/gpu_mcu/control_ring.h>
+#include <phaseshift/runtime/gpu_mcu/io/control_ring.h>
 #include <phaseshift/runtime/gpu_mcu/slot_table.h>
 
 #include <hip/hip_runtime.h>
