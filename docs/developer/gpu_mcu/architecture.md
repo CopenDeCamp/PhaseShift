@@ -111,7 +111,7 @@ Static Plan へ今回の execution loop の値を適用する処理である。
 
 - 入力: `actual_rows` / `num_requests` / `num_outputs` / `num_verify_requests` /
   request row ranges / PREFILL・DECODE・VERIFY の各 rows / runtime zero-work
-- 出力: Runtime Node Binding（`McuDynamicNodeBinding`） /
+- 出力: Runtime Node Binding（`McuRuntimeNodeBinding`） /
   Runtime Invocation Patch（`McuInvocationPatch`） / runtime geometry /
   runtime node enable/disable / runtime variant selection
 
@@ -175,7 +175,7 @@ Static Plan の geometry と runtime batch geometry が同じであることを
 
 長寿命 controller では start 後に batch geometry が何度も変化するため、
 runtime zero-work は **Runtime Binding** の責務になる。
-runtime skip mechanism（`McuDynamicNodeBinding::enabled` 等）を保存する。
+runtime skip mechanism（`McuRuntimeNodeBinding::enabled` 等）を保存する。
 Static Compile 側で「今回 rows = 0 だから node 不要」と判断してはいけない。
 
 ### zero-work との関係
@@ -185,7 +185,7 @@ compile-time batch geometry と runtime batch geometry が同じであること�
 
 長寿命 controller では start 後に batch geometry が何度も変化するため、
 runtime zero-work は device-side binding の責務になる。
-runtime skip mechanism（`McuDynamicNodeBinding::enabled` 等）を保存する。
+runtime skip mechanism（`McuRuntimeNodeBinding::enabled` 等）を保存する。
 
 `workgroup_count_x/y/z == 0` の「geometry override なし」という
 sentinel semantics は変更しない。
@@ -291,7 +291,7 @@ Qwen35 参照は `runtime/` 全ディレクトリで禁止する。
 |---|---|---|
 | `micro_fsm.h` | `GpuMcuFsmState` / `GpuMcuFsmRunContext` / `GpuMcuFsmConfig` / `GpuMcuFsm` と FSM public entry point | **なし** |
 | `fsm_contract.h` | `McuSupervisorState` / `McuFaultCode` / `McuDoorbellMode` / `McuLogEvent` / `McuLogRecord` / `McuDispatchRecord` / `McuPlanNode` / `McuKernelVariantDesc` / `McuDispatchTiming` と node・record・log の flag | **なし** |
-| `binding/plan_binding_contract.h` | `McuDynamicNodeBinding` / `McuInvocationPatchSource` / `McuInvocationPatch` | なし |
+| `binding/plan_binding_contract.h` | `McuRuntimeNodeBinding` / `McuInvocationPatchSource` / `McuInvocationPatch` | なし |
 | `binding/kernarg_source_contract.h` | `McuKernargSourceDesc` とその flag | なし |
 
 `McuPlanNode::kernarg_recipe` と `McuKernelVariantDesc::kernarg_recipe` は
@@ -530,7 +530,7 @@ Program (lower_to_primitives の出力)
 - compile と upload は controller start 前に一度だけ行う。
   start 後に Host が compile / upload / switch を行うことは禁止である。
 - batch ごとの差は `DeviceBatchContext` の値、`McuInvocationPatch` の
-  row-global overlay、`McuDynamicNodeBinding` で吸収する。
+  row-global overlay、`McuRuntimeNodeBinding` で吸収する。
   static plan は最大 geometry を保持する
   （`gpu_mcu_bind_execution_plan()` の契約）。
 - plan node は `McuPlanNode`（variant_id / next / kernarg_recipe / completion_slot 等）。

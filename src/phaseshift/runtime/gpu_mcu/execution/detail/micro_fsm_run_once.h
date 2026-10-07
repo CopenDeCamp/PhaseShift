@@ -12,9 +12,9 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
     const uint32_t completion_count = state->completion_count;
     GpuMcuRetainedPacket* vram = state->retained_vram;
     const uint32_t retained_count = state->retained_count;
-    const McuDynamicNodeBinding* dynamic_bindings =
-        state->dynamic_node_bindings;
-    const uint32_t dynamic_binding_count = state->dynamic_node_binding_count;
+    const McuRuntimeNodeBinding* runtime_bindings =
+        state->runtime_node_bindings;
+    const uint32_t runtime_binding_count = state->runtime_node_binding_count;
     const uint32_t template_source = state->template_source;
     const uint32_t barrier = state->barrier;
     const uint32_t prepared_enabled = state->prepared_enabled;
@@ -125,8 +125,8 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
         if ((node.flags & kMcuNodeEnd) != 0u) {
             break;
         }
-        if (dynamic_bindings != nullptr && pc < dynamic_binding_count) {
-            const McuDynamicNodeBinding binding = dynamic_bindings[pc];
+        if (runtime_bindings != nullptr && pc < runtime_binding_count) {
+            const McuRuntimeNodeBinding binding = runtime_bindings[pc];
             if (binding.enabled == 0u) {
                 uint32_t skip = node.next == kMcuNoNext ? pc + 1u : node.next;
                 if (skip < node_count &&
@@ -232,9 +232,9 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
                 uint32_t grid_override_x = 0u;
                 uint32_t grid_override_y = 0u;
                 uint32_t grid_override_z = 0u;
-                if (dynamic_bindings != nullptr &&
-                    pc < dynamic_binding_count) {
-                    const McuDynamicNodeBinding binding = dynamic_bindings[pc];
+                if (runtime_bindings != nullptr &&
+                    pc < runtime_binding_count) {
+                    const McuRuntimeNodeBinding binding = runtime_bindings[pc];
                     grid_override_x = binding.workgroup_count_x;
                     grid_override_y = binding.workgroup_count_y;
                     grid_override_z = binding.workgroup_count_z;
@@ -417,9 +417,9 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
                     const McuPlanNode cand = plan[cursor];
                     if ((cand.flags & kMcuNodeEnd) != 0u) break;
                     if ((cand.flags & kMcuNodeDispatch) != 0u) {
-                        if (dynamic_bindings != nullptr &&
-                            cursor < dynamic_binding_count &&
-                            dynamic_bindings[cursor].enabled == 0u) {
+                        if (runtime_bindings != nullptr &&
+                            cursor < runtime_binding_count &&
+                            runtime_bindings[cursor].enabled == 0u) {
                             cursor = cand.next == kMcuNoNext ? cursor + 1u
                                                              : cand.next;
                             continue;
@@ -433,10 +433,10 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
             if (prefetch_pc != kMcuNoNext) {
                 const uint32_t next_pc_dispatch = prefetch_pc;
                 McuPlanNode next_node = plan[next_pc_dispatch];
-                if (dynamic_bindings != nullptr &&
-                    next_pc_dispatch < dynamic_binding_count) {
-                    const McuDynamicNodeBinding binding =
-                        dynamic_bindings[next_pc_dispatch];
+                if (runtime_bindings != nullptr &&
+                    next_pc_dispatch < runtime_binding_count) {
+                    const McuRuntimeNodeBinding binding =
+                        runtime_bindings[next_pc_dispatch];
                     next_node.variant_id = binding.variant_id;
                     next_node.invocation_index = binding.invocation_index;
                     if (binding.variant_override != 0xFFFFFFFFu) {
@@ -454,10 +454,10 @@ __device__ __forceinline__ bool mcu_run_once(GpuMcuFsmState* state,
                     uint32_t next_grid_x = 0u;
                     uint32_t next_grid_y = 0u;
                     uint32_t next_grid_z = 0u;
-                    if (dynamic_bindings != nullptr &&
-                        next_pc_dispatch < dynamic_binding_count) {
-                        const McuDynamicNodeBinding binding =
-                            dynamic_bindings[next_pc_dispatch];
+                    if (runtime_bindings != nullptr &&
+                        next_pc_dispatch < runtime_binding_count) {
+                        const McuRuntimeNodeBinding binding =
+                            runtime_bindings[next_pc_dispatch];
                         next_grid_x = binding.workgroup_count_x;
                         next_grid_y = binding.workgroup_count_y;
                         next_grid_z = binding.workgroup_count_z;

@@ -192,8 +192,8 @@ Status GpuMcuFsm::configure(const GpuMcuFsmConfig& config) {
     s->plan_id = config.plan_id;
     s->variants = config.variants;
     s->variant_count = config.variant_count;
-    s->dynamic_node_bindings = config.dynamic_node_bindings;
-    s->dynamic_node_binding_count = config.dynamic_node_binding_count;
+    s->runtime_node_bindings = config.runtime_node_bindings;
+    s->runtime_node_binding_count = config.runtime_node_binding_count;
     s->kernarg_sources = config.kernarg_sources;
     s->kernarg_source_count = config.kernarg_source_count;
     s->external_start_signal = config.start_signal;

@@ -115,8 +115,8 @@ private:
     std::vector<McuBf16VariantCatalog> bf16_catalogs_;
     std::vector<McuGeometryPatch> geometry_patches_;
     std::vector<McuInvocationRowPatch> invocation_row_patches_;
-    void* dynamic_bindings_ = nullptr;
-    uint32_t dynamic_binding_count_ = 0;
+    void* runtime_bindings_ = nullptr;
+    uint32_t runtime_binding_count_ = 0;
 
     void* rms_ = nullptr;
     uint32_t rms_count_ = 0;

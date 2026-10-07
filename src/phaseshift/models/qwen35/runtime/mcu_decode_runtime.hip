@@ -267,14 +267,14 @@ Status McuDecodeRuntime::release_invocations() noexcept {
         row_global_patches_ = nullptr;
         row_global_patch_count_ = 0u;
     }
-    if (dynamic_bindings_ != nullptr) {
-        if (hipFree(dynamic_bindings_) != hipSuccess) {
+    if (runtime_bindings_ != nullptr) {
+        if (hipFree(runtime_bindings_) != hipSuccess) {
             status = Status::hip_error(
                 "dynamic binding free", hipGetErrorString(hipGetLastError()),
                 __FILE__, __LINE__);
         }
-        dynamic_bindings_ = nullptr;
-        dynamic_binding_count_ = 0u;
+        runtime_bindings_ = nullptr;
+        runtime_binding_count_ = 0u;
     }
     return status;
 }
@@ -286,9 +286,9 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
         row_global_patch_count_ = 0u;
     }
     uint32_t geometry_patch_count = 0u;
-    if (dynamic_bindings_ != nullptr) {
+    if (runtime_bindings_ != nullptr) {
         for (const McuGeometryPatch& patch : geometry_patches_) {
-            if (patch.node_index < dynamic_binding_count_) {
+            if (patch.node_index < runtime_binding_count_) {
                 ++geometry_patch_count;
             }
         }
@@ -484,34 +484,34 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
             (region.row_begin & 0xFFFFu) | (region.rows << 16);
         ++index;
     }
-    auto* binding_base = static_cast<unsigned char*>(dynamic_bindings_);
+    auto* binding_base = static_cast<unsigned char*>(runtime_bindings_);
     for (const McuBf16VariantCatalog& catalog : bf16_catalogs_) {
         patches[index].target = reinterpret_cast<uint64_t>(
             binding_base +
             static_cast<size_t>(catalog.node_index) *
-                sizeof(mcu::McuDynamicNodeBinding) +
-            offsetof(mcu::McuDynamicNodeBinding, variant_override));
+                sizeof(mcu::McuRuntimeNodeBinding) +
+            offsetof(mcu::McuRuntimeNodeBinding, variant_override));
         patches[index].source = static_cast<uint8_t>(
             mcu::McuInvocationPatchSource::Bf16ExactRowsVariant);
         patches[index].param = catalog.variant_base;
         ++index;
     }
     for (const McuGeometryPatch& patch : geometry_patches_) {
-        if (dynamic_bindings_ == nullptr ||
-            patch.node_index >= dynamic_binding_count_) {
+        if (runtime_bindings_ == nullptr ||
+            patch.node_index >= runtime_binding_count_) {
             continue;
         }
-        std::size_t offset = offsetof(mcu::McuDynamicNodeBinding,
+        std::size_t offset = offsetof(mcu::McuRuntimeNodeBinding,
                                       workgroup_count_x);
         if (patch.axis == McuGeometryAxis::Y) {
-            offset = offsetof(mcu::McuDynamicNodeBinding, workgroup_count_y);
+            offset = offsetof(mcu::McuRuntimeNodeBinding, workgroup_count_y);
         } else if (patch.axis == McuGeometryAxis::Z) {
-            offset = offsetof(mcu::McuDynamicNodeBinding, workgroup_count_z);
+            offset = offsetof(mcu::McuRuntimeNodeBinding, workgroup_count_z);
         }
         patches[index].target = reinterpret_cast<uint64_t>(
             binding_base +
             static_cast<std::size_t>(patch.node_index) *
-                sizeof(mcu::McuDynamicNodeBinding) +
+                sizeof(mcu::McuRuntimeNodeBinding) +
             offset);
         patches[index].source = patch.source;
         patches[index].param = patch.param;
@@ -873,7 +873,7 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     geometry_patches_ = plan.geometry_patches;
     invocation_row_patches_ = plan.invocation_row_patches;
     if (!plan.nodes.empty()) {
-        std::vector<mcu::McuDynamicNodeBinding> bindings(plan.nodes.size());
+        std::vector<mcu::McuRuntimeNodeBinding> bindings(plan.nodes.size());
         for (std::size_t i = 0; i < plan.nodes.size(); ++i) {
             bindings[i].enabled = 1u;
             bindings[i].variant_id = plan.nodes[i].variant_id;
@@ -884,24 +884,24 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
                     : plan.nodes[i].invocation_index;
         }
         const std::size_t bytes =
-            bindings.size() * sizeof(mcu::McuDynamicNodeBinding);
-        if (hipMalloc(&dynamic_bindings_, bytes) != hipSuccess) {
-            dynamic_bindings_ = nullptr;
+            bindings.size() * sizeof(mcu::McuRuntimeNodeBinding);
+        if (hipMalloc(&runtime_bindings_, bytes) != hipSuccess) {
+            runtime_bindings_ = nullptr;
             (void)release_invocations();
             return Status::hip_error(
                 "dynamic binding allocation",
                 hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         }
-        if (hipMemcpy(dynamic_bindings_, bindings.data(), bytes,
+        if (hipMemcpy(runtime_bindings_, bindings.data(), bytes,
                       hipMemcpyHostToDevice) != hipSuccess) {
-            (void)hipFree(dynamic_bindings_);
-            dynamic_bindings_ = nullptr;
+            (void)hipFree(runtime_bindings_);
+            runtime_bindings_ = nullptr;
             (void)release_invocations();
             return Status::hip_error(
                 "dynamic binding upload",
                 hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
         }
-        dynamic_binding_count_ = static_cast<uint32_t>(bindings.size());
+        runtime_binding_count_ = static_cast<uint32_t>(bindings.size());
     }
     status = rebuild_row_global_patches();
     if (!status.ok()) {
@@ -935,9 +935,9 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     config.kernarg_base = reinterpret_cast<uint64_t>(kernarg_.base);
     config.kernarg_slot_stride = kernarg_.slot_stride;
     config.kernarg_slot_count = plan_node_count_ + 1u;
-    config.dynamic_node_bindings =
-        static_cast<const mcu::McuDynamicNodeBinding*>(dynamic_bindings_);
-    config.dynamic_node_binding_count = dynamic_binding_count_;
+    config.runtime_node_bindings =
+        static_cast<const mcu::McuRuntimeNodeBinding*>(runtime_bindings_);
+    config.runtime_node_binding_count = runtime_binding_count_;
     config.kernarg_sources =
         static_cast<const mcu::McuKernargSourceDesc*>(kernarg_sources_);
     config.kernarg_source_count = kernarg_source_count_;
@@ -1126,14 +1126,14 @@ Status McuDecodeRuntime::shutdown() noexcept {
         row_global_patches_ = nullptr;
         row_global_patch_count_ = 0u;
     }
-    if (dynamic_bindings_ != nullptr) {
-        if (hipFree(dynamic_bindings_) != hipSuccess) {
+    if (runtime_bindings_ != nullptr) {
+        if (hipFree(runtime_bindings_) != hipSuccess) {
             status = Status::hip_error(
                 "dynamic binding free", hipGetErrorString(hipGetLastError()),
                 __FILE__, __LINE__);
         }
-        dynamic_bindings_ = nullptr;
-        dynamic_binding_count_ = 0u;
+        runtime_bindings_ = nullptr;
+        runtime_binding_count_ = 0u;
     }
 
     if (plan_nodes_ != nullptr) {
@@ -1296,8 +1296,8 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     bf16_catalogs_ = std::move(other.bf16_catalogs_);
     geometry_patches_ = std::move(other.geometry_patches_);
     invocation_row_patches_ = std::move(other.invocation_row_patches_);
-    dynamic_bindings_ = other.dynamic_bindings_;
-    dynamic_binding_count_ = other.dynamic_binding_count_;
+    runtime_bindings_ = other.runtime_bindings_;
+    runtime_binding_count_ = other.runtime_binding_count_;
     gdn_recur_ = other.gdn_recur_;
     gdn_recur_count_ = other.gdn_recur_count_;
     gdn_reset_ = other.gdn_reset_;
@@ -1352,8 +1352,8 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     other.kernarg_sources_ = nullptr;
     other.kernarg_source_count_ = 0u;
     other.row_global_patches_ = nullptr;
-    other.dynamic_bindings_ = nullptr;
-    other.dynamic_binding_count_ = 0u;
+    other.runtime_bindings_ = nullptr;
+    other.runtime_binding_count_ = 0u;
     other.rms_count_ = 0u;
     other.quant_count_ = 0u;
     other.e4m3_count_ = 0u;

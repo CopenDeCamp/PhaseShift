@@ -25,8 +25,8 @@ void check(bool condition, const char* message) {
     }
 }
 
-__global__ void set_binding_kernel(mcu::McuDynamicNodeBinding* dst,
-                                   mcu::McuDynamicNodeBinding value) {
+__global__ void set_binding_kernel(mcu::McuRuntimeNodeBinding* dst,
+                                   mcu::McuRuntimeNodeBinding value) {
     if (threadIdx.x == 0u && blockIdx.x == 0u) {
         dst[0] = value;
         __threadfence_system();
@@ -41,10 +41,10 @@ __global__ void clear_output_kernel(uint32_t* out, uint32_t count,
     }
 }
 
-mcu::McuDynamicNodeBinding binding(uint16_t enabled, uint16_t variant_id,
+mcu::McuRuntimeNodeBinding binding(uint16_t enabled, uint16_t variant_id,
                                    uint32_t grid_x, uint32_t grid_y,
                                    uint32_t grid_z) {
-    mcu::McuDynamicNodeBinding out{};
+    mcu::McuRuntimeNodeBinding out{};
     out.enabled = enabled;
     out.variant_id = variant_id;
     out.workgroup_count_x = grid_x;
@@ -82,15 +82,15 @@ void expect_sentinel_range(const std::vector<uint32_t>& out, uint32_t begin,
     check(ok, message);
 }
 
-void clear_and_patch(Rig& rig, const mcu::McuDynamicNodeBinding& b) {
+void clear_and_patch(Rig& rig, const mcu::McuRuntimeNodeBinding& b) {
     hipStream_t stream = rig.partition.worker_stream();
     clear_output_kernel<<<(kOutputSpan + 63u) / 64u, 64u, 0, stream>>>(
         rig.output, kOutputSpan, kSentinel);
-    set_binding_kernel<<<1, 32, 0, stream>>>(rig.dynamic_bindings, b);
+    set_binding_kernel<<<1, 32, 0, stream>>>(rig.runtime_bindings, b);
     (void)hipStreamSynchronize(stream);
 }
 
-bool run_dynamic_case(Rig& rig, const mcu::McuDynamicNodeBinding& b,
+bool run_runtime_case(Rig& rig, const mcu::McuRuntimeNodeBinding& b,
                       uint64_t plans, const char* name) {
     clear_and_patch(rig, b);
     if (!rig.fsm.request_run().ok()) {
@@ -138,9 +138,9 @@ bool dynamic_geometry_case() {
         mcu::make_probe_variant(1u, rig.meta, 32u, 1u)};
     if (!rig.upload(chain.nodes, variants)) return false;
 
-    const mcu::McuDynamicNodeBinding initial =
+    const mcu::McuRuntimeNodeBinding initial =
         binding(1u, 0u, 0u, 0u, 0u);
-    if (!rig.set_dynamic_bindings(&initial, 1u)) return false;
+    if (!rig.set_runtime_bindings(&initial, 1u)) return false;
 
     mcu::GpuMcuFsmConfig config{};
     config.plan_id = 21u;
@@ -153,7 +153,7 @@ bool dynamic_geometry_case() {
 
     uint64_t plans = 0u;
 
-    if (!run_dynamic_case(rig, binding(1u, 0u, 0u, 0u, 0u), ++plans, "static")) {
+    if (!run_runtime_case(rig, binding(1u, 0u, 0u, 0u, 0u), ++plans, "static")) {
         return false;
     }
     std::vector<uint32_t> out = read_span(rig);
@@ -162,7 +162,7 @@ bool dynamic_geometry_case() {
                           "static geometry leaves tail untouched");
     check(rig.fsm.dispatches() == 1u, "static geometry one dispatch");
 
-    if (!run_dynamic_case(rig, binding(1u, 1u, 0u, 0u, 0u), ++plans,
+    if (!run_runtime_case(rig, binding(1u, 1u, 0u, 0u, 0u), ++plans,
                           "variant switch")) {
         return false;
     }
@@ -172,7 +172,7 @@ bool dynamic_geometry_case() {
                           "variant switch leaves tail untouched");
     check(rig.fsm.dispatches() == 2u, "variant switch one dispatch");
 
-    if (!run_dynamic_case(rig, binding(1u, 0u, 2u, 1u, 1u), ++plans,
+    if (!run_runtime_case(rig, binding(1u, 0u, 2u, 1u, 1u), ++plans,
                           "grid override")) {
         return false;
     }
@@ -183,7 +183,7 @@ bool dynamic_geometry_case() {
     check(rig.fsm.dispatches() == 3u, "grid override one dispatch");
 
     const uint64_t before = rig.fsm.dispatches();
-    if (!run_dynamic_case(rig, binding(0u, 0u, 0u, 0u, 0u), ++plans,
+    if (!run_runtime_case(rig, binding(0u, 0u, 0u, 0u, 0u), ++plans,
                           "disabled")) {
         return false;
     }
@@ -214,13 +214,13 @@ bool prepared_prefetch_case() {
         mcu::make_probe_variant(1u, rig.meta, 32u, 1u)};
     if (!rig.upload(chain.nodes, variants)) return false;
 
-    std::vector<mcu::McuDynamicNodeBinding> bindings(5u);
+    std::vector<mcu::McuRuntimeNodeBinding> bindings(5u);
     bindings[0] = binding(1u, 0u, 0u, 0u, 0u);
     bindings[1] = binding(1u, 0u, 0u, 0u, 0u);
     bindings[2] = binding(1u, 1u, 4u, 1u, 1u);
     bindings[3] = binding(1u, 0u, 0u, 0u, 0u);
     bindings[4] = binding(1u, 0u, 0u, 0u, 0u);
-    if (!rig.set_dynamic_bindings(bindings.data(),
+    if (!rig.set_runtime_bindings(bindings.data(),
                                   static_cast<uint32_t>(bindings.size()))) {
         return false;
     }

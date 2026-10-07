@@ -65,8 +65,8 @@ struct alignas(64) GpuMcuFsmState {
     uint32_t plan_id = 0;
     const McuKernelVariantDesc* variants = nullptr;
     uint32_t variant_count = 0;
-    const McuDynamicNodeBinding* dynamic_node_bindings = nullptr;
-    uint32_t dynamic_node_binding_count = 0;
+    const McuRuntimeNodeBinding* runtime_node_bindings = nullptr;
+    uint32_t runtime_node_binding_count = 0;
     const McuKernargSourceDesc* kernarg_sources = nullptr;
     uint32_t kernarg_source_count = 0;
     uint32_t reserved0 = 0;
@@ -128,8 +128,8 @@ struct GpuMcuFsmConfig {
     uint32_t plan_id = 0;
     const McuKernelVariantDesc* variants = nullptr;
     uint32_t variant_count = 0;
-    const McuDynamicNodeBinding* dynamic_node_bindings = nullptr;
-    uint32_t dynamic_node_binding_count = 0;
+    const McuRuntimeNodeBinding* runtime_node_bindings = nullptr;
+    uint32_t runtime_node_binding_count = 0;
     const McuKernargSourceDesc* kernarg_sources = nullptr;
     uint32_t kernarg_source_count = 0;
     const GpuMcuRetainedPacket* retained = nullptr;
