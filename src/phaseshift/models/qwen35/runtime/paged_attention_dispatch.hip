@@ -472,7 +472,7 @@ PhysicalResolveStatus append_prefill_region(
 namespace {
 
 enum class PagedAttentionResolveMode : uint8_t {
-    DynamicHost = 0,
+    HostImmediate = 0,
     StaticPlan = 1,
 };
 
@@ -571,7 +571,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical(
     const ::ps::runtime::Program& program, size_t dispatch_index,
     const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
     return resolve_paged_attention_physical_impl(
-        program, dispatch_index, ctx, PagedAttentionResolveMode::DynamicHost,
+        program, dispatch_index, ctx, PagedAttentionResolveMode::HostImmediate,
         out);
 }
 
