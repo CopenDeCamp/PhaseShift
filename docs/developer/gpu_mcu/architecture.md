@@ -81,15 +81,102 @@ runnable request == 0         -> idle
 request_stop()                -> application / model runtime shutdown 専用
 ```
 
-### static plan
+### Static Plan Compile / Runtime Binding / Execution
 
-Persistent MCU start 後に Host は compile / upload / switch を行わない。
-必要な execution plan は controller start 前に準備する。
+GPU-MCU の execution model は次の 3 概念に分かれる。
+コード・型・テストでは `static` / `dynamic` という単語だけで説明せず、
+どれを指すのかを必ず明示する。特に `Dynamic` 単独で architecture 概念を表さない。
 
-batch ごとの actual rows / request count / output count /
-attention region rows / verification count / runtime zero-work は、
-device-side binding / invocation patch / dynamic node binding で処理する。
-実行中の batch 値を理由として Host が recompile してはいけない。
+#### Static Plan Compile
+
+`Program` / model configuration / device と kernel capability /
+maximum runtime capacity / long-lived resource address を入力として、
+
+- static execution topology
+- available physical kernel variants
+- maximum geometry
+- runtime patch schema
+- runtime binding schema
+
+を生成する処理である。
+
+`Static` は「全値が compile-time constant」という意味ではない。
+意味は **Persistent MCU start 後に Host が recompile しないこと** である。
+compile と upload は controller start 前に一度だけ行う。
+
+#### Runtime Binding
+
+Static Plan へ今回の execution loop の値を適用する処理である。
+入力の正本は `DeviceBatchContext` であり、新しい巨大な Context を作らない。
+
+- 入力: `actual_rows` / `num_requests` / `num_outputs` / `num_verify_requests` /
+  request row ranges / PREFILL・DECODE・VERIFY の各 rows / runtime zero-work
+- 出力: Runtime Node Binding（`McuDynamicNodeBinding`） /
+  Runtime Invocation Patch（`McuInvocationPatch`） / runtime geometry /
+  runtime node enable/disable / runtime variant selection
+
+`McuInvocationPatch` は Static Plan が用意した patch location へ
+`DeviceBatchContext` から live value を書き込む contract であり、
+Static / Runtime 分離を成立させる主要 mechanism である。機構としては削除しない。
+
+#### Execution
+
+`Static Plan + Runtime Binding` で解決された effective node を AQL で実行するだけである。
+Execution 自身は「Prefill か Decode か」「actual_rows はいくつか」
+「batch に request が何個あるか」を判断しない。Binding 済みの結果だけを消費する。
+
+#### データフロー
+
+```text
+Program
+  -> Static Plan Compiler        （controller start 前に一度）
+  -> Static Plan                 （upload 一度）
+  -> GPU
+       |
+       +-- Runtime loop -------------------------
+       |     DeviceBatchContext
+       |        -> Runtime Binder
+       |        -> effective plan
+       |        -> Executor
+       |        -> Commit
+       +----------------------------------------
+```
+
+Host は controller start 後に plan compile を行わない。
+
+#### 判断基準
+
+コードを見たとき次の 2 問で分類する。
+
+1. controller lifetime 中に値が変わるか？ YES なら **Runtime Binding**
+2. 最大値として事前確保できるか？ YES なら **Static Plan** へ capacity として持つ
+
+#### 具体例
+
+| 項目 | Static Plan Compile | Runtime Binding |
+|---|---|---|
+| rows | `row_capacity = 16` | `actual_rows = 7` |
+| request | `request_capacity = 32` | `num_requests = 4` |
+| Prefill / Decode | 「prefill kernel が使用可能」という capability | 今回どの request が Prefill か |
+| Attention split | 「split16 variant が利用可能」という事実 | 今回 split を使うか |
+| kernel object / CU placement | すべて | — |
+| workgroup_count | 最大 geometry | effective geometry |
+
+#### 一文での境界
+
+> Static Compile は「可能性」を作る。
+> Runtime Binding は「今回の現実」を与える。
+> Executor はそれを実行する。
+
+### zero-work との関係
+
+Static Plan の geometry と runtime batch geometry が同じであることを
+前提にしてはいけない。
+
+長寿命 controller では start 後に batch geometry が何度も変化するため、
+runtime zero-work は **Runtime Binding** の責務になる。
+runtime skip mechanism（`McuDynamicNodeBinding::enabled` 等）を保存する。
+Static Compile 側で「今回 rows = 0 だから node 不要」と判断してはいけない。
 
 ### zero-work との関係
 
@@ -434,7 +521,7 @@ Host
 ```text
 Program (lower_to_primitives の出力)
   -> compile_mcu_plan(program, context, options, McuCompiledPlan)   （controller start 前）
-  -> McuCompiledPlan { nodes, variants, invocation, epilogue, dynamic binding }
+  -> McuCompiledPlan { nodes, variants, invocation, epilogue, runtime binding schema }
   -> GpuMcuPersistentMcu へ configure と upload                     （controller start 前）
   -> GpuMcuPersistentMcu::start()
   -> mcu_run_once が plan node を解釈して AQL dispatch
@@ -486,7 +573,7 @@ kernel 固有の field を持たない。
 - descriptor index は node index である。`kernarg_sources[node_index]` がその node の source になる。
 - `source` は immutable template ではない。`gpu_mcu_bind_execution_plan()` が invocation table の
   row-global field を patch した後の、その dispatch 時点で完成済みの explicit kernarg を指す。
-- dynamic patch は従来どおり `McuInvocationPatch` で行う。patch は invocation table を書き換え、
+- Runtime Invocation Patch は従来どおり `McuInvocationPatch` で行う。patch は invocation table を書き換え、
   executor はその後を copy するだけである。pointer 幅の patch は
   `McuInvocationPatch::width == 8` で表し、`null_guard` で null pointer の上書きを避ける。
 - hidden args（`mcu_apply_hidden_args()`）と AQL launch metadata（`build_aql_launch_metadata()`）は
