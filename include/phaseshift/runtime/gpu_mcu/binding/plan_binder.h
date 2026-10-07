@@ -9,11 +9,11 @@
 
 namespace ps::runtime::gpu_mcu {
 
-__host__ __device__ __forceinline__ uint32_t gpu_mcu_patch_source_value(
+__host__ __device__ __forceinline__ uint64_t gpu_mcu_patch_source_value(
     uint8_t source,
     uint32_t param,
     const DeviceBatchContext* context) noexcept {
-    if (context == nullptr) return 0u;
+    if (context == nullptr) return 0ull;
     switch (static_cast<McuInvocationPatchSource>(source)) {
         case McuInvocationPatchSource::ActualRows:
             return context->actual_rows;
@@ -22,17 +22,19 @@ __host__ __device__ __forceinline__ uint32_t gpu_mcu_patch_source_value(
         case McuInvocationPatchSource::NumOutputs:
             return context->num_outputs;
         case McuInvocationPatchSource::ActualRowsTimesParam:
-            return context->actual_rows * param;
+            return static_cast<uint64_t>(context->actual_rows) * param;
         case McuInvocationPatchSource::NumOutputsTimesParam:
-            return context->num_outputs * param;
+            return static_cast<uint64_t>(context->num_outputs) * param;
         case McuInvocationPatchSource::VerifyRequests:
             return context->num_verify_requests != 0u ? 1u : 0u;
+        case McuInvocationPatchSource::BatchTokenIds:
+            return reinterpret_cast<uint64_t>(context->token_ids);
         case McuInvocationPatchSource::Bf16ExactRowsVariant: {
             const uint32_t rows = context->num_outputs != 0u
                                       ? context->num_outputs
                                       : context->actual_rows;
             if (rows == 0u || rows > 16u) return 0xFFFFFFFFu;
-            return param + (rows - 1u);
+            return static_cast<uint64_t>(param) + (rows - 1u);
         }
         case McuInvocationPatchSource::AttentionRegionRows: {
             if (context->requests == nullptr) return 0u;
@@ -65,8 +67,15 @@ __host__ __device__ __forceinline__ void gpu_mcu_bind_execution_plan(
     for (uint32_t i = 0; i < patch_count; ++i) {
         const McuInvocationPatch& patch = patches[i];
         if (patch.target == 0u) continue;
-        *reinterpret_cast<uint32_t*>(patch.target) =
+        const uint64_t value =
             gpu_mcu_patch_source_value(patch.source, patch.param, context);
+        if (patch.null_guard != 0u && value == 0ull) continue;
+        if (patch.width == 8u) {
+            *reinterpret_cast<uint64_t*>(patch.target) = value;
+        } else {
+            *reinterpret_cast<uint32_t*>(patch.target) =
+                static_cast<uint32_t>(value);
+        }
     }
 #ifdef __HIP_DEVICE_COMPILE__
     __threadfence_system();

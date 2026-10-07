@@ -35,12 +35,15 @@ enum class McuInvocationPatchSource : uint8_t {
     Bf16ExactRowsVariant = 5,
     ActualRowsTimesParam = 6,
     NumOutputsTimesParam = 7,
+    BatchTokenIds = 8,
 };
 
 struct alignas(16) McuInvocationPatch {
     uint64_t target = 0;
     uint8_t source = 0;
-    uint8_t reserved[3] = {};
+    uint8_t width = 0;
+    uint8_t null_guard = 0;
+    uint8_t reserved = 0;
     uint32_t param = 0;
 };
 
@@ -49,5 +52,7 @@ static_assert(offsetof(McuInvocationPatch, param) == 12);
 static_assert(alignof(McuInvocationPatch) == 16);
 static_assert(offsetof(McuInvocationPatch, target) == 0);
 static_assert(offsetof(McuInvocationPatch, source) == 8);
+static_assert(offsetof(McuInvocationPatch, width) == 9);
+static_assert(offsetof(McuInvocationPatch, null_guard) == 10);
 
 }  // namespace ps::runtime::gpu_mcu

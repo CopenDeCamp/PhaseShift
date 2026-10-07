@@ -295,7 +295,8 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
     }
     const uint32_t count = 2u * gdn_conv_count_ + 3u * gdn_recur_count_ +
                            argmax_f32_count_ + output_gather_count_ +
-                           verify_accept_count_ +
+                           verify_accept_count_ + embedding_count_ +
+                           embedding_psq8_count_ +
                            static_cast<uint32_t>(attention_regions_.size()) +
                            static_cast<uint32_t>(bf16_catalogs_.size()) +
                            geometry_patch_count +
@@ -426,6 +427,30 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
             offsetof(mcu::McuVerifyAcceptPrefixInvocation, request_count));
         patches[index].source =
             static_cast<uint8_t>(mcu::McuInvocationPatchSource::NumRequests);
+        ++index;
+    }
+    auto* embedding_base = static_cast<unsigned char*>(embedding_);
+    for (uint32_t i = 0u; i < embedding_count_; ++i) {
+        patches[index].target = reinterpret_cast<uint64_t>(
+            embedding_base +
+            static_cast<size_t>(i) * sizeof(mcu::McuEmbeddingBf16Invocation) +
+            offsetof(mcu::McuEmbeddingBf16Invocation, token_ids));
+        patches[index].source = static_cast<uint8_t>(
+            mcu::McuInvocationPatchSource::BatchTokenIds);
+        patches[index].width = 8u;
+        patches[index].null_guard = 1u;
+        ++index;
+    }
+    auto* embedding_psq8_base = static_cast<unsigned char*>(embedding_psq8_);
+    for (uint32_t i = 0u; i < embedding_psq8_count_; ++i) {
+        patches[index].target = reinterpret_cast<uint64_t>(
+            embedding_psq8_base +
+            static_cast<size_t>(i) * sizeof(mcu::McuEmbeddingPsq8Invocation) +
+            offsetof(mcu::McuEmbeddingPsq8Invocation, token_ids));
+        patches[index].source = static_cast<uint8_t>(
+            mcu::McuInvocationPatchSource::BatchTokenIds);
+        patches[index].width = 8u;
+        patches[index].null_guard = 1u;
         ++index;
     }
     auto* paged_base = static_cast<unsigned char*>(paged_);
@@ -674,16 +699,111 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
         (void)release_invocations();
         return status;
     }
+    auto invocation_table = [&](uint16_t recipe, const void*& base,
+                                uint32_t& count,
+                                std::size_t& stride) -> bool {
+        base = nullptr;
+        count = 0u;
+        stride = 0u;
+        switch (recipe) {
+            case mcu::kMcuKernargRecipeRmsNormBf16PfOnePlus:
+                base = rms_;
+                count = rms_count_;
+                stride = sizeof(mcu::McuRmsNormInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeActivationQuantizeA8:
+                base = quant_;
+                count = quant_count_;
+                stride = sizeof(mcu::McuActivationQuantizeInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeActivationQuantizeE4m3K5120:
+                base = e4m3_;
+                count = e4m3_count_;
+                stride = sizeof(mcu::McuActivationQuantizeE4m3Invocation);
+                return true;
+            case mcu::kMcuKernargRecipePsq4Decode1Bf16U16:
+            case mcu::kMcuKernargRecipePsq4Decode1Bf16U8:
+            case mcu::kMcuKernargRecipePsq8Decode1Bf16U8:
+                base = psq4_;
+                count = psq4_count_;
+                stride = sizeof(mcu::McuPsq4Decode1Invocation);
+                return true;
+            case mcu::kMcuKernargRecipePsq4MultiRowBf16:
+                base = psq4_multi_;
+                count = psq4_multi_count_;
+                stride = sizeof(mcu::McuPsq4MultiRowInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeArgmaxF32:
+                base = argmax_f32_;
+                count = argmax_f32_count_;
+                stride = sizeof(mcu::McuArgmaxF32Invocation);
+                return true;
+            case mcu::kMcuKernargRecipeElementwise:
+                base = elementwise_;
+                count = elementwise_count_;
+                stride = sizeof(mcu::McuElementwiseInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeRope:
+                base = rope_;
+                count = rope_count_;
+                stride = sizeof(mcu::McuRopeInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeKvAppend:
+                base = kv_append_;
+                count = kv_append_count_;
+                stride = sizeof(mcu::McuKvAppendInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeBf16ExactRows:
+                base = bf16_;
+                count = bf16_count_;
+                stride = sizeof(mcu::McuBf16ExactRowsInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeBf16Wmma:
+                base = bf16_wmma_;
+                count = bf16_wmma_count_;
+                stride = sizeof(mcu::McuBf16WmmaInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeL2Normalize:
+                base = l2_;
+                count = l2_count_;
+                stride = sizeof(mcu::McuL2NormalizeInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeEmbeddingBf16:
+                base = embedding_;
+                count = embedding_count_;
+                stride = sizeof(mcu::McuEmbeddingBf16Invocation);
+                return true;
+            case mcu::kMcuKernargRecipeEmbeddingPsq8:
+                base = embedding_psq8_;
+                count = embedding_psq8_count_;
+                stride = sizeof(mcu::McuEmbeddingPsq8Invocation);
+                return true;
+            case mcu::kMcuKernargRecipeOutputGatherBf16:
+                base = output_gather_;
+                count = output_gather_count_;
+                stride = sizeof(mcu::McuOutputGatherBf16Invocation);
+                return true;
+            default:
+                return false;
+        }
+    };
     std::vector<mcu::McuKernargSourceDesc> sources(plan.nodes.size());
     for (std::size_t i = 0; i < plan.nodes.size(); ++i) {
         const mcu::McuPlanNode& node = plan.nodes[i];
-        if (node.kernarg_recipe !=
-            mcu::kMcuKernargRecipeRmsNormBf16PfOnePlus) {
+        if (node.kernarg_recipe == mcu::kMcuKernargRecipeProbe) {
+            sources[i].flags = mcu::kMcuKernargSourceSupervisorProbe;
+            sources[i].explicit_args_bytes =
+                static_cast<uint32_t>(sizeof(mcu::GpuMcuFsmWorkerArgs));
             continue;
         }
-        if (node.invocation_index >= rms_count_) continue;
-        sources[i] = prepared_kernarg_source(
-            rms_, node.invocation_index, sizeof(mcu::McuRmsNormInvocation));
+        const void* base = nullptr;
+        uint32_t count = 0u;
+        std::size_t stride = 0u;
+        if (!invocation_table(node.kernarg_recipe, base, count, stride)) {
+            continue;
+        }
+        if (base == nullptr || node.invocation_index >= count) continue;
+        sources[i] = prepared_kernarg_source(base, node.invocation_index, stride);
     }
     status = upload_table(&kernarg_sources_, &kernarg_source_count_, sources);
     if (!status.ok()) {
