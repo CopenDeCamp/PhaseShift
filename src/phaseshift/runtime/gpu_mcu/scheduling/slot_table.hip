@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/slot_table.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/slot_table.h>
 
 #include <cstddef>
 

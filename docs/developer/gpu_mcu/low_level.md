@@ -631,7 +631,7 @@ MCU continuous batching の永続 request state。CPU runtime の
 `RuntimeRequest` / `SequenceSlotPool` とは**別物**で、共有もしない。
 
 - `GpuMcuSlotState` は 256 byte / align 64 の固定 ABI
-  (`include/phaseshift/runtime/gpu_mcu/slot_table.h`)。`phase`（idle / prefill /
+  (`include/phaseshift/runtime/gpu_mcu/scheduling/slot_table.h`)。`phase`（idle / prefill /
   decode / verify）と `terminal_reason`、`cancel_requested`、`output_blocked` は
   直交しており、phase へ混ぜない。
 - slot index と `handle.slot` は一致する。`generation` は 0 を恒久的に invalid とし、

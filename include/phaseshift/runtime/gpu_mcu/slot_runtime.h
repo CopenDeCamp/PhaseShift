@@ -2,8 +2,8 @@
 
 #include <phaseshift/runtime/gpu_mcu/io/output_ring.h>
 #include <phaseshift/runtime/gpu_mcu/slot_binding.h>
-#include <phaseshift/runtime/gpu_mcu/sequence_resource.h>
-#include <phaseshift/runtime/gpu_mcu/slot_table.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/sequence_resource.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/slot_table.h>
 
 #include <hip/hip_runtime.h>
 

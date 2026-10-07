@@ -1,10 +1,10 @@
 #pragma once
 
 #include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/gpu_mcu/batch_planner.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/batch_planner.h>
 #include <phaseshift/runtime/gpu_mcu/slot_binding.h>
 #include <phaseshift/runtime/gpu_mcu/slot_runtime.h>
-#include <phaseshift/runtime/gpu_mcu/slot_table.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/slot_table.h>
 #include <phaseshift/runtime/gpu_mcu/stop_conditions.h>
 
 #include <hip/hip_runtime.h>

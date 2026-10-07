@@ -2,8 +2,8 @@
 
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/gpu_mcu/sequence_resource.h>
-#include <phaseshift/runtime/gpu_mcu/slot_table.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/sequence_resource.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/slot_table.h>
 
 #include <hip/hip_runtime.h>
 

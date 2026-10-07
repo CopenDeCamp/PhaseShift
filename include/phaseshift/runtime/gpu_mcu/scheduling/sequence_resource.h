@@ -2,7 +2,7 @@
 
 #include <hip/hip_runtime.h>
 
-#include <phaseshift/runtime/gpu_mcu/kv_page_allocator.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/kv_page_allocator.h>
 
 #include <cstdint>
 

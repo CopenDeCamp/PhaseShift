@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/batch_planner.h>
+#include <phaseshift/runtime/gpu_mcu/scheduling/batch_planner.h>
 
 namespace ps::runtime::gpu_mcu {
 namespace {
