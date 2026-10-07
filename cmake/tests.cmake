@@ -1,8 +1,8 @@
 # PhaseShift test targets.
 #
 # Test policy:
-#   - required: 14 self-contained contract / correctness tests.
-#     Repository + ROCm + 1 GPU only. No external files, no skip machinery.
+#   - required: self-contained contract / correctness tests.
+#     Repository + ROCm + 1 GPU only. No external files.
 #   - optional: external-model / heavy tests. Built only when
 #     PHASESHIFT_BUILD_OPTIONAL_TESTS=ON.
 #
@@ -38,9 +38,11 @@ phaseshift_set_hip_archs(phaseshift-resident-fixture)
 #
 # Links exactly the listed libraries (never the phaseshift aggregate).
 # GPU_COUNT > 0 wraps the test in phaseshift-gpu-test-runner:
-# VRAM budget reservation (default budget 24GB/GPU, env
-# PHASESHIFT_TEST_GPU_BUDGET_GB), GPU assignment via HIP_VISIBLE_DEVICES,
-# hard deadline (SIGKILL on timeout), exit code normalization.
+# VRAM budget reservation (per-GPU budget derived from the device's own VRAM,
+# forced by --budget-gb / env PHASESHIFT_TEST_GPU_BUDGET_GB), GPU assignment
+# via HIP_VISIBLE_DEVICES, hard deadline (SIGKILL on timeout), exit code
+# normalization. Exit 77 is reported as CTest SKIP, but required acceptance
+# still counts it as a failure.
 function(phaseshift_add_test)
     cmake_parse_arguments(
         PS_TEST
@@ -83,7 +85,9 @@ function(phaseshift_add_test)
             set_tests_properties(${PS_TEST_NAME} PROPERTIES TIMEOUT ${PS_TEST_TIMEOUT})
         endif()
     endif()
-    set_tests_properties(${PS_TEST_NAME} PROPERTIES LABELS "${PS_TEST_LABELS}")
+    set_tests_properties(${PS_TEST_NAME} PROPERTIES
+        LABELS "${PS_TEST_LABELS}"
+        SKIP_RETURN_CODE 77)
 endfunction()
 
 # ---------------------------------------------------------------------------

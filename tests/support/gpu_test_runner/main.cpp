@@ -23,12 +23,14 @@ using clk = std::chrono::steady_clock;
 
 namespace {
 
+constexpr long kFallbackBudgetGb = 24;
+
 struct Config {
     int gpu_count = 1;
     long cost_gb = 1;
     long timeout_sec = 120;
     long reserve_timeout_sec = 900;
-    long budget_gb = 24;
+    long budget_gb = 0;
     std::string state_dir;
     std::vector<std::string> cmd;
 };
@@ -64,6 +66,38 @@ void close_lock(int fd) {
         flock(fd, LOCK_UN);
         ::close(fd);
     }
+}
+
+std::vector<std::string> render_nodes() {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator("/sys/class/drm", ec)) {
+        const std::string n = e.path().filename().string();
+        if (n.rfind("renderD", 0) != 0 || n.size() <= 7) continue;
+        bool digits = true;
+        for (char c : n.substr(7)) {
+            if (c < '0' || c > '9') {
+                digits = false;
+                break;
+            }
+        }
+        if (digits) out.push_back(n);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+long vram_budget_gb(int gpu) {
+    if (g_cfg.budget_gb > 0) return g_cfg.budget_gb;
+    static const std::vector<std::string> nodes = render_nodes();
+    if (gpu < 0 || static_cast<size_t>(gpu) >= nodes.size()) {
+        return kFallbackBudgetGb;
+    }
+    std::ifstream in("/sys/class/drm/" + nodes[gpu] +
+                     "/device/mem_info_vram_total");
+    long long bytes = 0;
+    if (!(in >> bytes) || bytes <= 0) return kFallbackBudgetGb;
+    return static_cast<long>(bytes / (1024ll * 1024 * 1024));
 }
 
 std::vector<std::tuple<int, int, long>> read_entries() {
@@ -171,22 +205,8 @@ std::vector<int> candidate_gpus() {
         out.erase(std::unique(out.begin(), out.end()), out.end());
         return out;
     }
-    std::error_code ec;
-    size_t render_nodes = 0;
-    for (const auto& e : fs::directory_iterator("/sys/class/drm", ec)) {
-        std::string n = e.path().filename().string();
-        if (n.rfind("renderD", 0) == 0 && n.size() > 7) {
-            bool digits = true;
-            for (char c : n.substr(7)) {
-                if (c < '0' || c > '9') {
-                    digits = false;
-                    break;
-                }
-            }
-            if (digits) ++render_nodes;
-        }
-    }
-    for (size_t i = 0; i < render_nodes; ++i) out.push_back(static_cast<int>(i));
+    const size_t count = render_nodes().size();
+    for (size_t i = 0; i < count; ++i) out.push_back(static_cast<int>(i));
     return out;
 }
 
@@ -213,7 +233,9 @@ bool reserve(const std::vector<int>& candidates, std::vector<int>* picked) {
                         break;
                     }
                 }
-                if (!bad && used[g] + g_cfg.cost_gb <= g_cfg.budget_gb) fit.push_back(g);
+                if (!bad && used[g] + g_cfg.cost_gb <= vram_budget_gb(g)) {
+                    fit.push_back(g);
+                }
             }
             if (static_cast<int>(fit.size()) >= g_cfg.gpu_count) {
                 std::stable_sort(fit.begin(), fit.end(),

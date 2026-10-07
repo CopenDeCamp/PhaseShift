@@ -29,8 +29,10 @@ required は CPU contract test（safetensors writer、FPX layout、量子化 pay
 codec、selector、architecture boundary 等）と、gfx1201 限定の GPU kernel /
 runtime test、GPU-MCU substrate test、bench `--help` smoke からなる。
 arch 非適合の kernel test は非適合 arch では CTest レベルで DISABLED にし、
-plain `ctest` が誤った FAIL を出さないようにしている（test binary 側は exit 77 を
-返すが、CTest に skip 機構を置かない）。
+external model 不在・GPU 不足などによる exit 77 は `SKIP_RETURN_CODE 77` で
+CTest の Skipped として扱って、plain `ctest` が誤った FAIL を出さないようにしている。
+Skipped は開発者ローカル向けの表示にすぎず、required acceptance は JUnit の
+`<skipped>` を failure として数えるため通らない。
 
 ## GPU-MCU テスト
 
