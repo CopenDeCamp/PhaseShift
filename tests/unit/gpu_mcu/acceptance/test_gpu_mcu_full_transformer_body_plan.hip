@@ -408,6 +408,8 @@ int main() {
     q35::HostExecutionContext ctx;
     ctx.batch_context =
         batch_storage.device_struct.data<::ps::runtime::DeviceBatchContext>();
+    ctx.device_requests =
+        batch_storage.requests.data<::ps::runtime::DeviceRequestDescriptor>();
     ctx.workspace = static_cast<uint8_t*>(workspace);
     ctx.workspace_bytes = program.workspace.total_bytes;
     ctx.external_inputs = external_inputs.data();

@@ -244,6 +244,8 @@ int main() {
     }
     ctx.batch_context = batch_storage.device_struct
                             .data<::ps::runtime::DeviceBatchContext>();
+    ctx.device_requests =
+        batch_storage.requests.data<::ps::runtime::DeviceRequestDescriptor>();
 
     uint32_t begin = 0u;
     uint32_t end = 0u;

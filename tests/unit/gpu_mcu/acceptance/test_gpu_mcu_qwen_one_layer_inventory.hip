@@ -333,6 +333,8 @@ int main() {
     }
     ctx.batch_context = batch_storage.device_struct
                             .data<::ps::runtime::DeviceBatchContext>();
+    ctx.device_requests =
+        batch_storage.requests.data<::ps::runtime::DeviceRequestDescriptor>();
 
     std::printf(
         "index source debug_name kernel_id compute_spec in out weight ws mcu\n");
