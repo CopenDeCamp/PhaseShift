@@ -3,7 +3,7 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/gpu_mcu/io/request_ingress.h>
-#include <phaseshift/runtime/gpu_mcu/batch_binding.h>
+#include <phaseshift/runtime/gpu_mcu/binding/batch_binding.h>
 #include <phaseshift/runtime/gpu_mcu/batch_commit.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/batch_planner.h>
 #include <phaseshift/runtime/gpu_mcu/execution_bridge.h>

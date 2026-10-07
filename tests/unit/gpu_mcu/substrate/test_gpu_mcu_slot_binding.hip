@@ -1,5 +1,5 @@
 #include <phaseshift/runtime/gpu_mcu/io/request_ingress.h>
-#include <phaseshift/runtime/gpu_mcu/slot_binding.h>
+#include <phaseshift/runtime/gpu_mcu/binding/slot_binding.h>
 
 #include <hip/hip_runtime.h>
 

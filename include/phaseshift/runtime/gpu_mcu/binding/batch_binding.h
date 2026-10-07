@@ -3,7 +3,7 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/batch_planner.h>
-#include <phaseshift/runtime/gpu_mcu/slot_binding.h>
+#include <phaseshift/runtime/gpu_mcu/binding/slot_binding.h>
 
 #include <hip/hip_runtime.h>
 

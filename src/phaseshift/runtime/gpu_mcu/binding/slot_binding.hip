@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/slot_binding.h>
+#include <phaseshift/runtime/gpu_mcu/binding/slot_binding.h>
 
 #include <cstddef>
 

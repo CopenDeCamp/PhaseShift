@@ -516,7 +516,7 @@ device 側で書き換える。Host は loop ごとの再 compile / 再 upload �
 - `source`: `ActualRows` / `NumRequests` / `NumOutputs`（`McuInvocationPatchSource`）。
 
 `gpu_mcu_bind_execution_plan(context, patches, patch_count)`
-（`include/phaseshift/runtime/gpu_mcu/plan_binder.h`）が各 patch に
+（`include/phaseshift/runtime/gpu_mcu/binding/plan_binder.h`）が各 patch に
 `context` の該当値を書き、`__threadfence_system()` で publish する。host でも呼べるよう
 `__host__ __device__`。
 

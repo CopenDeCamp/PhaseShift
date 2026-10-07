@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/batch_binding.h>
+#include <phaseshift/runtime/gpu_mcu/binding/batch_binding.h>
 
 namespace ps::runtime::gpu_mcu {
 namespace {
