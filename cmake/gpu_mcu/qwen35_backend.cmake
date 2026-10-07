@@ -1,5 +1,5 @@
 add_library(phaseshift_qwen35_gpu_mcu STATIC
-    src/phaseshift/runtime/gpu_mcu/embedded_kernels.cpp
+    src/phaseshift/models/qwen35/runtime/gpu_mcu/embedded_kernels.cpp
 )
 target_compile_features(phaseshift_qwen35_gpu_mcu PRIVATE cxx_std_20)
 target_include_directories(phaseshift_qwen35_gpu_mcu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

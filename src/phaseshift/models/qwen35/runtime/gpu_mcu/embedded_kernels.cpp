@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/embedded_kernels.h>
+#include <phaseshift/models/qwen35/runtime/gpu_mcu/embedded_kernels.h>
 
 #include <cstring>
 
