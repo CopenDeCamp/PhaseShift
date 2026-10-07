@@ -1,6 +1,5 @@
 #pragma once
 
-#include <phaseshift/runtime/gpu_mcu/execution/kernarg_recipe.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/retained_packet.h>
 
 #include <cstddef>
@@ -111,7 +110,7 @@ enum : uint16_t {
 struct McuPlanNode {
     uint16_t variant_id = 0;
     uint16_t next = kMcuNoNext;
-    uint16_t kernarg_recipe = kMcuKernargRecipeProbe;
+    uint16_t kernarg_recipe = 0;
     uint16_t completion_slot = 0;
     uint32_t value = 0;
     uint16_t element_count = 0;
@@ -125,7 +124,7 @@ static_assert(sizeof(McuPlanNode) == 28);
 
 struct McuKernelVariantDesc {
     uint16_t variant_id = 0;
-    uint16_t kernarg_recipe = kMcuKernargRecipeProbe;
+    uint16_t kernarg_recipe = 0;
     uint32_t kernarg_size = 0;
     uint32_t workgroup_count_x = 1;
     uint32_t workgroup_count_y = 1;

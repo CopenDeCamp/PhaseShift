@@ -74,7 +74,7 @@ McuKernelVariantDesc make_probe_variant(uint16_t variant_id,
                                         uint32_t workgroup_count_x,
                                         const AqlMemoryPolicy& policy,
                                         AqlHiddenArgsPolicy hidden_policy) {
-    return make_kernel_variant(variant_id, meta, kMcuKernargRecipeProbe,
+    return make_kernel_variant(variant_id, meta, 0u,
                                workgroup_x, workgroup_count_x, policy,
                                hidden_policy);
 }

@@ -3,12 +3,9 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/gpu_mcu/binding/kernarg_source_contract.h>
 #include <phaseshift/runtime/gpu_mcu/binding/plan_binding_contract.h>
-#include <phaseshift/runtime/gpu_mcu/execution/kernarg_recipe.h>
-#include <phaseshift/runtime/gpu_mcu/execution/invocation_abi.h>
 #include <phaseshift/runtime/gpu_mcu/execution/fsm_contract.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/device_completion.h>
-#include <phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/retained_packet.h>
 
 #include <hip/hip_runtime.h>

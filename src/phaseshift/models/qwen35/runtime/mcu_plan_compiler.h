@@ -1,7 +1,10 @@
 #pragma once
 
 #include <phaseshift/core/status.h>
+#include <phaseshift/models/qwen35/runtime/gpu_mcu/invocation_abi.h>
+#include <phaseshift/models/qwen35/runtime/gpu_mcu/kernarg_recipe.h>
 #include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.h>
 #include <phaseshift/runtime/program/program.h>
 
 #include <cstdint>
