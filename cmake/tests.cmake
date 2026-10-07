@@ -38,11 +38,11 @@ phaseshift_set_hip_archs(phaseshift-resident-fixture)
 #
 # Links exactly the listed libraries (never the phaseshift aggregate).
 # GPU_COUNT > 0 wraps the test in phaseshift-gpu-test-runner:
-# VRAM budget reservation (per-GPU budget derived from the device's own VRAM,
-# forced by --budget-gb / env PHASESHIFT_TEST_GPU_BUDGET_GB), GPU assignment
-# via HIP_VISIBLE_DEVICES, hard deadline (SIGKILL on timeout), exit code
-# normalization. Exit 77 is reported as CTest SKIP, but required acceptance
-# still counts it as a failure.
+# integrated GPUs are dropped from the candidate list, VRAM budget reservation
+# (per-GPU budget derived from the device's own VRAM, forced by --budget-gb /
+# env PHASESHIFT_TEST_GPU_BUDGET_GB), GPU assignment via HIP_VISIBLE_DEVICES,
+# hard deadline (SIGKILL on timeout), exit code normalization. Exit 77 is
+# reported as CTest SKIP, but required acceptance still counts it as a failure.
 function(phaseshift_add_test)
     cmake_parse_arguments(
         PS_TEST

@@ -87,6 +87,11 @@ std::vector<std::string> render_nodes() {
     return out;
 }
 
+bool integrated_render_node(const std::string& node) {
+    std::error_code ec;
+    return fs::exists("/sys/class/drm/" + node + "/device/firmware_node", ec);
+}
+
 long vram_budget_gb(int gpu) {
     if (g_cfg.budget_gb > 0) return g_cfg.budget_gb;
     static const std::vector<std::string> nodes = render_nodes();
@@ -205,8 +210,12 @@ std::vector<int> candidate_gpus() {
         out.erase(std::unique(out.begin(), out.end()), out.end());
         return out;
     }
-    const size_t count = render_nodes().size();
-    for (size_t i = 0; i < count; ++i) out.push_back(static_cast<int>(i));
+    const std::vector<std::string> nodes = render_nodes();
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (!integrated_render_node(nodes[i])) out.push_back(static_cast<int>(i));
+    }
+    if (!out.empty()) return out;
+    for (size_t i = 0; i < nodes.size(); ++i) out.push_back(static_cast<int>(i));
     return out;
 }
 

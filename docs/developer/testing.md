@@ -34,6 +34,20 @@ CTest の Skipped として扱って、plain `ctest` が誤った FAIL を出さ
 Skipped は開発者ローカル向けの表示にすぎず、required acceptance は JUnit の
 `<skipped>` を failure として数えるため通らない。
 
+## GPU 予約
+
+`GPU_COUNT > 0` のテストは `phaseshift-gpu-test-runner` で wrap され、
+GPU を論理 VRAM で予約してから実行する。予約できないままで
+`PHASESHIFT_TEST_GPU_RESERVE_TIMEOUT`（既定 900 秒）を経過すると失敗する。
+
+- 予約量は `GPU_COST_GB`（既定 1 GiB）。上限は各 GPU の実 VRAM
+  （`/sys/class/drm/<node>/device/mem_info_vram_total`）から求める。
+  明示指定は `--budget-gb` と `PHASESHIFT_TEST_GPU_BUDGET_GB`。
+- iGPU は候補から外す。判定は `/sys/class/drm/<node>/device/firmware_node` の有無で、
+  iGPU のみの環境では外した後の空リストを避けて iGPU を候補にする。
+- `PHASESHIFT_TEST_GPUS` / `HIP_VISIBLE_DEVICES` が指定されている場合は
+  明示指定として扱い、iGPU 除外を適用しない。
+
 ## GPU-MCU テスト
 
 GPU-MCU テストは `tests/unit/gpu_mcu/` の下に、**何を保証しているか**で分類する。
