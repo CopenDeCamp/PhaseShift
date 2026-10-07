@@ -196,7 +196,6 @@ struct Rig {
     uint32_t dynamic_binding_count = 0;
     mcu::McuKernargSourceDesc* kernarg_sources = nullptr;
     uint32_t kernarg_source_count = 0;
-    bool kernarg_sources_explicit = false;
     mcu::McuDispatchTiming* timing = nullptr;
     mcu::McuDispatchRecord* records = nullptr;
     mcu::McuRmsNormInvocation* invocations = nullptr;
@@ -903,13 +902,7 @@ struct Rig {
         return true;
     }
 
-    bool set_kernarg_sources(
-        const std::vector<mcu::McuKernargSourceDesc>& sources) {
-        kernarg_sources_explicit = true;
-        return set_kernarg_sources_impl(sources);
-    }
-
-    bool set_kernarg_sources_impl(
+    bool upload_kernarg_sources(
         const std::vector<mcu::McuKernargSourceDesc>& sources) {
         release_kernarg_sources();
         if (sources.empty()) return true;
@@ -1074,7 +1067,6 @@ struct Rig {
     }
 
     bool build_kernarg_sources() {
-        if (kernarg_sources_explicit) return true;
         release_kernarg_sources();
         if (host_plan.empty()) return true;
         std::vector<mcu::McuKernargSourceDesc> sources(host_plan.size());
@@ -1101,7 +1093,7 @@ struct Rig {
             sources[i].explicit_args_bytes = static_cast<uint32_t>(stride);
             sources[i].flags = mcu::kMcuKernargSourcePrepared;
         }
-        return set_kernarg_sources_impl(sources);
+        return upload_kernarg_sources(sources);
     }
 
     std::vector<uint32_t> read_output_at(
@@ -1315,7 +1307,6 @@ struct Rig {
             kernarg_sources = nullptr;
             kernarg_source_count = 0;
         }
-        kernarg_sources_explicit = false;
         if (timing) { ok &= hipFree(timing) == hipSuccess; timing = nullptr; }
         if (records) { ok &= hipFree(records) == hipSuccess; records = nullptr; }
         if (invocations) {

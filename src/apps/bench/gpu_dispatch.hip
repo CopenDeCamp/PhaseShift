@@ -1107,7 +1107,15 @@ int run_device_aql_fsm(const Options& opt, bool use_lds, FsmFeedMode mode) {
         mcu::make_probe_variant(0u, meta, 64u, 1u, policy)};
     std::vector<mcu::GpuMcuRetainedPacket> retained{variants[0].packet};
 
+    std::vector<mcu::McuKernargSourceDesc> sources(plan.size());
+    for (std::size_t i = 0; i < plan.size(); ++i) {
+        sources[i].flags = mcu::kMcuKernargSourceSupervisorProbe;
+        sources[i].explicit_args_bytes =
+            static_cast<uint32_t>(sizeof(mcu::GpuMcuFsmWorkerArgs));
+    }
+
     mcu::McuPlanNode* plan_dev = nullptr;
+    mcu::McuKernargSourceDesc* sources_dev = nullptr;
     mcu::McuKernelVariantDesc* variants_dev = nullptr;
     mcu::GpuMcuRetainedPacket* retained_dev = nullptr;
     mcu::GpuMcuDeviceCompletion* completions_dev = nullptr;
@@ -1121,6 +1129,9 @@ int run_device_aql_fsm(const Options& opt, bool use_lds, FsmFeedMode mode) {
                   variants.size() * sizeof(mcu::McuKernelVariantDesc)) != hipSuccess ||
         hipMalloc(reinterpret_cast<void**>(&retained_dev),
                   retained.size() * sizeof(mcu::GpuMcuRetainedPacket)) != hipSuccess ||
+        hipMalloc(reinterpret_cast<void**>(&sources_dev),
+                  sources.size() *
+                      sizeof(mcu::McuKernargSourceDesc)) != hipSuccess ||
         hipMalloc(reinterpret_cast<void**>(&completions_dev),
                   dispatch_count * sizeof(mcu::GpuMcuDeviceCompletion)) != hipSuccess ||
         hipMalloc(reinterpret_cast<void**>(&output_dev),
@@ -1143,6 +1154,9 @@ int run_device_aql_fsm(const Options& opt, bool use_lds, FsmFeedMode mode) {
     (void)hipMemcpy(retained_dev, retained.data(),
                     retained.size() * sizeof(mcu::GpuMcuRetainedPacket),
                     hipMemcpyHostToDevice);
+    (void)hipMemcpy(sources_dev, sources.data(),
+                    sources.size() * sizeof(mcu::McuKernargSourceDesc),
+                    hipMemcpyHostToDevice);
     (void)hipMemset(completions_dev, 0,
                     dispatch_count * sizeof(mcu::GpuMcuDeviceCompletion));
     (void)hipMemset(timing_dev, 0, timing_count * sizeof(mcu::McuDispatchTiming));
@@ -1163,6 +1177,8 @@ int run_device_aql_fsm(const Options& opt, bool use_lds, FsmFeedMode mode) {
     config.variant_count = static_cast<uint32_t>(variants.size());
     config.retained = retained_dev;
     config.retained_count = static_cast<uint32_t>(retained.size());
+    config.kernarg_sources = sources_dev;
+    config.kernarg_source_count = static_cast<uint32_t>(sources.size());
     config.kernarg_base = reinterpret_cast<uint64_t>(region.base);
     config.kernarg_slot_stride = region.slot_stride;
     config.kernarg_slot_count = kernarg_ring;
@@ -1300,6 +1316,7 @@ int run_device_aql_fsm(const Options& opt, bool use_lds, FsmFeedMode mode) {
     (void)fsm.shutdown();
 
     (void)hipFree(plan_dev);
+    (void)hipFree(sources_dev);
     (void)hipFree(variants_dev);
     (void)hipFree(retained_dev);
     (void)hipFree(completions_dev);

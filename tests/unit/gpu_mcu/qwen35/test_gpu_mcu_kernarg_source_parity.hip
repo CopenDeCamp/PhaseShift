@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -31,12 +32,13 @@ constexpr uint64_t kPlans = 200u;
 struct RunResult {
     bool ok = false;
     uint32_t fault = 0u;
+    uint32_t kernarg_size = 0u;
     uint64_t dispatches = 0u;
     uint64_t completions = 0u;
     bool drained = false;
     std::vector<uint16_t> output;
     std::vector<uint16_t> guard;
-    std::vector<uint16_t> kernarg_slot;
+    std::vector<unsigned char> kernarg_slot;
 };
 
 std::vector<mcu::McuPlanNode> make_rmsnorm_plan() {
@@ -65,8 +67,10 @@ std::vector<mcu::McuPlanNode> make_rmsnorm_plan() {
     return nodes;
 }
 
-bool run_mode(const fixture::Shape& shape, bool generic, void* in_dev,
-              void* wt_dev, void* out_dev, RunResult& out) {
+bool run_generic(const fixture::Shape& shape, void* in_dev, void* wt_dev,
+                 void* out_dev, const mcu::McuRmsNormInvocation& invocation,
+                 uint32_t expected_grid, uint32_t expected_block,
+                 RunResult& out) {
     const uint32_t rows = 1u;
     const uint32_t features = shape.features;
     const uint32_t group = shape.group;
@@ -77,7 +81,7 @@ bool run_mode(const fixture::Shape& shape, bool generic, void* in_dev,
     Rig rig;
     if (!rig.open(0, 4u, 2u, 8u, 0u, false, mcu::kAqlDefaultQueueSize,
                   mcu::kMcuMaxDebugRecords)) {
-        std::printf("FAIL: %s rig open\n", generic ? "generic" : "legacy");
+        std::printf("FAIL: rig open\n");
         return false;
     }
 
@@ -92,6 +96,8 @@ bool run_mode(const fixture::Shape& shape, bool generic, void* in_dev,
     const uint32_t grid =
         kernel::rmsnorm_bf16_pf_oneplus_grid(rows, features, group);
     const uint32_t block = kernel::rmsnorm_bf16_pf_oneplus_block_size(group);
+    check(grid == expected_grid && block == expected_block,
+          "launch geometry helper is stable");
 
     std::vector<mcu::McuKernelVariantDesc> variants{
         mcu::make_probe_variant(0u, rig.meta, 64u, 1u, mcu::kMcuSystemAqlPolicy),
@@ -104,38 +110,10 @@ bool run_mode(const fixture::Shape& shape, bool generic, void* in_dev,
         (void)rig.close();
         return false;
     }
+    out.kernarg_size = variants[1].kernarg_size;
 
-    mcu::McuRmsNormInvocation invocation{};
-    invocation.input = reinterpret_cast<uint64_t>(in_dev);
-    invocation.weight = reinterpret_cast<uint64_t>(wt_dev);
-    invocation.output = reinterpret_cast<uint64_t>(out_dev);
-    invocation.rows = rows;
-    invocation.features = features;
-    invocation.group_size = group;
-    invocation.input_row_stride = stride;
-    invocation.output_row_stride = stride;
-    invocation.eps = fixture::kEps;
-    if (!rig.set_invocations(&invocation, 1u)) {
-        (void)rig.close();
-        return false;
-    }
-
-    std::vector<mcu::McuKernargSourceDesc> sources;
-    if (generic) {
-        sources.resize(nodes.size());
-        for (std::size_t i = 0; i < nodes.size(); ++i) {
-            if (nodes[i].kernarg_recipe == mcu::kMcuKernargRecipeProbe) {
-                sources[i].flags = mcu::kMcuKernargSourceSupervisorProbe;
-                sources[i].explicit_args_bytes =
-                    static_cast<uint32_t>(sizeof(mcu::GpuMcuFsmWorkerArgs));
-            }
-        }
-        sources[0].source = reinterpret_cast<uint64_t>(rig.invocations);
-        sources[0].explicit_args_bytes =
-            static_cast<uint32_t>(sizeof(mcu::McuRmsNormInvocation));
-        sources[0].flags = mcu::kMcuKernargSourcePrepared;
-    }
-    if (!rig.set_kernarg_sources(sources)) {
+    mcu::McuRmsNormInvocation uploaded = invocation;
+    if (!rig.set_invocations(&uploaded, 1u)) {
         (void)rig.close();
         return false;
     }
@@ -143,14 +121,14 @@ bool run_mode(const fixture::Shape& shape, bool generic, void* in_dev,
     rig.poison_kernarg_args();
 
     mcu::GpuMcuFsmConfig config{};
-    config.plan_id = generic ? 0x47454e43u : 0x4c454741u;
+    config.plan_id = 0x47454e43u;
     config.template_source = 0u;
     config.barrier = 1u;
     config.timing_count = 0u;
     config.doorbell_mode = static_cast<uint32_t>(mcu::McuDoorbellMode::per_packet);
     config.queue_ahead_depth = 4u;
     if (!rig.start(config)) {
-        std::printf("FAIL: %s rig start\n", generic ? "generic" : "legacy");
+        std::printf("FAIL: rig start\n");
         (void)rig.close();
         return false;
     }
@@ -164,8 +142,7 @@ bool run_mode(const fixture::Shape& shape, bool generic, void* in_dev,
         }
         const auto step = rig.fsm.wait_plans(i, 5000);
         if (!step.ok()) {
-            std::printf("  %s wait[%llu]: %s fault=%u pc=%u\n",
-                        generic ? "generic" : "legacy",
+            std::printf("  wait[%llu]: %s fault=%u pc=%u\n",
                         static_cast<unsigned long long>(i),
                         step.message().c_str(),
                         static_cast<unsigned>(rig.fsm.fault_code()),
@@ -232,80 +209,72 @@ int main() {
         }
         (void)hipMemcpy(in_dev, h_in.data(), out_bytes, hipMemcpyHostToDevice);
         (void)hipMemcpy(wt_dev, h_wt.data(), wt_bytes, hipMemcpyHostToDevice);
+        (void)hipMemset(out_dev, 0xAB, out_bytes + guard_bytes);
 
         std::vector<uint16_t> sentinel(guard_bytes / 2u, 0xABABu);
 
-        RunResult legacy;
-        (void)hipMemset(out_dev, 0xAB, out_bytes + guard_bytes);
-        (void)hipMemcpy(static_cast<unsigned char*>(out_dev) + out_bytes,
-                        sentinel.data(), guard_bytes, hipMemcpyHostToDevice);
-        const bool legacy_ok = run_mode(shape, false, in_dev, wt_dev, out_dev,
-                                        legacy);
+        mcu::McuRmsNormInvocation invocation{};
+        invocation.input = reinterpret_cast<uint64_t>(in_dev);
+        invocation.weight = reinterpret_cast<uint64_t>(wt_dev);
+        invocation.output = reinterpret_cast<uint64_t>(out_dev);
+        invocation.rows = rows;
+        invocation.features = features;
+        invocation.group_size = group;
+        invocation.input_row_stride = features;
+        invocation.output_row_stride = features;
+        invocation.eps = fixture::kEps;
 
-        RunResult generic;
-        (void)hipMemset(out_dev, 0xAB, out_bytes + guard_bytes);
-        (void)hipMemcpy(static_cast<unsigned char*>(out_dev) + out_bytes,
-                        sentinel.data(), guard_bytes, hipMemcpyHostToDevice);
-        const bool generic_ok = run_mode(shape, true, in_dev, wt_dev, out_dev,
-                                         generic);
+        const uint32_t expected_grid =
+            kernel::rmsnorm_bf16_pf_oneplus_grid(rows, features, group);
+        const uint32_t expected_block =
+            kernel::rmsnorm_bf16_pf_oneplus_block_size(group);
 
-        check(legacy_ok && generic_ok, "both modes ran");
-        if (!legacy_ok || !generic_ok) {
-            (void)hipFree(in_dev);
-            (void)hipFree(wt_dev);
-            (void)hipFree(out_dev);
-            continue;
-        }
+        RunResult run;
+        const bool ok = run_generic(shape, in_dev, wt_dev, out_dev, invocation,
+                                    expected_grid, expected_block, run);
+        check(ok, "generic source run finished");
+        if (ok) {
+            check(run.fault == 0u, "no fault");
+            check(run.dispatches == kPlans * 2u, "dispatch count");
+            check(run.completions == kPlans, "completion count");
+            check(run.drained, "queue drained");
+            check(run.guard == sentinel, "output sentinel intact");
 
-        check(legacy.fault == 0u && generic.fault == 0u, "no fault in either mode");
-        check(legacy.dispatches == kPlans * 2u, "legacy dispatch count");
-        check(generic.dispatches == kPlans * 2u, "generic dispatch count");
-        check(legacy.dispatches == generic.dispatches, "dispatch count parity");
-        check(legacy.completions == generic.completions, "completion parity");
-        check(legacy.drained && generic.drained, "queue drained in both modes");
-        check(legacy.output == generic.output, "output bit parity");
-        check(legacy.guard == generic.guard, "output sentinel parity");
-        check(legacy.kernarg_slot.size() == generic.kernarg_slot.size(),
-              "kernarg slot size parity");
-        check(legacy.kernarg_slot == generic.kernarg_slot,
-              "kernarg explicit byte parity");
-        check(legacy.guard == sentinel, "legacy output sentinel intact");
-        check(generic.guard == sentinel, "generic output sentinel intact");
-        if (legacy.output.size() != generic.output.size()) {
-            std::printf("  output size mismatch: %zu vs %zu\n",
-                        legacy.output.size(), generic.output.size());
-        }
-        if (legacy.kernarg_slot.size() == generic.kernarg_slot.size() &&
-            legacy.kernarg_slot != generic.kernarg_slot) {
-            for (size_t i = 0; i < legacy.kernarg_slot.size(); ++i) {
-                if (legacy.kernarg_slot[i] != generic.kernarg_slot[i]) {
-                    std::printf("  kernarg byte %zu: legacy=0x%02x generic=0x%02x\n",
-                                i, legacy.kernarg_slot[i],
-                                generic.kernarg_slot[i]);
-                    break;
-                }
+            check(run.kernarg_slot.size() >= sizeof(mcu::McuRmsNormInvocation),
+                  "kernarg slot covers the explicit args");
+            if (run.kernarg_slot.size() >= sizeof(mcu::McuRmsNormInvocation)) {
+                check(std::memcmp(run.kernarg_slot.data(), &invocation,
+                                  sizeof(mcu::McuRmsNormInvocation)) == 0,
+                      "explicit kernarg bytes match the prepared invocation");
             }
+
+            const std::size_t meta_bytes =
+                mcu::aql_launch_metadata_offset(run.kernarg_size);
+            if (run.kernarg_slot.size() >= meta_bytes + 16u) {
+                const uint32_t* meta = reinterpret_cast<const uint32_t*>(
+                    run.kernarg_slot.data() + meta_bytes);
+                check(meta[0] == expected_grid, "launch metadata grid x");
+                check(meta[1] == 1u, "launch metadata grid y");
+                check(meta[2] == 1u, "launch metadata grid z");
+                check(meta[3] == expected_block, "launch metadata workgroup x");
+            } else {
+                check(false, "kernarg slot covers the launch metadata");
+            }
+
+            std::vector<float> ref_cpu;
+            cpu_reference(h_in, h_wt, rows, features, group, features, ref_cpu);
+            std::vector<float> ref_mcu(run.output.size());
+            for (size_t i = 0; i < run.output.size(); ++i) {
+                ref_mcu[i] = fixture::f32_from_bf16(run.output[i]);
+            }
+            check(compare_to_reference(ref_mcu, ref_cpu, features, features,
+                                       "generic vs cpu"),
+                  "generic path matches the reference policy");
         }
 
-        std::vector<float> ref_cpu;
-        cpu_reference(h_in, h_wt, rows, features, group, features, ref_cpu);
-        std::vector<float> ref_host(generic.output.size());
-        std::vector<float> ref_mcu(generic.output.size());
-        for (size_t i = 0; i < generic.output.size(); ++i) {
-            ref_host[i] = fixture::f32_from_bf16(legacy.output[i]);
-            ref_mcu[i] = fixture::f32_from_bf16(generic.output[i]);
-        }
-        check(compare_to_reference(ref_host, ref_cpu, features, features,
-                                   "legacy vs cpu"),
-              "legacy path matches the reference policy");
-        check(compare_to_reference(ref_mcu, ref_cpu, features, features,
-                                   "generic vs cpu"),
-              "generic path matches the reference policy");
-
-        std::printf("  shape F=%u G=%u parity dispatch=%llu kernarg=%zu\n",
-                    features, group,
-                    static_cast<unsigned long long>(generic.dispatches),
-                    generic.kernarg_slot.size());
+        std::printf("  shape F=%u G=%u dispatch=%llu slot=%zu\n", features,
+                    group, static_cast<unsigned long long>(run.dispatches),
+                    run.kernarg_slot.size());
 
         (void)hipFree(in_dev);
         (void)hipFree(wt_dev);
