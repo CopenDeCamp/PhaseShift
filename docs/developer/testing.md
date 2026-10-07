@@ -48,6 +48,55 @@ GPU を論理 VRAM で予約してから実行する。予約できないまま�
 - `PHASESHIFT_TEST_GPUS` / `HIP_VISIBLE_DEVICES` が指定されている場合は
   明示指定として扱い、iGPU 除外を適用しない。
 
+### GPU 負荷をかけている間の監視制約
+
+GPU に負荷をかけている間は **SMU metrics を取得してはならない**。
+`rocm-smi` / `amd-smi metric` / `/sys/class/drm/*/device/gpu_metrics` の読み出しは
+SMU へ metrics export を要求し、応答が無いと次が出る。
+
+```text
+SMU: No response msg_reg: 12 resp_reg: 0
+Failed to export SMU metrics table!
+```
+
+このとき得られた異常値から `GPU over temperature range(SW CTF)` が宣言され、
+`System is going to shutdown due to GPU SW CTF!` でマシンが落ちる事故を観測している。
+
+- 温度は **負荷実行の直前と直後だけ** で取る。実行中は打たない。
+- 温度取得の正本は `amd-smi metric -t`（root 不要。EDGE / HOTSPOT / MEM を返す）。
+  `rocm-smi --showtemp` は dGPU を返さない（iGPU のみ）ため正本にしない。
+
+```bash
+amd-smi metric -t        # 実行前
+<負荷テスト>
+amd-smi metric -t        # 実行後
+```
+
+### GPU ハング時の収手順
+
+GPU が wedge して `devcoredump` が作られたら、**再起動する前に** 取る。再起動で消える。
+`card` は PCI アドレスで選ぶ。
+
+| HIP device | PCI | drm |
+|---|---|---|
+| 0 | `0000:07:00.0` | `card1` |
+| 1 | `0000:0a:00.0` | `card2` |
+| 2 | `0000:0f:00.0` | `card3` |
+| 3 | `0000:12:00.0` | `card4` |
+| iGPU | `0000:83:00.0` | `card5` |
+
+```bash
+for c in /sys/class/drm/card*/device; do printf '%s -> ' "$c"; readlink -f "$c"; done
+sudo cat /sys/class/drm/card<N>/device/devcoredump/data \
+  > amdgpu-devcoredump-$(date +%Y%m%d-%H%M%S).bin
+```
+
+あわせて kernel log を保存する。再起動後は `journalctl -k -b -1` で前 boot のログが読める。
+
+```bash
+journalctl -k -b -1 > amdgpu-kernel-prev-boot.log
+```
+
 ## GPU-MCU テスト
 
 GPU-MCU テストは `tests/unit/gpu_mcu/` の下に、**何を保証しているか**で分類する。
