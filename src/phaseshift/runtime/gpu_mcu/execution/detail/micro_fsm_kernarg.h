@@ -102,10 +102,12 @@ __device__ __forceinline__ void mcu_copy_explicit_args(void* dst_ptr,
     auto* dst = static_cast<unsigned char*>(dst_ptr);
     const auto* src = static_cast<const unsigned char*>(src_ptr);
     uint32_t i = 0u;
+    while (i + 16u <= bytes) {
+        __builtin_memcpy(dst + i, src + i, 16);
+        i += 16u;
+    }
     while (i + 4u <= bytes) {
-        uint32_t word = 0u;
-        __builtin_memcpy(&word, src + i, sizeof(word));
-        __builtin_memcpy(dst + i, &word, sizeof(word));
+        __builtin_memcpy(dst + i, src + i, 4);
         i += 4u;
     }
     while (i < bytes) {
@@ -264,9 +266,8 @@ __device__ __forceinline__ void mcu_variant_dispatch_geometry(
 __device__ __forceinline__ bool mcu_write_prepared_kernarg(
     const GpuMcuFsmState* state,
     const McuPlanNode& node,
-    uint32_t node_index,
+    const McuKernargSourceDesc* source,
     uint32_t slot) {
-    const McuKernargSourceDesc* source = mcu_kernarg_source(state, node_index);
     if (source == nullptr) return false;
     if ((source->flags & kMcuKernargSourcePrepared) == 0u) return false;
     if (source->source == 0ull) return false;
@@ -955,11 +956,11 @@ __device__ __noinline__ bool mcu_build_kernarg(const GpuMcuFsmState* state,
                                                   uint32_t slot,
                                                   uint32_t generation) {
     const McuKernargSourceDesc* source = mcu_kernarg_source(state, node_index);
-    if (source != nullptr && source->source != 0ull &&
+    if (source != nullptr &&
         (source->flags & kMcuKernargSourcePrepared) != 0u) {
-        return mcu_write_prepared_kernarg(state, node, node_index, slot);
+        return mcu_write_prepared_kernarg(state, node, source, slot);
     }
-    if (source != nullptr && source->source == 0ull &&
+    if (source != nullptr &&
         (source->flags & kMcuKernargSourceSupervisorProbe) != 0u) {
         return mcu_write_probe_kernarg(state, node, node_index, slot,
                                        generation);

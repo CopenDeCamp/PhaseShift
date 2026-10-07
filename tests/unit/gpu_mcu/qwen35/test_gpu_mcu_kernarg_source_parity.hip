@@ -123,6 +123,13 @@ bool run_mode(const fixture::Shape& shape, bool generic, void* in_dev,
     std::vector<mcu::McuKernargSourceDesc> sources;
     if (generic) {
         sources.resize(nodes.size());
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            if (nodes[i].kernarg_recipe == mcu::kMcuKernargRecipeProbe) {
+                sources[i].flags = mcu::kMcuKernargSourceSupervisorProbe;
+                sources[i].explicit_args_bytes =
+                    static_cast<uint32_t>(sizeof(mcu::GpuMcuFsmWorkerArgs));
+            }
+        }
         sources[0].source = reinterpret_cast<uint64_t>(rig.invocations);
         sources[0].explicit_args_bytes =
             static_cast<uint32_t>(sizeof(mcu::McuRmsNormInvocation));

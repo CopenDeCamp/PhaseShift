@@ -196,6 +196,7 @@ struct Rig {
     uint32_t dynamic_binding_count = 0;
     mcu::McuKernargSourceDesc* kernarg_sources = nullptr;
     uint32_t kernarg_source_count = 0;
+    bool kernarg_sources_explicit = false;
     mcu::McuDispatchTiming* timing = nullptr;
     mcu::McuDispatchRecord* records = nullptr;
     mcu::McuRmsNormInvocation* invocations = nullptr;
@@ -904,14 +905,13 @@ struct Rig {
 
     bool set_kernarg_sources(
         const std::vector<mcu::McuKernargSourceDesc>& sources) {
-        if (kernarg_sources != nullptr) {
-            if (!check(hipFree(kernarg_sources) == hipSuccess,
-                       "kernarg source table released")) {
-                return false;
-            }
-            kernarg_sources = nullptr;
-            kernarg_source_count = 0u;
-        }
+        kernarg_sources_explicit = true;
+        return set_kernarg_sources_impl(sources);
+    }
+
+    bool set_kernarg_sources_impl(
+        const std::vector<mcu::McuKernargSourceDesc>& sources) {
+        release_kernarg_sources();
         if (sources.empty()) return true;
         const std::size_t bytes =
             sources.size() * sizeof(mcu::McuKernargSourceDesc);
@@ -925,6 +925,183 @@ struct Rig {
             return check(false, "kernarg source table uploaded");
         }
         return true;
+    }
+
+    void release_kernarg_sources() {
+        if (kernarg_sources != nullptr) {
+            (void)hipFree(kernarg_sources);
+            kernarg_sources = nullptr;
+        }
+        kernarg_source_count = 0u;
+    }
+
+    bool recipe_invocation_table(uint16_t recipe, const void*& base,
+                                 uint32_t& count, std::size_t& stride) const {
+        base = nullptr;
+        count = 0u;
+        stride = 0u;
+        switch (recipe) {
+            case mcu::kMcuKernargRecipeRmsNormBf16PfOnePlus:
+                base = invocations;
+                count = invocation_count;
+                stride = sizeof(mcu::McuRmsNormInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeActivationQuantizeA8:
+                base = quantize_invocations;
+                count = quantize_count;
+                stride = sizeof(mcu::McuActivationQuantizeInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeActivationQuantizeE4m3K5120:
+                base = e4m3_invocations;
+                count = e4m3_count;
+                stride = sizeof(mcu::McuActivationQuantizeE4m3Invocation);
+                return true;
+            case mcu::kMcuKernargRecipePsq4Decode1Bf16U16:
+            case mcu::kMcuKernargRecipePsq4Decode1Bf16U8:
+            case mcu::kMcuKernargRecipePsq8Decode1Bf16U8:
+                base = psq4_invocations;
+                count = psq4_count;
+                stride = sizeof(mcu::McuPsq4Decode1Invocation);
+                return true;
+            case mcu::kMcuKernargRecipePsq4MultiRowBf16:
+                base = psq4_multi_invocations;
+                count = psq4_multi_count;
+                stride = sizeof(mcu::McuPsq4MultiRowInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeVerifyAcceptPrefix:
+                base = verify_accept_invocations;
+                count = verify_accept_count;
+                stride = sizeof(mcu::McuVerifyAcceptPrefixInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeVerifyAcceptBatch:
+                base = verify_accept_batch_invocations;
+                count = verify_accept_batch_count;
+                stride = sizeof(mcu::McuVerifyAcceptBatchInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnSpecRestore:
+                base = gdn_spec_restore_invocations;
+                count = gdn_spec_restore_count;
+                stride = sizeof(mcu::McuGdnSpecRestoreInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnSpecRestoreFromCounts:
+                base = gdn_spec_restore_from_counts_invocations;
+                count = gdn_spec_restore_from_counts_count;
+                stride = sizeof(mcu::McuGdnSpecRestoreFromCountsInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeArgmaxF32:
+                base = argmax_f32_invocations;
+                count = argmax_f32_count;
+                stride = sizeof(mcu::McuArgmaxF32Invocation);
+                return true;
+            case mcu::kMcuKernargRecipeElementwise:
+                base = elementwise_invocations;
+                count = elementwise_count;
+                stride = sizeof(mcu::McuElementwiseInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeRope:
+                base = rope_invocations;
+                count = rope_count;
+                stride = sizeof(mcu::McuRopeInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeKvAppend:
+                base = kv_append_invocations;
+                count = kv_append_count;
+                stride = sizeof(mcu::McuKvAppendInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeAttentionPaged:
+                base = attention_paged_invocations;
+                count = attention_paged_count;
+                stride = sizeof(mcu::McuPagedAttentionInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeAttentionPagedSplit:
+                base = attention_paged_split_invocations;
+                count = attention_paged_split_count;
+                stride = sizeof(mcu::McuPagedAttentionSplitInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeAttentionPagedReduce:
+                base = attention_paged_reduce_invocations;
+                count = attention_paged_reduce_count;
+                stride = sizeof(mcu::McuPagedAttentionReduceInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeBf16ExactRows:
+                base = bf16_invocations;
+                count = bf16_count;
+                stride = sizeof(mcu::McuBf16ExactRowsInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeBf16Wmma:
+                base = bf16_wmma_invocations;
+                count = bf16_wmma_count;
+                stride = sizeof(mcu::McuBf16WmmaInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeL2Normalize:
+                base = l2_invocations;
+                count = l2_count;
+                stride = sizeof(mcu::McuL2NormalizeInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeEmbeddingBf16:
+                base = embedding_invocations;
+                count = embedding_count;
+                stride = sizeof(mcu::McuEmbeddingBf16Invocation);
+                return true;
+            case mcu::kMcuKernargRecipeEmbeddingPsq8:
+                base = embedding_psq8_invocations;
+                count = embedding_psq8_count;
+                stride = sizeof(mcu::McuEmbeddingPsq8Invocation);
+                return true;
+            case mcu::kMcuKernargRecipeOutputGatherBf16:
+                base = output_gather_invocations;
+                count = output_gather_count;
+                stride = sizeof(mcu::McuOutputGatherBf16Invocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnConv1d:
+                base = gdn_conv1d_invocations;
+                count = gdn_conv1d_count;
+                stride = sizeof(mcu::McuGdnConv1dInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnRecurrence:
+                base = gdn_recurrence_invocations;
+                count = gdn_recurrence_count;
+                stride = sizeof(mcu::McuGdnRecurrenceInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnReset:
+                base = gdn_reset_invocations;
+                count = gdn_reset_count;
+                stride = sizeof(mcu::GpuMcuGdnResetInvocation);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool build_kernarg_sources() {
+        if (kernarg_sources_explicit) return true;
+        release_kernarg_sources();
+        if (host_plan.empty()) return true;
+        std::vector<mcu::McuKernargSourceDesc> sources(host_plan.size());
+        for (std::size_t i = 0; i < host_plan.size(); ++i) {
+            const mcu::McuPlanNode& node = host_plan[i];
+            if (node.kernarg_recipe == mcu::kMcuKernargRecipeProbe) {
+                sources[i].flags = mcu::kMcuKernargSourceSupervisorProbe;
+                sources[i].explicit_args_bytes =
+                    static_cast<uint32_t>(sizeof(mcu::GpuMcuFsmWorkerArgs));
+                continue;
+            }
+            const void* base = nullptr;
+            uint32_t count = 0u;
+            std::size_t stride = 0u;
+            if (!recipe_invocation_table(node.kernarg_recipe, base, count,
+                                         stride)) {
+                continue;
+            }
+            if (base == nullptr || node.invocation_index >= count) continue;
+            const auto* byte_base = static_cast<const unsigned char*>(base);
+            sources[i].source = reinterpret_cast<uint64_t>(
+                byte_base +
+                static_cast<std::size_t>(node.invocation_index) * stride);
+            sources[i].explicit_args_bytes = static_cast<uint32_t>(stride);
+            sources[i].flags = mcu::kMcuKernargSourcePrepared;
+        }
+        return set_kernarg_sources_impl(sources);
     }
 
     std::vector<uint32_t> read_output_at(
@@ -1029,6 +1206,7 @@ struct Rig {
     }
 
     bool configure_fsm(const mcu::GpuMcuFsmConfig& in, bool launch) {
+        if (!build_kernarg_sources()) return false;
         mcu::GpuMcuFsmConfig c{};
         build_fsm_config(in, c);
         if (log_enabled && log_region.base == nullptr) {
@@ -1137,6 +1315,7 @@ struct Rig {
             kernarg_sources = nullptr;
             kernarg_source_count = 0;
         }
+        kernarg_sources_explicit = false;
         if (timing) { ok &= hipFree(timing) == hipSuccess; timing = nullptr; }
         if (records) { ok &= hipFree(records) == hipSuccess; records = nullptr; }
         if (invocations) {
