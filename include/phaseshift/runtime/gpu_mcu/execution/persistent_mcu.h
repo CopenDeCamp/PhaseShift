@@ -2,6 +2,7 @@
 
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/stage_trace.h>
 #include <phaseshift/runtime/gpu_mcu/io/request_ingress.h>
 #include <phaseshift/runtime/gpu_mcu/binding/batch_binding.h>
 #include <phaseshift/runtime/gpu_mcu/commit/batch_commit.h>
@@ -26,6 +27,7 @@ struct alignas(64) GpuMcuPersistentState {
     uint64_t heartbeat = 0;
     uint64_t iterations = 0;
     uint64_t last_loop_ts = 0;
+    McuStageTrace stage_trace{};
     uint64_t submit_request = 0;
     uint64_t published = 0;
     uint64_t publish_failures = 0;

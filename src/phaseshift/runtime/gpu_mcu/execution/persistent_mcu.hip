@@ -504,6 +504,13 @@ void GpuMcuPersistentMcu::dump_state(std::FILE* out) const noexcept {
                      host_state_->execution_telemetry.batches_committed),
                  static_cast<unsigned long long>(
                      host_state_->execution_telemetry.batches_failed));
+    const McuStageTrace& stage = host_state_->stage_trace;
+    std::fprintf(out,
+                 "[mcu-persistent] stage=%s(%u) seq=%u patch=%u "
+                 "patch_src=%u patch_width=%u patch_target=0x%08x%08x\n",
+                 mcu_stage_name(stage.stage), stage.stage, stage.seq,
+                 stage.patch_index, stage.patch_source, stage.patch_width,
+                 stage.patch_target_high, stage.patch_target_low);
     if (host_state_->batch_context != nullptr) {
         std::fprintf(out, "[mcu-persistent] actual_rows=%u num_requests=%u\n",
                      host_state_->batch_context->actual_rows,
@@ -790,7 +797,17 @@ Status GpuMcuPersistentMcu::shutdown() noexcept {
     };
     if (launched_) {
         note(request_stop());
-        note(wait_stopped(5000));
+        Status stopped = wait_stopped(5000);
+        if (!stopped.ok()) {
+            note(request_stop());
+            stopped = wait_stopped(5000);
+        }
+        if (!stopped.ok()) {
+            return Status::invalid_state(
+                "persistent mcu did not stop; refusing to release resources "
+                "while the device loop is alive",
+                __FILE__, __LINE__);
+        }
         if (hipStreamSynchronize(control_stream_) != hipSuccess) {
             note(Status::hip_error("hipStreamSynchronize(persistent)", "sync failed",
                                    __FILE__, __LINE__));

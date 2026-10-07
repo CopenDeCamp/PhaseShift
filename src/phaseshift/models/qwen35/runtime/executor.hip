@@ -820,9 +820,22 @@ Status execute_mcu_hybrid(
            state.persistent.batches_failed() == 0u) {
         if (std::chrono::steady_clock::now() >= deadline) {
             (void)state.persistent.request_stop();
-            (void)state.persistent.wait_stopped(5000u);
+            ::ps::Status mcu_stopped = state.persistent.wait_stopped(5000u);
+            if (!mcu_stopped.ok()) {
+                (void)state.persistent.request_stop();
+                mcu_stopped = state.persistent.wait_stopped(5000u);
+            }
             state.runtime.dump_log(stderr);
             state.persistent.dump_state(stderr);
+            if (!mcu_stopped.ok()) {
+                std::fprintf(stderr,
+                             "FATAL: mcu_stuck persistent mcu did not stop "
+                             "after two stop requests; %s\n",
+                             mcu_stopped.message().c_str());
+                return Status::invalid_state(
+                    "mcu_stuck: persistent mcu did not stop", __FILE__,
+                    __LINE__);
+            }
             const ::ps::runtime::gpu_mcu::GpuMcuBatchCommitTelemetry ctelem =
                 state.persistent.commit_telemetry();
             std::fprintf(

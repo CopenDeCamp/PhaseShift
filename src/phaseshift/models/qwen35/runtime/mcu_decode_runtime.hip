@@ -558,13 +558,21 @@ Status McuDecodeRuntime::rebuild_row_global_patches() noexcept {
 Status McuDecodeRuntime::clear_plan() noexcept {
     Status status = Status::make_ok();
     if (fsm_active_) {
-            const Status stop = fsm_.request_stop();
-        if (!stop.ok()) status = stop;
-            const Status waited = fsm_.wait_stopped(5000u);
-        if (!waited.ok()) status = waited;
-            const Status down = fsm_.shutdown();
+        Status stopped = fsm_.request_stop();
+        if (stopped.ok()) stopped = fsm_.wait_stopped(5000u);
+        if (!stopped.ok()) {
+            (void)fsm_.request_stop();
+            stopped = fsm_.wait_stopped(5000u);
+        }
+        if (!stopped.ok()) {
+            return Status::invalid_state(
+                "mcu fsm did not stop; refusing to release plan resources "
+                "while the device loop is alive",
+                __FILE__, __LINE__);
+        }
+        const Status down = fsm_.shutdown();
         if (!down.ok()) status = down;
-            fsm_active_ = false;
+        fsm_active_ = false;
     }
     const Status inv = release_invocations();
     if (!inv.ok()) status = inv;
@@ -1052,6 +1060,9 @@ uint32_t McuDecodeRuntime::result_code() const noexcept {
 
 Status McuDecodeRuntime::shutdown() noexcept {
     Status status = clear_plan();
+    if (!status.ok() && fsm_active_) {
+        return status;
+    }
 
     Status s = free_table(&rms_, &rms_count_);
     if (!s.ok()) status = s;

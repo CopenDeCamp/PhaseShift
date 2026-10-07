@@ -2,6 +2,7 @@
 
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/gpu_mcu/binding/plan_binding_contract.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/stage_trace.h>
 
 #include <hip/hip_runtime.h>
 
@@ -62,10 +63,26 @@ __host__ __device__ __forceinline__ uint64_t gpu_mcu_patch_source_value(
 __host__ __device__ __forceinline__ void gpu_mcu_bind_execution_plan(
     const DeviceBatchContext* context,
     const McuInvocationPatch* patches,
-    uint32_t patch_count) noexcept {
+    uint32_t patch_count,
+    McuStageTrace* trace = nullptr) noexcept {
     if (context == nullptr || patches == nullptr) return;
+    if (trace != nullptr) {
+        trace->stage = kMcuStageBindPlanEnter;
+        trace->seq += 1u;
+    }
     for (uint32_t i = 0; i < patch_count; ++i) {
         const McuInvocationPatch& patch = patches[i];
+        if (trace != nullptr) {
+            trace->stage = kMcuStageBindPlanPatch;
+            trace->patch_index = i;
+            trace->patch_source = patch.source;
+            trace->patch_width = patch.width;
+            trace->patch_target_low =
+                static_cast<uint32_t>(patch.target & 0xffffffffull);
+            trace->patch_target_high =
+                static_cast<uint32_t>(patch.target >> 32);
+            trace->seq += 1u;
+        }
         if (patch.target == 0u) continue;
         const uint64_t value =
             gpu_mcu_patch_source_value(patch.source, patch.param, context);
@@ -76,6 +93,10 @@ __host__ __device__ __forceinline__ void gpu_mcu_bind_execution_plan(
             *reinterpret_cast<uint32_t*>(patch.target) =
                 static_cast<uint32_t>(value);
         }
+    }
+    if (trace != nullptr) {
+        trace->stage = kMcuStageBindPlanExit;
+        trace->seq += 1u;
     }
 #ifdef __HIP_DEVICE_COMPILE__
     __threadfence_system();

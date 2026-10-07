@@ -37,6 +37,8 @@ __device__ __forceinline__ void mcu_control_loop(GpuMcuFsmState* state,
 
 __device__ __forceinline__ bool gpu_mcu_execution_step(
     GpuMcuPersistentState* state) {
+    state->stage_trace.stage = kMcuStageExecutionStepEnter;
+    state->stage_trace.seq += 1u;
     if (state->execution_enabled == 0u || state->execution_fsm == nullptr) {
         return false;
     }
@@ -71,7 +73,10 @@ __device__ __forceinline__ bool gpu_mcu_execution_step(
     uint64_t epoch = state->execution_epoch + 1u;
     if (epoch <= consumed) epoch = consumed + 1u;
     gpu_mcu_bind_execution_plan(context, state->execution_patches,
-                                state->execution_patch_count);
+                                state->execution_patch_count,
+                                &state->stage_trace);
+    state->stage_trace.stage = kMcuStageExecutionStepEnter;
+    state->stage_trace.seq += 1u;
     state->execution_fsm->batch_input =
         reinterpret_cast<uint64_t>(context->token_ids);
     if (state->execution_fsm != nullptr) {
@@ -83,7 +88,11 @@ __device__ __forceinline__ bool gpu_mcu_execution_step(
     }
     __scoped_atomic_store_n(&state->execution_fsm->run_request, epoch,
                             __ATOMIC_RELEASE, __MEMORY_SCOPE_SYSTEM);
+    state->stage_trace.stage = kMcuStageRunOnceEnter;
+    state->stage_trace.seq += 1u;
     const bool ran = mcu_run_once(state->execution_fsm, nullptr);
+    state->stage_trace.stage = kMcuStageRunOnceExit;
+    state->stage_trace.seq += 1u;
     if (state->execution_fsm != nullptr) {
         mcu_log_event(state->execution_fsm, McuLogEvent::ExecutionEpoch,
                       1u, ran ? 1u : 0u, 0u, epoch,
@@ -149,12 +158,16 @@ __device__ void gpu_mcu_persistent_loop(GpuMcuPersistentState* state) {
     __scoped_atomic_store_n(&state->started, 1u, __ATOMIC_RELEASE,
                             __MEMORY_SCOPE_SYSTEM);
     uint64_t count = 0;
+    state->stage_trace.stage = kMcuStageLoopBegin;
+    state->stage_trace.seq += 1u;
     while (true) {
         if (__scoped_atomic_load_n(&state->stop_requested, __ATOMIC_ACQUIRE,
                                    __MEMORY_SCOPE_SYSTEM) != 0u) {
             break;
         }
         ++count;
+        state->stage_trace.stage = kMcuStageIteration;
+        state->stage_trace.seq += 1u;
         __scoped_atomic_store_n(&state->heartbeat, count, __ATOMIC_RELEASE,
                                 __MEMORY_SCOPE_SYSTEM);
         __scoped_atomic_store_n(&state->iterations, count, __ATOMIC_RELEASE,
@@ -165,14 +178,22 @@ __device__ void gpu_mcu_persistent_loop(GpuMcuPersistentState* state) {
 
         bool progressed = false;
         if (state->request_runtime_enabled != 0u) {
+            state->stage_trace.stage = kMcuStageSchedulerEnter;
+            state->stage_trace.seq += 1u;
             progressed = gpu_mcu_scheduler_boundary(state);
+            state->stage_trace.stage = kMcuStageSchedulerExit;
+            state->stage_trace.seq += 1u;
         }
         if (gpu_mcu_execution_step(state)) {
             progressed = true;
         }
+        state->stage_trace.stage = kMcuStageIteration;
+        state->stage_trace.seq += 1u;
 
         bool emitted = false;
         if (state->emit_enabled != 0u && state->template_count != 0u) {
+            state->stage_trace.stage = kMcuStageEmitEnter;
+            state->stage_trace.seq += 1u;
             const uint64_t target = __scoped_atomic_load_n(
                 &state->submit_request, __ATOMIC_ACQUIRE, __MEMORY_SCOPE_SYSTEM);
             const uint64_t published = state->published;
@@ -230,6 +251,8 @@ __device__ void gpu_mcu_persistent_loop(GpuMcuPersistentState* state) {
             }
         }
     }
+    state->stage_trace.stage = kMcuStageLoopEnd;
+    state->stage_trace.seq += 1u;
     __scoped_atomic_store_n(&state->started, 0u, __ATOMIC_RELEASE,
                             __MEMORY_SCOPE_SYSTEM);
 }

@@ -429,7 +429,17 @@ Status GpuMcuFsm::shutdown() noexcept {
     };
     if (launched_) {
         note(request_stop());
-        note(wait_stopped(5000));
+        Status stopped = wait_stopped(5000);
+        if (!stopped.ok()) {
+            note(request_stop());
+            stopped = wait_stopped(5000);
+        }
+        if (!stopped.ok()) {
+            return Status::invalid_state(
+                "mcu fsm did not stop; refusing to release resources while the "
+                "device loop is alive",
+                __FILE__, __LINE__);
+        }
         if (hipStreamSynchronize(control_stream_) != hipSuccess) {
             note(Status::hip_error("hipStreamSynchronize(fsm)", "sync failed",
                                    __FILE__, __LINE__));
