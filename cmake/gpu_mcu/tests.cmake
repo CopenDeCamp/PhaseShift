@@ -74,6 +74,7 @@ phaseshift_add_test(NAME test_gpu_mcu_append_without_redoorbell SOURCE unit/gpu_
 phaseshift_add_test(NAME test_gpu_mcu_kernarg_region_lifetime SOURCE unit/gpu_mcu/substrate/test_gpu_mcu_kernarg_region_lifetime.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu)
 phaseshift_add_test(NAME test_gpu_mcu_real_rmsnorm_aql SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_rmsnorm_aql.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_RMSNORM_HSACO="${PS_GPU_MCU_RMSNORM_HSACO}" DEPENDS gpu_mcu_hsaco_rmsnorm)
 phaseshift_add_test(NAME test_gpu_mcu_real_rmsnorm_fsm SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_rmsnorm_fsm.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_RMSNORM_HSACO="${PS_GPU_MCU_RMSNORM_HSACO}" DEPENDS gpu_mcu_hsaco_rmsnorm)
+phaseshift_add_test(NAME test_gpu_mcu_kernarg_source_parity SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_kernarg_source_parity.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 2 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_RMSNORM_HSACO="${PS_GPU_MCU_RMSNORM_HSACO}" DEPENDS gpu_mcu_hsaco_rmsnorm)
 phaseshift_add_test(NAME test_gpu_mcu_real_rmsnorm_feed SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_rmsnorm_feed.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 300 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_RMSNORM_HSACO="${PS_GPU_MCU_RMSNORM_HSACO}" DEPENDS gpu_mcu_hsaco_rmsnorm)
 set_tests_properties(test_gpu_mcu_real_rmsnorm_feed PROPERTIES RUN_SERIAL TRUE)
 phaseshift_add_test(NAME test_gpu_mcu_real_rmsnorm_f32_pg SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_real_rmsnorm_f32_pg.hip LABELS "gpu1;gpu_mcu;required" TIMEOUT 180 GPU_COUNT 1 GPU_COST_GB 1 LIBRARIES phaseshift_gpu_mcu phaseshift_qwen35_kernels phaseshift_qwen35_kernels_optimized phaseshift_gpu DEFS PHASESHIFT_GPU_MCU_RMSNORM_HSACO="${PS_GPU_MCU_RMSNORM_HSACO}" DEPENDS gpu_mcu_hsaco_rmsnorm)
@@ -185,6 +186,7 @@ set(PS_GPU_MCU_REQUIRED_TESTS
     test_gpu_mcu_kernarg_region_lifetime
     test_gpu_mcu_real_rmsnorm_aql
     test_gpu_mcu_real_rmsnorm_fsm
+    test_gpu_mcu_kernarg_source_parity
     test_gpu_mcu_real_rmsnorm_feed
     test_gpu_mcu_real_rmsnorm_f32_pg
     test_gpu_mcu_real_elementwise
