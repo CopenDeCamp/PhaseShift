@@ -1,8 +1,8 @@
-#include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 
-#include <phaseshift/runtime/gpu_mcu/execution_bridge.h>
+#include <phaseshift/runtime/gpu_mcu/execution/execution_bridge.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h>
-#include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
+#include <phaseshift/runtime/gpu_mcu/execution/persistent_mcu.h>
 #include <phaseshift/runtime/gpu_mcu/binding/plan_binder.h>
 
 #include <atomic>

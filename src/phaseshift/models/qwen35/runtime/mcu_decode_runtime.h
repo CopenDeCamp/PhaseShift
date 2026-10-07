@@ -6,7 +6,7 @@
 #include <phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
-#include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <phaseshift/runtime/stream_bridge.h>
 
 #include <memory>

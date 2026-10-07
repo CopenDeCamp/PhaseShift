@@ -7,7 +7,7 @@
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/state/gdn_state_pool.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
+#include <phaseshift/runtime/gpu_mcu/execution/persistent_mcu.h>
 
 #include <hip/hip_runtime.h>
 

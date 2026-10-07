@@ -3,7 +3,7 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
 #include <phaseshift/models/qwen35/state/sequence_slot_pool.h>
-#include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
+#include <phaseshift/runtime/gpu_mcu/execution/persistent_mcu.h>
 
 namespace ps::qwen35::runtime {
 

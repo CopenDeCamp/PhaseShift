@@ -1,6 +1,6 @@
 #include <phaseshift/runtime/gpu_mcu/infrastructure/completion.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.h>
-#include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
+#include <phaseshift/runtime/gpu_mcu/execution/persistent_mcu.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 
 #include <hip/hip_runtime.h>

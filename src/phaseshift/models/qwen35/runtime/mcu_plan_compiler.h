@@ -1,7 +1,7 @@
 #pragma once
 
 #include <phaseshift/core/status.h>
-#include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <phaseshift/runtime/program/program.h>
 
 #include <cstdint>

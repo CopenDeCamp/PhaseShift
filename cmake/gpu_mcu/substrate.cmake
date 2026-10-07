@@ -54,8 +54,8 @@ add_library(phaseshift_gpu_mcu STATIC
     src/phaseshift/runtime/gpu_mcu/scheduling/batch_planner.hip
     src/phaseshift/runtime/gpu_mcu/binding/slot_binding.hip
     src/phaseshift/runtime/gpu_mcu/binding/batch_binding.hip
-    src/phaseshift/runtime/gpu_mcu/persistent_mcu.hip
-    src/phaseshift/runtime/gpu_mcu/micro_fsm.hip
+    src/phaseshift/runtime/gpu_mcu/execution/persistent_mcu.hip
+    src/phaseshift/runtime/gpu_mcu/execution/micro_fsm.hip
     src/phaseshift/runtime/gpu_mcu/infrastructure/wall_clock.cpp
     src/phaseshift/runtime/gpu_mcu/infrastructure/worker_image.cpp
 )

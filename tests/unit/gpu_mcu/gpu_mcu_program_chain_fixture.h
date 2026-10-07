@@ -4,7 +4,7 @@
 #include <phaseshift/models/qwen35/kernels/optimized/linear/psq4.h>
 #include <phaseshift/models/qwen35/kernels/optimized/rmsnorm.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
-#include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <phaseshift/runtime/program/int8_activation_workspace.h>
 #include <phaseshift/runtime/program/program.h>
 

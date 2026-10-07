@@ -1,6 +1,6 @@
 #include <phaseshift/models/qwen35/runtime/mcu_decode_runtime.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
+#include <phaseshift/runtime/gpu_mcu/execution/persistent_mcu.h>
 #include <phaseshift/runtime/gpu_mcu/binding/plan_binder.h>
 
 #include <hip/hip_runtime.h>

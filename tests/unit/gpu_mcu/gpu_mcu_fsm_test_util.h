@@ -5,7 +5,7 @@
 #include <phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/device_completion.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h>
-#include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/retained_packet.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 

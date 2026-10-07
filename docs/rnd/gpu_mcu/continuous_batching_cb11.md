@@ -85,7 +85,7 @@ Host physical path と MCU AQL plan を同条件で実行し、全 row の outpu
 しか実行できない。両者を繋ぐ API が無く、signal mode（`start_signal`）の所有権も競合する。
 これが CB11 の最大の blocker で、3-class mixed production execution はこの bridge に依存する。
 
-- 影響 kernel: FSM 実行経路全般（`src/phaseshift/runtime/gpu_mcu/micro_fsm.hip`,
+- 影響 kernel: FSM 実行経路全般（`src/phaseshift/runtime/gpu_mcu/execution/micro_fsm.hip`,
   `persistent_mcu.hip`, `mcu_decode_runtime.hip`）
 - 必要な変更: compiled `McuCompiledPlan` を未起動の `GpuMcuFsmState` へ upload し、
   `configure_execution` へ渡す API。`McuDecodeRuntime` から code object / kernarg /

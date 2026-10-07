@@ -6,11 +6,11 @@
 #include <phaseshift/runtime/gpu_mcu/binding/batch_binding.h>
 #include <phaseshift/runtime/gpu_mcu/commit/batch_commit.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/batch_planner.h>
-#include <phaseshift/runtime/gpu_mcu/execution_bridge.h>
+#include <phaseshift/runtime/gpu_mcu/execution/execution_bridge.h>
 #include <phaseshift/runtime/gpu_mcu/io/output_ring.h>
 #include <phaseshift/runtime/gpu_mcu/commit/slot_runtime.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/kv_page_allocator.h>
-#include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 
 #include <hip/hip_runtime.h>
 

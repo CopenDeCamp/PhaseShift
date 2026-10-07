@@ -9,7 +9,7 @@
 #include <phaseshift/models/qwen35/state/paged_kv_pool.h>
 #include <phaseshift/models/qwen35/state/paged_sequence_state.h>
 #include <phaseshift/models/qwen35/state/sequence_slot_pool.h>
-#include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
+#include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <hip/hip_runtime.h>
 
 #include "support/resident_model_fixture.h"
