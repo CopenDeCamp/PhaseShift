@@ -3,7 +3,7 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/device_completion.h>
-#include <phaseshift/runtime/gpu_mcu/gdn_reset.h>
+#include <phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.h>
 #include <phaseshift/runtime/gpu_mcu/infrastructure/retained_packet.h>
 
 #include <hip/hip_runtime.h>

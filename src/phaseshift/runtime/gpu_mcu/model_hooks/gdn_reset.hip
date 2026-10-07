@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/gdn_reset.h>
+#include <phaseshift/runtime/gpu_mcu/model_hooks/gdn_reset.h>
 
 #include <hip/hip_runtime.h>
 
