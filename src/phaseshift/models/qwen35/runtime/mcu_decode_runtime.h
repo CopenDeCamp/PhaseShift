@@ -168,6 +168,8 @@ private:
     uint32_t gdn_recur_count_ = 0;
     void* gdn_reset_ = nullptr;
     uint32_t gdn_reset_count_ = 0;
+    void* kernarg_sources_ = nullptr;
+    uint32_t kernarg_source_count_ = 0;
 
     ::ps::runtime::StreamSignal start_signal_{};
     ::ps::runtime::StreamSignal done_signal_{};

@@ -45,6 +45,18 @@ Status upload_table(void** dst, uint32_t* dst_count, const std::vector<T>& src) 
     return Status::make_ok();
 }
 
+mcu::McuKernargSourceDesc prepared_kernarg_source(const void* base,
+                                                  uint32_t index,
+                                                  std::size_t size) {
+    mcu::McuKernargSourceDesc desc{};
+    const auto* byte_base = static_cast<const unsigned char*>(base);
+    desc.source = reinterpret_cast<uint64_t>(
+        byte_base + static_cast<std::size_t>(index) * size);
+    desc.explicit_args_bytes = static_cast<uint32_t>(size);
+    desc.flags = mcu::kMcuKernargSourcePrepared;
+    return desc;
+}
+
 Status free_table(void** ptr, uint32_t* count) noexcept {
     if (*ptr == nullptr) {
         *count = 0u;
@@ -243,6 +255,8 @@ Status McuDecodeRuntime::release_invocations() noexcept {
     s = free_table(&gdn_recur_, &gdn_recur_count_);
     if (!s.ok()) status = s;
     s = free_table(&gdn_reset_, &gdn_reset_count_);
+    if (!s.ok()) status = s;
+    s = free_table(&kernarg_sources_, &kernarg_source_count_);
     if (!s.ok()) status = s;
     if (row_global_patches_ != nullptr) {
         if (hipFree(row_global_patches_) != hipSuccess) {
@@ -660,6 +674,22 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
         (void)release_invocations();
         return status;
     }
+    std::vector<mcu::McuKernargSourceDesc> sources(plan.nodes.size());
+    for (std::size_t i = 0; i < plan.nodes.size(); ++i) {
+        const mcu::McuPlanNode& node = plan.nodes[i];
+        if (node.kernarg_recipe !=
+            mcu::kMcuKernargRecipeRmsNormBf16PfOnePlus) {
+            continue;
+        }
+        if (node.invocation_index >= rms_count_) continue;
+        sources[i] = prepared_kernarg_source(
+            rms_, node.invocation_index, sizeof(mcu::McuRmsNormInvocation));
+    }
+    status = upload_table(&kernarg_sources_, &kernarg_source_count_, sources);
+    if (!status.ok()) {
+        (void)release_invocations();
+        return status;
+    }
     attention_regions_ = plan.attention_regions;
     bf16_catalogs_ = plan.bf16_variant_catalogs;
     geometry_patches_ = plan.geometry_patches;
@@ -669,7 +699,11 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
         for (std::size_t i = 0; i < plan.nodes.size(); ++i) {
             bindings[i].enabled = 1u;
             bindings[i].variant_id = plan.nodes[i].variant_id;
-            bindings[i].invocation_index = plan.nodes[i].invocation_index;
+            bindings[i].invocation_index =
+                i < sources.size() &&
+                        (sources[i].flags & mcu::kMcuKernargSourcePrepared) != 0u
+                    ? static_cast<uint32_t>(i)
+                    : plan.nodes[i].invocation_index;
         }
         const std::size_t bytes =
             bindings.size() * sizeof(mcu::McuDynamicNodeBinding);
@@ -801,6 +835,9 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     config.dynamic_node_bindings =
         static_cast<const mcu::McuDynamicNodeBinding*>(dynamic_bindings_);
     config.dynamic_node_binding_count = dynamic_binding_count_;
+    config.kernarg_sources =
+        static_cast<const mcu::McuKernargSourceDesc*>(kernarg_sources_);
+    config.kernarg_source_count = kernarg_source_count_;
     config.log_base = reinterpret_cast<uint64_t>(log_region_.base);
     config.output_base = reinterpret_cast<uint64_t>(plan_output_);
     config.timestamps_base = reinterpret_cast<uint64_t>(plan_timestamps_);
@@ -971,6 +1008,8 @@ Status McuDecodeRuntime::shutdown() noexcept {
     s = free_table(&gdn_recur_, &gdn_recur_count_);
     if (!s.ok()) status = s;
     s = free_table(&gdn_reset_, &gdn_reset_count_);
+    if (!s.ok()) status = s;
+    s = free_table(&kernarg_sources_, &kernarg_source_count_);
     if (!s.ok()) status = s;
     if (row_global_patches_ != nullptr) {
         if (hipFree(row_global_patches_) != hipSuccess) {
@@ -1157,6 +1196,8 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     gdn_recur_count_ = other.gdn_recur_count_;
     gdn_reset_ = other.gdn_reset_;
     gdn_reset_count_ = other.gdn_reset_count_;
+    kernarg_sources_ = other.kernarg_sources_;
+    kernarg_source_count_ = other.kernarg_source_count_;
     start_signal_ = other.start_signal_;
     done_signal_ = other.done_signal_;
     result_signal_ = other.result_signal_;
@@ -1202,6 +1243,8 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     other.gdn_conv_ = nullptr;
     other.gdn_recur_ = nullptr;
     other.gdn_reset_ = nullptr;
+    other.kernarg_sources_ = nullptr;
+    other.kernarg_source_count_ = 0u;
     other.row_global_patches_ = nullptr;
     other.dynamic_bindings_ = nullptr;
     other.dynamic_binding_count_ = 0u;
