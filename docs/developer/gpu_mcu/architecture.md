@@ -159,25 +159,115 @@ GPU-MCU
 | `infrastructure/` | AQL queue / packet publication / doorbell / kernarg region / CU-WGP partition / completion primitive / worker HSACO / wall clock。LLM・request・batch・token を知らない | `aql.h`, `retained_packet.h`, `completion.h`, `device_completion.h`, `cu_partition.h`, `wall_clock.h`, `worker_image.h`, `fsm_worker.h` |
 | `io/` | Host ⇄ Persistent MCU の通信境界。「次に何を実行するか」は判断しない | `control_ring.h`, `request_ingress.h`, `output_ring.h` |
 | `scheduling/` | 何を実行するか（what should run next）。AQL packet は発行しない | `slot_table.h`, `batch_planner.h`, `kv_page_allocator.h`, `sequence_resource.h` |
-| `binding/` | logical work を physical execution へ変換する（runtime pointer・actual rows・shape・invocation index・kernarg source） | `slot_binding.h`, `batch_binding.h`, `plan_binder.h` |
-| `execution/` | GPU execution progression の owner。`src/` 側の `execution/detail/` は micro FSM の内部構成 | `persistent_mcu.h`, `micro_fsm.h`, `execution_bridge.h` |
+| `binding/` | logical work を physical execution へ変換する（runtime pointer・actual rows・shape・invocation index・kernarg source） | `slot_binding.h`, `batch_binding.h`, `plan_binder.h`, `plan_binding_contract.h` |
+| `execution/` | GPU execution progression の owner。`src/` 側の `execution/detail/` は micro FSM の内部構成 | `persistent_mcu.h`, `micro_fsm.h`, `execution_bridge.h`, `fsm_contract.h`, `invocation_abi.h`, `kernarg_recipe.h` |
 | `commit/` | kernel 実行完了後の状態更新（token commit・sequence advance・terminal decision・slot lifecycle・output publication） | `stop_conditions.h`, `slot_runtime.h`, `batch_commit.h` |
-| `model_hooks/` | substrate に残るモデル固有処理の隔離先。extension point ではなく既知の負債の隔離先であり、新規追加は禁止 | `gdn_reset.h` |
+| `model_hooks/` | substrate に残るモデル固有処理の隔離先。**DO NOT ADD NEW MODEL HOOKS**。extension point ではなく既知の負債の隔離先であり、新規ファイル追加は `test_architecture_boundaries` が失敗させる | `gdn_reset.h` |
 
-依存の方向は下位から上位へ。
+#### dependency matrix
 
-- `infrastructure/` は上位のいずれのディレクトリも include しない。
-- `scheduling/` は `execution/` を include しない。
-- `infrastructure/` `io/` `scheduling/` `binding/` `commit/` は Qwen35 を参照しない。
-- `binding/` → `execution/` は現状存在する。
-  `binding/plan_binder.h` が patch ABI の型
-  （`McuInvocationPatch` / `McuInvocationPatchSource` / `McuDynamicNodeBinding`）を
-  `execution/micro_fsm.h` から得ているため。
-  これらは binding の契約であり、切り出し候補である。
+依存は下位から上位へ。実際の責務に対して**禁止する依存**を明記するのが目的であり、
+完全な layered architecture に適合させることではない。
 
-上位3規則と `model_hooks/` の allowlist は
-`test_architecture_boundaries` が検査する。
-Qwen35 非参照は `include/phaseshift/runtime/**` の再帰走査で担保する。
+| from \\ to | infrastructure | io | scheduling | binding | execution | commit | model_hooks |
+|---|---|---|---|---|---|---|---|
+| `infrastructure/` | 許容 | 禁止 | 禁止 | 禁止 | 禁止 | 禁止 | 禁止 |
+| `io/` | 現状なし | 許容 | 許容 | 許容 | **禁止** | 現状なし | 現状なし |
+| `scheduling/` | 現状なし | 現状なし | 許容 | 現状なし | **禁止** | 現状なし | 現状なし |
+| `binding/` | 現状なし | 現状なし | 許容 | 許容 | **禁止** | 現状なし | 現状なし |
+| `commit/` | 現状なし | 許容 | 許容 | 許容 | 現状なし | 許容 | 現状なし |
+| `execution/` | 許容 | 許容 | 許容 | 許容 | 許容 | 許容 | 許容 |
+| `model_hooks/` | 現状なし | 現状なし | 現状なし | 現状なし | 現状なし | 現状なし | 許容 |
+
+- `execution/` はループの owner であり、上位すべてを知ってよい。
+- `model_hooks/` は transitional な隔離先である。
+- 「現状なし」は将来禁止を保証しないが、追加時はこの表を更新する。
+
+Qwen35 参照は `infrastructure` `io` `scheduling` `binding` `commit` で禁止する。
+これは `include/phaseshift/runtime/**` の再帰走査で担保しており、
+`model_hooks/` を含む全ディレクトリに効く。
+
+`test_architecture_boundaries` が検査する禁止依存:
+
+- `infrastructure/` → 上位 6 ディレクトリ
+- `scheduling/` → `execution/`
+- `binding/` → `execution/`
+- `io/` → `execution/`
+- `model_hooks/` に allowlist (`gdn_reset.h` / `gdn_reset.hip`) 外のファイル追加
+
+`binding/` → `execution/` はかつて存在した。
+`plan_binder.h` が static plan と runtime binding の間の契約を
+`execution/micro_fsm.h` から得ていたためである。
+`binding/plan_binding_contract.h` へ分離して実体を無くし、禁止ルールで固定した。
+
+#### contract の分層
+
+`execution/` の header は FSM 自身と、それを使う契約に分かれている。
+
+| header | 内容 | model 識別子 |
+|---|---|---|
+| `micro_fsm.h` | `GpuMcuFsmState` / `GpuMcuFsmRunContext` / `GpuMcuFsmConfig` / `GpuMcuFsm` と FSM public entry point | 容量定数にのみ |
+| `fsm_contract.h` | `McuSupervisorState` / `McuFaultCode` / `McuDoorbellMode` / `McuLogEvent` / `McuLogRecord` / `McuDispatchRecord` / `McuPlanNode` / `McuKernelVariantDesc` / `McuDispatchTiming` と node・record・log の flag | **なし** |
+| `invocation_abi.h` | `Mcu*Invocation` 24 構造体とその `static_assert` | 多数 |
+| `kernarg_recipe.h` | `kMcuKernargRecipe*` の番号表（`None = 0` … `Count = 29`） | 多数 |
+| `binding/plan_binding_contract.h` | `McuDynamicNodeBinding` / `McuInvocationPatchSource` / `McuInvocationPatch` | なし |
+
+recipe ID と `static_assert` は ABI であり、値・型・member 順・padding を変えてはならない。
+
+#### model-specific 識別子の所在
+
+`Gdn` `Qwen` `RmsNorm` `Psq4` `Attention` `Embedding` `Rope` `KvAppend` `Argmax` を含む件数:
+
+| location | 件数 |
+|---|---|
+| `execution/invocation_abi.h` | 208 |
+| `src/execution/detail/micro_fsm_kernarg.h` | 111 |
+| `execution/micro_fsm.h` | 45（容量定数） |
+| `execution/kernarg_recipe.h` | 18 |
+| `src/execution/detail/micro_fsm_host.h` | 18 |
+| `model_hooks/gdn_reset.*` | 5 |
+| `execution/fsm_contract.h` | **0** |
+
+`invocation_abi.h` と `kernarg_recipe.h` は `runtime/gpu_mcu` 配下に置いたままとする。
+generic FSM 実装が kernarg recipe を直接解釈しているため、
+ここで `models/qwen35/` へ移すと `execution → models/qwen35` という、より悪い依存を作る。
+
+#### コンポーネントの所属分類
+
+責務ディレクトリの物理配置とは別に、各コンポーネントが
+**どの層のものか**を判定した。本フェーズでは移動せず、分類のみを正本とする。
+
+判定は次の4問に対する答えによる。
+
+1. GPU-MCU という実行基盤に必須か？
+2. LLM inference だから必要なのか？
+3. Qwen35 だから必要なのか？
+4. 他モデルを追加した場合そのまま再利用できるか？
+
+| コンポーネント | 1. 基盤に必須 | 2. LLM だから必要 | 3. Qwen35 だから必要 | 4. 他モデルで再利用 | 分類 |
+|---|---|---|---|---|---|
+| `batch_planner` | いいえ | はい（batch / row / token の概念） | いいえ | 可 | Inference Runtime |
+| `slot_table` | いいえ | はい（request lifecycle と terminal reason） | いいえ | 可 | Inference Runtime |
+| `sequence_resource` | いいえ | はい（KV cache の block table と sequence） | いいえ | 可 | Inference Runtime |
+| `kv_page_allocator` | いいえ | はい（KV page は LLM 由来の概念） | いいえ | 可 | Inference Runtime |
+| `slot_runtime` | いいえ | はい（slot の terminal publish と release） | いいえ | 可 | Inference Runtime |
+| `batch_commit` | いいえ | はい（token commit と sequence advance） | いいえ | 可 | Inference Runtime |
+| `stop_conditions` | いいえ | いいえ（GPU-MCU の stop request に数え上げ先を与えるだけ） | いいえ | 可 | Inference Runtime |
+
+**7 件すべてが Inference Runtime** である。GPU-MCU Core にも Qwen35 Backend にも該当しない。
+Qwen35 固有の識別子を1件も含まないことを確認済みで、
+他モデルを足してもそのまま再利用できる。
+
+ディレクトリ単位では次の所属になる。
+
+| 層 | 対象 |
+|---|---|
+| GPU-MCU Core | `infrastructure/`、`execution/micro_fsm.h`・`fsm_contract.h`、`io/control_ring.h`、`binding/` |
+| Inference Runtime | `scheduling/`、`commit/`、`io/request_ingress.h`・`output_ring.h` |
+| Qwen35 Backend | `model_hooks/`、Qwen35 runtime 全体 |
+| transitional | `execution/invocation_abi.h`、`execution/kernarg_recipe.h`（generic FSM が recipe を直接解釈しているため runtime/gpu_mcu に残す） |
+
+移動は本フェーズでは行わない。まず分類し、architecture decision を経てから動かす。
 
 ### Qwen35 GPU-MCU backend
 
@@ -258,6 +348,34 @@ phaseshift_qwen35_runtime     Qwen3.5 runtime
   production は persistent loop 経路を使う。
 - shutdown 順序は stop request → wait stopped → stream sync。destructor は最終 fallback。
 - 同期 API の制約と実測は [low_level.md](low_level.md) の `persistent MCU lifecycle` を参照。
+
+### persistent controller の目標境界
+
+本フェーズではコードを変更しない。目標として次を記載する。
+
+```text
+receive command/event
+    ↓
+select executable work
+    ↓
+bind execution data
+    ↓
+execute static plan
+    ↓
+observe completion
+    ↓
+publish completion/event
+```
+
+この中に以下を含めないことを目標とする。
+
+- Qwen layer knowledge
+- GDN semantics
+- attention semantics
+- tokenizer semantics
+
+現状は `execution/invocation_abi.h` と `execution/kernarg_recipe.h` が
+kernel field の意味を substrate 内に持つ。これが達成を妨げている。
 
 ## AQL queue の役割
 
@@ -417,9 +535,9 @@ header は責務ディレクトリ配下に置く。移動の可否は「どの 
 | 分類 | header |
 |---|---|
 | 1. 外部 target が直接使う正式 contract | `aql.h`, `cu_partition.h`, `worker_image.h`, `fsm_worker.h`, `persistent_mcu.h`, `micro_fsm.h`, `completion.h`, `device_completion.h`, `retained_packet.h` |
-| 2. substrate 内部 contract（他 header からのみ include） | `slot_table.h`, `slot_binding.h`, `slot_runtime.h`, `batch_planner.h`, `batch_binding.h`, `batch_commit.h`, `control_ring.h`, `request_ingress.h`, `output_ring.h`, `sequence_resource.h`, `kv_page_allocator.h`, `gdn_reset.h`, `wall_clock.h`, `execution_bridge.h` |
+| 2. substrate 内部 contract（他 header からのみ include） | `slot_table.h`, `slot_binding.h`, `slot_runtime.h`, `batch_planner.h`, `batch_binding.h`, `batch_commit.h`, `control_ring.h`, `request_ingress.h`, `output_ring.h`, `sequence_resource.h`, `kv_page_allocator.h`, `gdn_reset.h`, `wall_clock.h`, `execution_bridge.h`, `plan_binding_contract.h`, `fsm_contract.h`, `invocation_abi.h`, `kernarg_recipe.h` |
 | 3. implementation detail | `src/phaseshift/runtime/gpu_mcu/execution/detail/*.h`（`micro_fsm.hip` の内部構成。public include tree には置かない） |
-| 4. Qwen3.5 backend 固有の contract を含む | `micro_fsm.h`（Qwen3.5 の kernarg recipe と invocation struct）。`model_hooks/gdn_reset.h` は Qwen3.5 固有だが substrate の負債として隔離済み。`embedded_kernels.h` は Qwen3.5 runtime 側にある |
+| 4. Qwen3.5 backend 固有の contract を含む | `execution/invocation_abi.h` と `execution/kernarg_recipe.h`（kernel ABI と recipe 番号表）。`model_hooks/gdn_reset.h` は Qwen3.5 固有だが substrate の負債として隔離済み。`embedded_kernels.h` は Qwen3.5 runtime 側にある。`micro_fsm.h` と `fsm_contract.h` は該当なし |
 | 5. test-only contract | **なし**。全 header が production か、それを include する public header から参照される |
 
 この結果、public include tree から private へ移動すべき header は無い。
