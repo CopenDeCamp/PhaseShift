@@ -148,6 +148,9 @@ void check_gpu_mcu_layering(const fs::path& root) {
 
     scan_clean(inc / "binding", no_execution);
     scan_clean(src / "binding", no_execution);
+
+    scan_clean(inc / "io", no_execution);
+    scan_clean(src / "io", no_execution);
 }
 
 void check_gpu_mcu_model_hooks(const fs::path& root) {
