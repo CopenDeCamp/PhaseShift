@@ -156,7 +156,7 @@ GPU-only region は MCU 自身が `region_start_ts` / `region_end_ts` を `wall_
 
 cross-check は十分長い kernel（event 25.7 ms）で行う。短い kernel では固定
 オーバーヘッドが乗り 0.87 程度になるが、これは換算誤差ではない。
-換算 helper は `include/phaseshift/runtime/gpu_mcu/wall_clock.h` に置き、
+換算 helper は `include/phaseshift/runtime/gpu_mcu/infrastructure/wall_clock.h` に置き、
 rate が 0 以下なら fail-closed とする。
 
 修正前は「GPU region 1.67 ms」と「host-observed 17.4 ms」が 10 倍乖離していた。

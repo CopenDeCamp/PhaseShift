@@ -1,6 +1,6 @@
 #pragma once
 
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 
 #include <cstddef>
 #include <cstdint>

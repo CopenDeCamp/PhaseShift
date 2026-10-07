@@ -2,7 +2,7 @@
 #include "unit/gpu_mcu/gpu_mcu_real_chain_fixture.h"
 
 #include <phaseshift/models/qwen35/kernels/optimized/embedding.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/program/device_program.h>
 
 #include <chrono>

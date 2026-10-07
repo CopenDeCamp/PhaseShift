@@ -34,7 +34,7 @@
 
 ### 2.2 helper
 
-`include/phaseshift/runtime/gpu_mcu/wall_clock.h` + `.cpp`:
+`include/phaseshift/runtime/gpu_mcu/infrastructure/wall_clock.h` + `.cpp`:
 
 - `gpu_wall_clock_rate_khz(device)` — rate が 0 以下なら fail-closed
 - `gpu_wall_clock_ticks_to_ms(ticks, rate_khz)`

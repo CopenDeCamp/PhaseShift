@@ -2,7 +2,7 @@
 
 #include <phaseshift/models/qwen35/kernels/optimized/linear/bf16.h>
 #include <phaseshift/models/qwen35/runtime/mcu_kernel_registry.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 
 #include <chrono>
 #include <cstdint>

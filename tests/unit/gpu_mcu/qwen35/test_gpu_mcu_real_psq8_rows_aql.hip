@@ -4,7 +4,7 @@
 #include <phaseshift/models/qwen35/kernels/optimized/linear/psq8.h>
 #include <phaseshift/models/qwen35/runtime/linear_selector.h>
 #include <phaseshift/models/qwen35/runtime/mcu_kernel_registry.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/program/int8_activation_workspace.h>
 
 #include <cstdint>

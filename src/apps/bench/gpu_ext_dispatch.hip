@@ -1,6 +1,6 @@
-#include <phaseshift/runtime/gpu_mcu/aql.h>
-#include <phaseshift/runtime/gpu_mcu/completion.h>
-#include <phaseshift/runtime/gpu_mcu/worker_image.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/completion.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>

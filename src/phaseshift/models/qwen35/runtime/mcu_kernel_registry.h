@@ -1,7 +1,7 @@
 #pragma once
 
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/gpu_mcu/embedded_kernels.h>
 
 namespace ps {

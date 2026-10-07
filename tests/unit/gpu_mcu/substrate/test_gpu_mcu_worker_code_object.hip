@@ -1,5 +1,5 @@
-#include <phaseshift/runtime/gpu_mcu/aql.h>
-#include <phaseshift/runtime/gpu_mcu/worker_image.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 
 #include <hip/hip_runtime.h>
 

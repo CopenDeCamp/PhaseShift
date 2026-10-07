@@ -4,7 +4,7 @@
 #include <phaseshift/models/qwen35/kernels/optimized/attention/paged_attention.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
 #include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 
 #include <chrono>
 #include <cmath>

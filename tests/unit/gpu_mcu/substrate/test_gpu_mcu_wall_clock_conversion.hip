@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/wall_clock.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/wall_clock.h>
 
 #include <hip/hip_runtime.h>
 

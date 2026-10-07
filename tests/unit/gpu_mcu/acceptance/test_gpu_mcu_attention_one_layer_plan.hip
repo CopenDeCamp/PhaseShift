@@ -18,7 +18,7 @@
 #include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 
 #include "support/resident_model_fixture.h"
 

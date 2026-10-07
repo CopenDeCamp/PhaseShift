@@ -1,7 +1,7 @@
-#include <phaseshift/runtime/gpu_mcu/completion.h>
-#include <phaseshift/runtime/gpu_mcu/device_completion.h>
-#include <phaseshift/runtime/gpu_mcu/fsm_worker.h>
-#include <phaseshift/runtime/gpu_mcu/worker_image.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/completion.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/device_completion.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 
 #include <hip/hip_runtime.h>
 

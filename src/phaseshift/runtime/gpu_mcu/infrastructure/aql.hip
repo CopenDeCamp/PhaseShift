@@ -1,5 +1,5 @@
-#include <phaseshift/runtime/gpu_mcu/aql.h>
-#include <phaseshift/runtime/gpu_mcu/retained_packet.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/retained_packet.h>
 
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>

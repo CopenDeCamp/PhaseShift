@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/worker_image.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 
 #include <phaseshift_gpu_mcu_probe_worker_hsaco.inc>
 

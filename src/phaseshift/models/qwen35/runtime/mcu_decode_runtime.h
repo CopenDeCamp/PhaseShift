@@ -2,10 +2,10 @@
 
 #include <phaseshift/models/qwen35/runtime/mcu_kernel_registry.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
-#include <phaseshift/runtime/gpu_mcu/cu_partition.h>
-#include <phaseshift/runtime/gpu_mcu/fsm_worker.h>
-#include <phaseshift/runtime/gpu_mcu/worker_image.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 #include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
 #include <phaseshift/runtime/stream_bridge.h>
 

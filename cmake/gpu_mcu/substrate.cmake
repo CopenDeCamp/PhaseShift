@@ -21,14 +21,14 @@ add_custom_command(
         -std=c++20
         --offload-arch=${CMAKE_HIP_ARCHITECTURES}
         -I${CMAKE_SOURCE_DIR}/include
-        ${CMAKE_SOURCE_DIR}/src/phaseshift/runtime/gpu_mcu/worker_probe.hip
+        ${CMAKE_SOURCE_DIR}/src/phaseshift/runtime/gpu_mcu/infrastructure/worker_probe.hip
         -o ${_PS_GPU_MCU_PROBE_BUNDLE}
     DEPENDS
-        "${CMAKE_SOURCE_DIR}/src/phaseshift/runtime/gpu_mcu/worker_probe.hip"
-        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/worker_image.h"
-        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/completion.h"
-        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/device_completion.h"
-        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/fsm_worker.h"
+        "${CMAKE_SOURCE_DIR}/src/phaseshift/runtime/gpu_mcu/infrastructure/worker_probe.hip"
+        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h"
+        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/infrastructure/completion.h"
+        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/infrastructure/device_completion.h"
+        "${CMAKE_SOURCE_DIR}/include/phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h"
     VERBATIM)
 add_custom_command(
     OUTPUT "${_PS_GPU_MCU_PROBE_HSACO}"
@@ -45,8 +45,8 @@ add_custom_command(
     VERBATIM)
 
 add_library(phaseshift_gpu_mcu STATIC
-    src/phaseshift/runtime/gpu_mcu/aql.hip
-    src/phaseshift/runtime/gpu_mcu/cu_partition.hip
+    src/phaseshift/runtime/gpu_mcu/infrastructure/aql.hip
+    src/phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.hip
     src/phaseshift/runtime/gpu_mcu/control_ring.hip
     src/phaseshift/runtime/gpu_mcu/output_ring.hip
     src/phaseshift/runtime/gpu_mcu/slot_table.hip
@@ -56,8 +56,8 @@ add_library(phaseshift_gpu_mcu STATIC
     src/phaseshift/runtime/gpu_mcu/batch_binding.hip
     src/phaseshift/runtime/gpu_mcu/persistent_mcu.hip
     src/phaseshift/runtime/gpu_mcu/micro_fsm.hip
-    src/phaseshift/runtime/gpu_mcu/wall_clock.cpp
-    src/phaseshift/runtime/gpu_mcu/worker_image.cpp
+    src/phaseshift/runtime/gpu_mcu/infrastructure/wall_clock.cpp
+    src/phaseshift/runtime/gpu_mcu/infrastructure/worker_image.cpp
 )
 set_source_files_properties("${_PS_GPU_MCU_PROBE_INC}"
     PROPERTIES GENERATED TRUE HEADER_FILE_ONLY TRUE)

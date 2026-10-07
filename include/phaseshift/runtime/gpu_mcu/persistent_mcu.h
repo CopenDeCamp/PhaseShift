@@ -1,7 +1,7 @@
 #pragma once
 
 #include <phaseshift/core/status.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/gpu_mcu/request_ingress.h>
 #include <phaseshift/runtime/gpu_mcu/batch_binding.h>
 #include <phaseshift/runtime/gpu_mcu/batch_commit.h>

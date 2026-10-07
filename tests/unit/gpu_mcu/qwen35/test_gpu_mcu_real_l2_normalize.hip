@@ -2,7 +2,7 @@
 #include "unit/gpu_mcu/gpu_mcu_real_chain_fixture.h"
 
 #include <phaseshift/models/qwen35/kernels/optimized/l2_normalize.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 
 #include <chrono>
 #include <cstdint>

@@ -1,13 +1,13 @@
 #pragma once
 
-#include <phaseshift/runtime/gpu_mcu/aql.h>
-#include <phaseshift/runtime/gpu_mcu/completion.h>
-#include <phaseshift/runtime/gpu_mcu/cu_partition.h>
-#include <phaseshift/runtime/gpu_mcu/device_completion.h>
-#include <phaseshift/runtime/gpu_mcu/fsm_worker.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/completion.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/device_completion.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/fsm_worker.h>
 #include <phaseshift/runtime/gpu_mcu/micro_fsm.h>
-#include <phaseshift/runtime/gpu_mcu/retained_packet.h>
-#include <phaseshift/runtime/gpu_mcu/worker_image.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/retained_packet.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/worker_image.h>
 
 #include <hip/hip_runtime.h>
 

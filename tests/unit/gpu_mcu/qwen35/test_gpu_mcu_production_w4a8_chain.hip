@@ -4,7 +4,7 @@
 
 #include <phaseshift/models/qwen35/kernels/optimized/activation_quantize.h>
 #include <phaseshift/models/qwen35/runtime/optimized_dispatch.h>
-#include <phaseshift/runtime/gpu_mcu/wall_clock.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/wall_clock.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 

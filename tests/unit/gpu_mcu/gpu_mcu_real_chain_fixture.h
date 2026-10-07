@@ -3,7 +3,7 @@
 #include <phaseshift/models/qwen35/kernels/optimized/activation_quantize.h>
 #include <phaseshift/models/qwen35/kernels/optimized/linear/psq4.h>
 #include <phaseshift/models/qwen35/kernels/optimized/rmsnorm.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/program/int8_activation_workspace.h>
 
 #include <hip/hip_runtime.h>

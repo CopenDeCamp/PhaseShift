@@ -3,7 +3,7 @@
 
 #include <phaseshift/models/qwen35/kernels/optimized/kv_append.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 
 #include <chrono>
 #include <cstdint>

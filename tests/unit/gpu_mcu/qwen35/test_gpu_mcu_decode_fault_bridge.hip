@@ -1,7 +1,7 @@
 #include "unit/gpu_mcu/gpu_mcu_fsm_test_util.h"
 
 #include <phaseshift/models/qwen35/kernels/optimized/elementwise.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 #include <phaseshift/runtime/stream_bridge.h>
 
 #include <cstdint>

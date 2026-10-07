@@ -1,5 +1,5 @@
 #include <phaseshift/models/qwen35/kernels/optimized/rmsnorm.h>
-#include <phaseshift/runtime/gpu_mcu/aql.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/aql.h>
 
 #include "unit/gpu_mcu/gpu_mcu_real_rmsnorm_fixture.h"
 

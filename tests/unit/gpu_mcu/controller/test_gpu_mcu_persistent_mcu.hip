@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/cu_partition.h>
+#include <phaseshift/runtime/gpu_mcu/infrastructure/cu_partition.h>
 #include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
 
 #include <hip/hip_runtime.h>

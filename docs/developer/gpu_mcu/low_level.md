@@ -148,7 +148,7 @@ Host が runtime で許される操作は次の5つだけである。
 
 ## worker HSACO build
 
-- `src/phaseshift/runtime/gpu_mcu/worker_probe.hip` を `hipcc --genco` で
+- `src/phaseshift/runtime/gpu_mcu/infrastructure/worker_probe.hip` を `hipcc --genco` で
   standalone HSACO にし、`worker_image.cpp` に埋め込む。
 - `hipcc --genco` の出力は固定 4096 byte の `__CLANG_OFFLOAD_BUNDLE__`
   header + bare ELF である。HSA reader が読むのは後半の ELF なので、
