@@ -783,6 +783,31 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
                 count = output_gather_count_;
                 stride = sizeof(mcu::McuOutputGatherBf16Invocation);
                 return true;
+            case mcu::kMcuKernargRecipeAttentionPaged:
+                base = paged_;
+                count = paged_count_;
+                stride = sizeof(mcu::McuPagedAttentionInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeAttentionPagedSplit:
+                base = paged_split_;
+                count = paged_split_count_;
+                stride = sizeof(mcu::McuPagedAttentionSplitInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeAttentionPagedReduce:
+                base = paged_reduce_;
+                count = paged_reduce_count_;
+                stride = sizeof(mcu::McuPagedAttentionReduceInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeVerifyAcceptPrefix:
+                base = verify_accept_;
+                count = verify_accept_count_;
+                stride = sizeof(mcu::McuVerifyAcceptPrefixInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeVerifyAcceptBatch:
+                base = verify_accept_batch_;
+                count = verify_accept_batch_count_;
+                stride = sizeof(mcu::McuVerifyAcceptBatchInvocation);
+                return true;
             default:
                 return false;
         }
