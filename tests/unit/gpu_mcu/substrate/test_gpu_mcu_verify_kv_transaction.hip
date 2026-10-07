@@ -1,7 +1,7 @@
-#include <phaseshift/runtime/gpu_mcu/batch_commit.h>
+#include <phaseshift/runtime/gpu_mcu/commit/batch_commit.h>
 #include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/sequence_resource.h>
-#include <phaseshift/runtime/gpu_mcu/slot_runtime.h>
+#include <phaseshift/runtime/gpu_mcu/commit/slot_runtime.h>
 
 #include <hip/hip_runtime.h>
 

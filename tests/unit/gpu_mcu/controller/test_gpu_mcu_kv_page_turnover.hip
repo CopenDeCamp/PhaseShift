@@ -3,7 +3,7 @@
 #include <phaseshift/models/qwen35/runtime/mcu_kv_binding.h>
 #include <phaseshift/runtime/gpu_mcu/io/output_ring.h>
 #include <phaseshift/runtime/gpu_mcu/persistent_mcu.h>
-#include <phaseshift/runtime/gpu_mcu/slot_runtime.h>
+#include <phaseshift/runtime/gpu_mcu/commit/slot_runtime.h>
 
 #include <hip/hip_runtime.h>
 

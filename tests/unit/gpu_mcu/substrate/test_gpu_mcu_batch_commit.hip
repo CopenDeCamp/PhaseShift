@@ -1,4 +1,4 @@
-#include <phaseshift/runtime/gpu_mcu/batch_commit.h>
+#include <phaseshift/runtime/gpu_mcu/commit/batch_commit.h>
 
 #include <hip/hip_runtime.h>
 

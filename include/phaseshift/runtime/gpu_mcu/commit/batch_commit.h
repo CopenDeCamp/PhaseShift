@@ -3,9 +3,9 @@
 #include <phaseshift/runtime/batch/device_batch_context.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/batch_planner.h>
 #include <phaseshift/runtime/gpu_mcu/binding/slot_binding.h>
-#include <phaseshift/runtime/gpu_mcu/slot_runtime.h>
+#include <phaseshift/runtime/gpu_mcu/commit/slot_runtime.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/slot_table.h>
-#include <phaseshift/runtime/gpu_mcu/stop_conditions.h>
+#include <phaseshift/runtime/gpu_mcu/commit/stop_conditions.h>
 
 #include <hip/hip_runtime.h>
 

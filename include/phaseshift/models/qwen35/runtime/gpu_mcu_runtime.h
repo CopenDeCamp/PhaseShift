@@ -8,7 +8,7 @@
 #include <phaseshift/runtime/gpu_mcu/io/control_ring.h>
 #include <phaseshift/runtime/gpu_mcu/io/output_ring.h>
 #include <phaseshift/runtime/gpu_mcu/io/request_ingress.h>
-#include <phaseshift/runtime/gpu_mcu/slot_runtime.h>
+#include <phaseshift/runtime/gpu_mcu/commit/slot_runtime.h>
 #include <phaseshift/runtime/gpu_mcu/scheduling/slot_table.h>
 #include <hip/hip_runtime.h>
 

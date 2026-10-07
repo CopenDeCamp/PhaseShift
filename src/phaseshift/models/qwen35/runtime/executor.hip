@@ -1,6 +1,6 @@
 #include <phaseshift/models/qwen35/runtime/executor.h>
 #include <phaseshift/models/qwen35/runtime/mcu_decode_state.h>
-#include <phaseshift/runtime/gpu_mcu/stop_conditions.h>
+#include <phaseshift/runtime/gpu_mcu/commit/stop_conditions.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_cache.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compiler.h>
 #include <phaseshift/runtime/stream_bridge.h>

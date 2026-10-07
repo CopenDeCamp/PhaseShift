@@ -37,7 +37,7 @@ reserve(candidate) + commit(accepted) + rollback(rejected tail)
 ## 3. transaction metadata
 
 新しい sidecar は作らず、`GpuMcuSlotRuntimeState`
-（`include/phaseshift/runtime/gpu_mcu/slot_runtime.h`）へ置く。予約フィールドを明示 field へ
+（`include/phaseshift/runtime/gpu_mcu/commit/slot_runtime.h`）へ置く。予約フィールドを明示 field へ
 置換し `sizeof == 64` / `alignof == 64` を維持する。
 
 | field | 意味 |
