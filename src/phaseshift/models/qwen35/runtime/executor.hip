@@ -653,66 +653,22 @@ Status preflight_mcu_plan(
     plan_ctx.staged_request_count = request_capacity;
 
     plan_ctx.static_plan_compile = true;
-    uint32_t batch_topology = 0u;
-    bool prefill_shape_ok = ctx.staged_request_count == 1u;
-    if (ctx.staged_requests != nullptr) {
-        for (uint32_t i = 0u; i < ctx.staged_request_count; ++i) {
-            const auto& req = ctx.staged_requests[i];
-            const bool is_prefill =
-                req.execution_class == ::ps::runtime::ExecutionClass::PREFILL;
-            batch_topology |= is_prefill ? 1u : 2u;
-            prefill_shape_ok = prefill_shape_ok && is_prefill &&
-                               req.row_begin == 0u &&
-                               req.row_count >= ctx.actual_rows;
-        }
-    } else {
-        prefill_shape_ok = false;
-    }
-    const bool static_prefill_shape =
-        batch_topology == 1u && prefill_shape_ok &&
-        ctx.actual_rows >= runtime::kPagedAttentionPrefillMinRows;
-    plan_ctx.static_attention_use_prefill = static_prefill_shape;
 
-    size_t attention_dispatch = program.dispatches.size();
-    for (size_t i = 0u; i < program.dispatches.size(); ++i) {
-        if (program.dispatches[i].kernel_id ==
-            ::ps::runtime::KernelId::PAGED_ATTENTION) {
-            attention_dispatch = i;
-            break;
-        }
+    const Result<runtime::McuStaticAttentionPlanClass> attn_class =
+        runtime::classify_static_attention_plan(program, ctx, row_capacity);
+    if (!attn_class.ok()) return attn_class.status();
+    const runtime::McuStaticAttentionPlanClass& attn = attn_class.value();
+    if (!attn.supported) {
+        return Status::unsupported("mcu static attention topology unavailable",
+                                   __FILE__, __LINE__);
     }
-    const bool has_paged_attention = attention_dispatch != program.dispatches.size();
-    uint32_t attention_plan_key = 0u;
-    if (has_paged_attention) {
-        runtime::HostExecutionContext probe_ctx = ctx;
-        probe_ctx.actual_rows = row_capacity;
-        const Result<uint32_t> sig = runtime::paged_attention_plan_signature(
-            program, attention_dispatch, probe_ctx, static_prefill_shape);
-        if (!sig.ok()) return sig.status();
-        attention_plan_key = sig.value();
-        const uint32_t splits = (attention_plan_key >> 2) & 0xFFFFu;
-        if ((attention_plan_key & 1u) == 0u) {
-            return Status::unsupported(
-                "mcu static attention topology unavailable", __FILE__,
-                __LINE__);
-        }
-        if (splits > 1u && splits != 16u) {
-            return Status::unsupported(
-                "mcu static attention split topology unsupported", __FILE__,
-                __LINE__);
-        }
-    }
-    if (has_paged_attention &&
-        ((attention_plan_key >> 2) & 0xFFFFu) >= 16u) {
-        plan_ctx.max_visible_tokens =
-            runtime::kPagedAttentionSplitMinVisible;
-    } else {
-        plan_ctx.max_visible_tokens = 1u;
-    }
+    plan_ctx.max_visible_tokens = attn.has_paged_attention
+                                      ? attn.canonical_max_visible
+                                      : 1u;
 
     for (const runtime::McuStaticPlanEntry& entry : state.static_plans) {
         if (entry.valid && entry.program_slot == bucket &&
-            entry.attention_plan_key == attention_plan_key) {
+            entry.attention_plan_key == attn.key) {
             out.plan = entry.plan;
             out.plan_begin = entry.plan_begin;
             out.plan_end = entry.plan_end;
@@ -744,7 +700,7 @@ Status preflight_mcu_plan(
     runtime::McuStaticPlanEntry entry;
     entry.valid = true;
     entry.program_slot = bucket;
-    entry.attention_plan_key = attention_plan_key;
+    entry.attention_plan_key = attn.key;
     entry.plan_begin = plan_begin;
     entry.plan_end = plan_end;
     entry.plan = out.plan;

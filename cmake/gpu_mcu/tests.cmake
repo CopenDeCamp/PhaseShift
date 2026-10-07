@@ -43,6 +43,8 @@ phaseshift_add_test(NAME test_gpu_mcu_production_decode SOURCE unit/gpu_mcu/acce
 target_include_directories(test_gpu_mcu_production_decode PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_plan_cache SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_plan_cache.hip LABELS "cpu;required" LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35 phaseshift_runtime phaseshift_gpu)
 target_include_directories(test_gpu_mcu_plan_cache PRIVATE "${CMAKE_SOURCE_DIR}/src")
+phaseshift_add_test(NAME test_gpu_mcu_static_attention_plan_class SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_static_attention_plan_class.hip LABELS "cpu;required" LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35 phaseshift_runtime phaseshift_gpu)
+target_include_directories(test_gpu_mcu_static_attention_plan_class PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_decode_backend_policy SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_decode_backend_policy.hip LABELS "cpu;required" LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35 phaseshift_runtime phaseshift_gpu)
 target_include_directories(test_gpu_mcu_decode_backend_policy PRIVATE "${CMAKE_SOURCE_DIR}/src")
 phaseshift_add_test(NAME test_gpu_mcu_plan_sampling_gate SOURCE unit/gpu_mcu/qwen35/test_gpu_mcu_plan_sampling_gate.hip LABELS "cpu;required" LIBRARIES phaseshift_qwen35_runtime phaseshift_qwen35 phaseshift_runtime phaseshift_gpu)

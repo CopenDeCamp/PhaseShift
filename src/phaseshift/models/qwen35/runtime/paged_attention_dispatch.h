@@ -49,6 +49,25 @@ struct PagedAttentionPlan {
 constexpr uint32_t kPagedAttentionPrefillMinRows = 128u;
 constexpr uint32_t kPagedAttentionSplitMinVisible = 2048u;
 
+uint32_t make_paged_attention_plan_key(const PagedAttentionPlan& plan);
+
+struct McuStaticAttentionPlanClass {
+    bool has_paged_attention = false;
+    bool supported = false;
+
+    uint32_t key = 0u;
+
+    bool use_prefill = false;
+    uint32_t splits = 1u;
+
+    uint32_t canonical_max_visible = 0u;
+};
+
+Result<McuStaticAttentionPlanClass> classify_static_attention_plan(
+    const ::ps::runtime::Program& program,
+    const HostExecutionContext& live_ctx,
+    uint32_t row_capacity);
+
 PagedAttentionPlan plan_paged_attention(
     const PagedAttentionResolvedArgs& args,
     const HostExecutionContext& ctx,

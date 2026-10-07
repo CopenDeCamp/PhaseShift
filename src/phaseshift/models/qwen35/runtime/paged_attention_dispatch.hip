@@ -689,6 +689,13 @@ hipError_t launch_paged_attention_physical(const PhysicalPagedAttentionPlan& pla
     return herr;
 }
 
+uint32_t make_paged_attention_plan_key(const PagedAttentionPlan& plan) {
+    uint32_t key = plan.optimized ? 1u : 0u;
+    key |= plan.use_prefill ? 2u : 0u;
+    key |= (plan.splits & 0xFFFFu) << 2;
+    return key;
+}
+
 Result<uint32_t> paged_attention_plan_signature(
     const ::ps::runtime::Program& program,
     size_t dispatch_index,
@@ -697,10 +704,78 @@ Result<uint32_t> paged_attention_plan_signature(
     auto res = resolve_paged_attention_args(program, dispatch_index, ctx);
     if (!res.ok()) return res.status();
     const PagedAttentionPlan plan = plan_paged_attention(res.value(), ctx, use_prefill);
-    uint32_t key = plan.optimized ? 1u : 0u;
-    key |= plan.use_prefill ? 2u : 0u;
-    key |= (plan.splits & 0xFFFFu) << 2;
-    return key;
+    return make_paged_attention_plan_key(plan);
+}
+
+Result<McuStaticAttentionPlanClass> classify_static_attention_plan(
+    const ::ps::runtime::Program& program,
+    const HostExecutionContext& live_ctx,
+    uint32_t row_capacity) {
+    McuStaticAttentionPlanClass out{};
+    size_t matched = 0u;
+    for (size_t i = 0u; i < program.dispatches.size(); ++i) {
+        if (program.dispatches[i].kernel_id ==
+            ::ps::runtime::KernelId::PAGED_ATTENTION)
+            ++matched;
+    }
+    if (matched == 0u) {
+        out.has_paged_attention = false;
+        out.supported = true;
+        out.key = 0u;
+        out.splits = 1u;
+        out.canonical_max_visible = 0u;
+        return out;
+    }
+    out.has_paged_attention = true;
+
+    bool use_prefill =
+        live_ctx.role == ::ps::runtime::ExecutionRole::Prefill &&
+        live_ctx.staged_requests != nullptr &&
+        live_ctx.staged_request_count == 1u;
+    for (uint32_t i = 0u; use_prefill && i < live_ctx.staged_request_count; ++i) {
+        const ::ps::runtime::DeviceRequestDescriptor& req =
+            live_ctx.staged_requests[i];
+        use_prefill = req.execution_class == ::ps::runtime::ExecutionClass::PREFILL &&
+                      req.row_begin == 0u && req.row_count >= live_ctx.actual_rows;
+    }
+    use_prefill = use_prefill &&
+                  row_capacity >= kPagedAttentionPrefillMinRows;
+    out.use_prefill = use_prefill;
+
+    HostExecutionContext probe_ctx = live_ctx;
+    probe_ctx.actual_rows = row_capacity;
+    bool key_seeded = false;
+    for (size_t i = 0u; i < program.dispatches.size(); ++i) {
+        if (program.dispatches[i].kernel_id !=
+            ::ps::runtime::KernelId::PAGED_ATTENTION)
+            continue;
+        const Result<uint32_t> sig = paged_attention_plan_signature(
+            program, i, probe_ctx, use_prefill);
+        if (!sig.ok()) return sig.status();
+        if (!key_seeded) {
+            out.key = sig.value();
+            key_seeded = true;
+        } else if (sig.value() != out.key) {
+            return Status::unsupported(
+                "paged attention dispatches classify differently",
+                __FILE__, __LINE__);
+        }
+    }
+    if (!key_seeded) {
+        return Status::unsupported("paged attention dispatch missing",
+                                   __FILE__, __LINE__);
+    }
+    out.splits = (out.key >> 2) & 0xFFFFu;
+    const bool optimized = (out.key & 1u) != 0u;
+    if (!optimized || (out.splits > 1u && out.splits != 16u)) {
+        out.supported = false;
+        out.canonical_max_visible = 0u;
+        return out;
+    }
+    out.supported = true;
+    out.canonical_max_visible =
+        out.splits >= 16u ? kPagedAttentionSplitMinVisible : 1u;
+    return out;
 }
 
 Result<OptimizedLaunchResult> try_launch_paged_attention(
