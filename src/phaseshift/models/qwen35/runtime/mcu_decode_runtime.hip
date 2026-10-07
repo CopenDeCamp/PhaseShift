@@ -808,6 +808,31 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
                 count = verify_accept_batch_count_;
                 stride = sizeof(mcu::McuVerifyAcceptBatchInvocation);
                 return true;
+            case mcu::kMcuKernargRecipeGdnConv1d:
+                base = gdn_conv_;
+                count = gdn_conv_count_;
+                stride = sizeof(mcu::McuGdnConv1dInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnRecurrence:
+                base = gdn_recur_;
+                count = gdn_recur_count_;
+                stride = sizeof(mcu::McuGdnRecurrenceInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnReset:
+                base = gdn_reset_;
+                count = gdn_reset_count_;
+                stride = sizeof(mcu::GpuMcuGdnResetInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnSpecRestore:
+                base = gdn_spec_restore_;
+                count = gdn_spec_restore_count_;
+                stride = sizeof(mcu::McuGdnSpecRestoreInvocation);
+                return true;
+            case mcu::kMcuKernargRecipeGdnSpecRestoreFromCounts:
+                base = gdn_spec_restore_from_counts_;
+                count = gdn_spec_restore_from_counts_count_;
+                stride = sizeof(mcu::McuGdnSpecRestoreFromCountsInvocation);
+                return true;
             default:
                 return false;
         }
