@@ -1,7 +1,7 @@
 #include <cstdio>
 #include <cctype>
 #include <filesystem>
-#include <set>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -135,7 +135,6 @@ void check_gpu_mcu_layering(const fs::path& root) {
         "runtime/gpu_mcu/binding/",
         "runtime/gpu_mcu/execution/",
         "runtime/gpu_mcu/commit/",
-        "runtime/gpu_mcu/model_hooks/",
     };
     scan_clean(inc / "infrastructure", infra_upper);
     scan_clean(src / "infrastructure", infra_upper);
@@ -154,21 +153,56 @@ void check_gpu_mcu_layering(const fs::path& root) {
 }
 
 void check_gpu_mcu_model_hooks(const fs::path& root) {
-    const std::set<std::string> allowed = {"gdn_reset.h", "gdn_reset.hip"};
     const std::vector<fs::path> dirs = {
         root / "include/phaseshift/runtime/gpu_mcu/model_hooks",
         root / "src/phaseshift/runtime/gpu_mcu/model_hooks",
     };
     for (const auto& dir : dirs) {
-        if (!fs::exists(dir)) continue;
-        for (const auto& entry : fs::directory_iterator(dir)) {
-            if (!entry.is_regular_file()) continue;
-            const std::string name = entry.path().filename().string();
-            if (allowed.find(name) == allowed.end()) {
-                fail("model_hooks quarantine violation: " + name);
+        if (fs::exists(dir)) {
+            fail("model_hooks must not exist: " + dir.string());
+        } else {
+            ++passed;
+        }
+    }
+}
+
+void check_gpu_mcu_executor_model_abi(const fs::path& root) {
+    const std::vector<fs::path> dirs = {
+        root / "include/phaseshift/runtime/gpu_mcu",
+        root / "src/phaseshift/runtime/gpu_mcu",
+    };
+    const std::vector<const char*> forbidden = {
+        "phaseshift/models/",
+        "invocation_abi.h",
+        "kernarg_recipe.h",
+        "kMcuKernargRecipe",
+        "GpuMcuGdnResetInvocation",
+        "GpuMcuGdnReset",
+    };
+    const std::regex model_invocation(R"(\bMcu[A-Z][A-Za-z0-9]*Invocation\b)");
+    const std::regex model_recipe(R"(\bkMcu[A-Z][A-Za-z0-9]*Recipe\b)");
+    for (const auto& dir : dirs) {
+        for (const auto& file : scan(dir)) {
+            const std::string text = read_file(file);
+            for (const char* needle : forbidden) {
+                if (contains(text, needle)) {
+                    fail(file.string() + std::string(" contains forbidden ") +
+                         needle);
+                } else {
+                    ++passed;
+                }
+            }
+            if (std::regex_search(text, model_invocation)) {
+                fail(file.string() + " contains a model invocation type");
+            } else {
+                ++passed;
+            }
+            if (std::regex_search(text, model_recipe)) {
+                fail(file.string() + " contains a model kernarg recipe id");
+            } else {
+                ++passed;
             }
         }
-        ++passed;
     }
 }
 
@@ -230,6 +264,7 @@ int main() {
 
     check_gpu_mcu_layering(root);
     check_gpu_mcu_model_hooks(root);
+    check_gpu_mcu_executor_model_abi(root);
 
     check_correctness_location(root);
     check_correctness_layout(root);
