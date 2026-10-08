@@ -475,6 +475,7 @@ namespace {
 enum class PagedAttentionResolveMode : uint8_t {
     HostImmediate = 0,
     StaticPlan = 1,
+    StaticPrefill = 2,
 };
 
 Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
@@ -488,14 +489,17 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     if (a.common.rows == 0u) return PhysicalResolveStatus::Skipped;
 
     const auto* bc = ctx.batch_context;
-    const bool static_plan = mode == PagedAttentionResolveMode::StaticPlan;
+    const bool static_plan = mode != PagedAttentionResolveMode::HostImmediate;
+    const bool prefill_intent =
+        mode == PagedAttentionResolveMode::StaticPrefill;
     const bool mixed = !static_plan && bc != nullptr &&
                        bc->requests != nullptr && bc->num_requests > 1u;
 
     if (!mixed) {
         const bool use_prefill =
-            !static_plan &&
-            should_use_paged_attention_prefill(a.common.rows, ctx);
+            static_plan
+                ? prefill_intent
+                : should_use_paged_attention_prefill(a.common.rows, ctx);
         const PagedAttentionPlan plan = plan_paged_attention(a, ctx, use_prefill);
         if (!plan.optimized) return PhysicalResolveStatus::NotApplicable;
         out.optimized = true;
@@ -580,6 +584,14 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_plan(
     const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
     return resolve_paged_attention_physical_impl(
         program, dispatch_index, ctx, PagedAttentionResolveMode::StaticPlan,
+        out);
+}
+
+Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_prefill(
+    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
+    return resolve_paged_attention_physical_impl(
+        program, dispatch_index, ctx, PagedAttentionResolveMode::StaticPrefill,
         out);
 }
 

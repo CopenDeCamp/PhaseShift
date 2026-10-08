@@ -60,6 +60,13 @@ Result<PhysicalResolveStatus> resolve_paged_attention_static_plan(
         program, dispatch_index, input.ctx, out);
 }
 
+Result<PhysicalResolveStatus> resolve_paged_attention_static_prefill(
+    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const McuPlanResolverInput& input, PhysicalPagedAttentionPlan& out) {
+    return resolve_paged_attention_physical_static_prefill(
+        program, dispatch_index, input.ctx, out);
+}
+
 Result<PhysicalResolveStatus> resolve_paged_attention_host_immediate(
     const ::ps::runtime::Program& program, size_t dispatch_index,
     const McuPlanResolverInput& input, PhysicalPagedAttentionPlan& out) {

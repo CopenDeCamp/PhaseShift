@@ -18,26 +18,59 @@ __host__ __device__ __forceinline__ void gpu_mcu_bind_attention_paths(
     uint32_t binding_count) noexcept {
     if (context == nullptr || spans == nullptr || bindings == nullptr) return;
     uint32_t max_visible = 0u;
-    if (context->requests != nullptr) {
+    uint32_t first_row_begin = 0u;
+    uint32_t first_row_count = 0u;
+    if (context->requests != nullptr && context->num_requests != 0u) {
         for (uint32_t i = 0u; i < context->num_requests; ++i) {
             const uint32_t visible = context->requests[i].sequence_length;
             if (visible > max_visible) max_visible = visible;
         }
+        first_row_begin = context->requests[0].row_begin;
+        first_row_count = context->requests[0].row_count;
     }
+    const uint32_t rows = context->actual_rows;
     for (uint32_t s = 0u; s < span_count; ++s) {
         const McuAttentionPathSpan& span = spans[s];
-        const bool has_direct = span.direct_node_end > span.node_begin;
+        const bool has_prefill = span.prefill_node_end > span.node_begin;
+        const bool has_direct = span.direct_node_end > span.prefill_node_end;
         const bool has_split = span.split_node_end > span.direct_node_end;
-        const uint32_t split_on =
-            has_split && (!has_direct || max_visible >= span.split_min_visible)
-                ? 1u
-                : 0u;
-        for (uint32_t n = span.node_begin;
-             n < span.direct_node_end && n < binding_count; ++n)
-            bindings[n].enabled = split_on != 0u ? 0u : 1u;
-        for (uint32_t n = span.direct_node_end;
-             n < span.split_node_end && n < binding_count; ++n)
-            bindings[n].enabled = static_cast<uint16_t>(split_on);
+        const bool prefill_batch =
+            has_prefill && context->num_requests == 1u &&
+            rows >= span.prefill_min_rows && first_row_begin == 0u &&
+            first_row_count >= rows;
+        const bool split_batch =
+            has_split && max_visible >= span.split_min_visible;
+        bool chosen = false;
+        uint32_t mode = 0u;
+        if (prefill_batch) {
+            mode = 0u;
+            chosen = true;
+        } else if (split_batch) {
+            mode = 2u;
+            chosen = true;
+        } else if (has_direct) {
+            mode = 1u;
+            chosen = true;
+        } else if (has_split) {
+            mode = 2u;
+            chosen = true;
+        } else if (has_prefill) {
+            mode = 0u;
+            chosen = true;
+        }
+        if (!chosen) continue;
+        const uint32_t group_begin[3] = {span.node_begin, span.prefill_node_end,
+                                         span.direct_node_end};
+        const uint32_t group_end[3] = {span.prefill_node_end, span.direct_node_end,
+                                       span.split_node_end};
+        const bool present[3] = {has_prefill, has_direct, has_split};
+        for (uint32_t g = 0u; g < 3u; ++g) {
+            if (!present[g]) continue;
+            const uint16_t enabled = g == mode ? 1u : 0u;
+            for (uint32_t n = group_begin[g];
+                 n < group_end[g] && n < binding_count; ++n)
+                bindings[n].enabled = enabled;
+        }
     }
 }
 

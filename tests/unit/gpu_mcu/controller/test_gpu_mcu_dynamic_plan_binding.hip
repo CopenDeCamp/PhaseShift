@@ -255,7 +255,7 @@ bool prepared_prefetch_case() {
 }  // namespace
 
 void attention_path_binding_case() {
-    mcu::McuRuntimeNodeBinding bindings[4] = {};
+    mcu::McuRuntimeNodeBinding bindings[6] = {};
     for (auto& b : bindings) {
         b.enabled = 1u;
         b.variant_id = 7u;
@@ -263,47 +263,61 @@ void attention_path_binding_case() {
 
     mcu::McuAttentionPathSpan spans[1] = {};
     spans[0].node_begin = 1u;
-    spans[0].direct_node_end = 2u;
-    spans[0].split_node_end = 4u;
+    spans[0].prefill_node_end = 2u;
+    spans[0].direct_node_end = 3u;
+    spans[0].split_node_end = 5u;
     spans[0].split_min_visible = 2048u;
+    spans[0].prefill_min_rows = 128u;
 
-    ::ps::runtime::DeviceRequestDescriptor requests[1] = {};
+    ::ps::runtime::DeviceRequestDescriptor requests[2] = {};
     ::ps::runtime::DeviceBatchContext context{};
     context.num_requests = 1u;
     context.requests = requests;
-
+    requests[0].row_begin = 0u;
+    requests[0].row_count = 100u;
+    context.actual_rows = 100u;
     requests[0].sequence_length = 100u;
-    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 4u);
+
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
     check(bindings[0].enabled == 1u, "node outside the span stays enabled");
-    check(bindings[1].enabled == 1u,
-          "direct node enabled below the split threshold");
-    check(bindings[2].enabled == 0u,
-          "split node disabled below the split threshold");
-    check(bindings[3].enabled == 0u,
-          "reduce node disabled below the split threshold");
-    check(bindings[1].variant_id == 7u, "binder leaves variant id alone");
+    check(bindings[1].enabled == 0u, "prefill node off below the row threshold");
+    check(bindings[2].enabled == 1u, "direct node on for a short decode batch");
+    check(bindings[3].enabled == 0u, "split node off below the visible threshold");
+    check(bindings[4].enabled == 0u, "reduce node off below the visible threshold");
+    check(bindings[2].variant_id == 7u, "binder leaves variant id alone");
 
     requests[0].sequence_length = 4096u;
-    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 4u);
-    check(bindings[1].enabled == 0u,
-          "direct node disabled above the split threshold");
-    check(bindings[2].enabled == 1u,
-          "split node enabled above the split threshold");
-    check(bindings[3].enabled == 1u,
-          "reduce node enabled above the split threshold");
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[1].enabled == 0u, "prefill node off for a short batch");
+    check(bindings[2].enabled == 0u, "direct node off above the split threshold");
+    check(bindings[3].enabled == 1u, "split node on above the split threshold");
+    check(bindings[4].enabled == 1u, "reduce node on above the split threshold");
+
+    requests[0].row_count = 256u;
+    context.actual_rows = 256u;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[1].enabled == 1u, "prefill node on for a full prefill batch");
+    check(bindings[2].enabled == 0u, "direct node off during prefill");
+    check(bindings[3].enabled == 0u, "split node off during prefill");
+    check(bindings[4].enabled == 0u, "reduce node off during prefill");
+
+    context.num_requests = 2u;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[1].enabled == 0u, "mixed batch never selects the prefill node");
+    check(bindings[3].enabled == 1u, "mixed batch keeps the split path");
 
     spans[0].split_node_end = spans[0].direct_node_end;
-    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 4u);
-    check(bindings[1].enabled == 1u,
-          "direct only plan keeps its node enabled");
+    spans[0].prefill_node_end = spans[0].node_begin;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[2].enabled == 1u, "direct only plan stays enabled");
 
-    mcu::gpu_mcu_bind_attention_paths(&context, spans, 0u, bindings, 4u);
-    check(bindings[1].enabled == 1u, "empty span table touches nothing");
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 0u, bindings, 6u);
+    check(bindings[2].enabled == 1u, "empty span table touches nothing");
 
     ::ps::runtime::DeviceBatchContext empty{};
     empty.num_requests = 1u;
-    mcu::gpu_mcu_bind_attention_paths(&empty, spans, 1u, bindings, 4u);
-    check(bindings[1].enabled == 1u, "missing request list falls back to direct");
+    mcu::gpu_mcu_bind_attention_paths(&empty, spans, 1u, bindings, 6u);
+    check(bindings[2].enabled == 1u, "missing request list falls back to direct");
 }
 
 int main() {

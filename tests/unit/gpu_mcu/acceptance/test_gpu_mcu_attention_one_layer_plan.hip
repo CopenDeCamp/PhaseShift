@@ -326,12 +326,17 @@ void run_prefill_scenario() {
     if (!static_plan.attention_path_spans.empty()) {
         const auto& span = static_plan.attention_path_spans[0];
         std::printf(
-            "static attention span: begin=%u direct_end=%u split_end=%u "
-            "min_visible=%u nodes=%zu\n",
-            span.node_begin, span.direct_node_end, span.split_node_end,
-            span.split_min_visible, static_plan.nodes.size());
-        check(span.node_begin < span.direct_node_end,
-              "static plan carries a direct attention node");
+            "static attention span: begin=%u prefill_end=%u direct_end=%u "
+            "split_end=%u min_visible=%u min_prefill=%u nodes=%zu\n",
+            span.node_begin, span.prefill_node_end, span.direct_node_end,
+            span.split_node_end, span.split_min_visible, span.prefill_min_rows,
+            static_plan.nodes.size());
+        check(span.node_begin < span.prefill_node_end,
+              "static plan carries a prefill attention node");
+        check(span.prefill_node_end < span.direct_node_end,
+              "static plan carries a decode attention node");
+        check(span.prefill_min_rows == q35::kPagedAttentionPrefillMinRows,
+              "prefill threshold is carried by the span");
         check(span.split_node_end >= span.direct_node_end,
               "split group starts after the direct group");
         check(span.split_node_end <= static_plan.nodes.size(),

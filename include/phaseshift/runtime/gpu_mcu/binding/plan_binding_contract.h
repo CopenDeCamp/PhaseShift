@@ -58,12 +58,14 @@ static_assert(offsetof(McuInvocationPatch, null_guard) == 10);
 
 struct McuAttentionPathSpan {
     uint32_t node_begin = 0;
+    uint32_t prefill_node_end = 0;
     uint32_t direct_node_end = 0;
     uint32_t split_node_end = 0;
     uint32_t split_min_visible = 0;
+    uint32_t prefill_min_rows = 0;
 };
 
-static_assert(sizeof(McuAttentionPathSpan) == 16);
+static_assert(sizeof(McuAttentionPathSpan) == 24);
 static_assert(std::is_trivially_copyable_v<McuAttentionPathSpan>);
 
 }  // namespace ps::runtime::gpu_mcu

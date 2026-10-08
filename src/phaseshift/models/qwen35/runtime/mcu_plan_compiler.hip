@@ -1286,6 +1286,30 @@ static Status compile_mcu_plan_impl(const Program& program,
                 };
                 const uint32_t span_begin =
                     static_cast<uint32_t>(out.nodes.size());
+                if (options.static_plan) {
+                    const auto snap_nodes = out.nodes.size();
+                    const auto snap_variants = out.variants.size();
+                    const auto snap_paged = out.attention_paged.size();
+                    const auto snap_regions = out.attention_regions.size();
+                    const uint32_t snap_physical = physical_nodes;
+                    PhysicalPagedAttentionPlan prefill_plan{};
+                    const auto prefill_res = resolve_paged_attention_static_prefill(
+                        program, i, input, prefill_plan);
+                    if (!prefill_res.ok() ||
+                        prefill_res.value() !=
+                            PhysicalResolveStatus::Applicable ||
+                        prefill_plan.physical_count == 0u ||
+                        !prefill_plan.use_prefill ||
+                        !emit_regions(prefill_plan).ok()) {
+                        out.nodes.resize(snap_nodes);
+                        out.variants.resize(snap_variants);
+                        out.attention_paged.resize(snap_paged);
+                        out.attention_regions.resize(snap_regions);
+                        physical_nodes = snap_physical;
+                    }
+                }
+                const uint32_t prefill_end =
+                    static_cast<uint32_t>(out.nodes.size());
                 const Status path_status = resolve_and_emit(input);
                 if (!path_status.ok()) return path_status;
                 const uint32_t direct_end =
@@ -1315,9 +1339,10 @@ static Status compile_mcu_plan_impl(const Program& program,
                     static_cast<uint32_t>(out.nodes.size());
                 if (options.static_plan && split_end > span_begin)
                     out.attention_path_spans.push_back(
-                        mcu::McuAttentionPathSpan{span_begin, direct_end,
-                                                  split_end,
-                                                  kPagedAttentionSplitMinVisible});
+                        mcu::McuAttentionPathSpan{
+                            span_begin, prefill_end, direct_end, split_end,
+                            kPagedAttentionSplitMinVisible,
+                            kPagedAttentionPrefillMinRows});
 
                 break;
             }
