@@ -104,6 +104,11 @@ maximum runtime capacity / long-lived resource address を入力として、
 意味は **Persistent MCU start 後に Host が recompile しないこと** である。
 compile と upload は controller start 前に一度だけ行う。
 
+`compile_mcu_plan()` の入力型は `McuStaticPlanCompileContext` であり、
+`HostExecutionContext` を受け取らない。件数は `row_capacity` /
+`output_capacity` / `request_capacity` / `stochastic_output_capacity` で
+表現し、`actual_rows` / `ExecutionRole` / `staged_requests` を持たない。
+
 #### Runtime Binding
 
 Static Plan へ今回の execution loop の値を適用する処理である。
@@ -520,7 +525,8 @@ Host
 
 ```text
 Program (lower_to_primitives の出力)
-  -> compile_mcu_plan(program, context, options, McuCompiledPlan)   （controller start 前）
+  -> compile_mcu_plan(program, McuStaticPlanCompileContext, options, McuCompiledPlan)
+                                                              （controller start 前）
   -> McuCompiledPlan { nodes, variants, invocation, epilogue, runtime binding schema }
   -> GpuMcuPersistentMcu へ configure と upload                     （controller start 前）
   -> GpuMcuPersistentMcu::start()
@@ -661,9 +667,14 @@ request terminal は controller stop を伴わない。
   `preflight_mcu_plan()` / `compile_mcu_plan()` / per-batch `configure_*` /
   `start()` / `batches_committed()` ポーリング / `request_stop()` /
   `wait_stopped()` を forward ごとに行う。
-- `compile_mcu_plan()` は live batch 値（`ctx.actual_rows` /
-  `ctx.actual_outputs` / `batch_context->requests` 等）を参照し、
-  static plan として長寿命で使える構成になっていない。
+- `compile_mcu_plan()` は `McuStaticPlanCompileContext` のみを受け取り、
+  `actual_rows` / `actual_outputs` / `ExecutionRole` / `staged_requests` を
+  参照しない。compile 側の件数は `row_capacity` / `output_capacity` /
+  `request_capacity` / `stochastic_output_capacity` で表現する。
+  ただし `DeviceBatchContext` の address と request descriptor の address は
+  まだ静的 Context を経由して resolver へ渡り、`batch_context->requests` への
+  fallback が残っているため、static plan として長寿命で使える構成には
+  なっていない。
 - token / terminal の取得が OutputRing ではなく Host の sampled token buffer
   直読になっている。
 
