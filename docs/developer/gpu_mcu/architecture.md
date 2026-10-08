@@ -109,6 +109,17 @@ compile と upload は controller start 前に一度だけ行う。
 `output_capacity` / `request_capacity` / `stochastic_output_capacity` で
 表現し、`actual_rows` / `ExecutionRole` / `staged_requests` を持たない。
 
+Static Plan は **runtime value を持たない**。ただし **runtime value の
+source address** は long-lived であれば保持してよい。
+
+- 許可: storage location — `runtime context はこの固定 address に存在する`
+- 禁止: storage contents — `compile 時の actual_rows は 7`
+
+判別は「controller lifetime 中に変わるか」で行う。変わるなら runtime value、
+変わらずに指し示す先にすぎないなら source address である。
+`DeviceBatchContext` と request descriptor の address は後者、
+`actual_rows` / `num_requests` / execution class は前者にあたる。
+
 #### Runtime Binding
 
 Static Plan へ今回の execution loop の値を適用する処理である。
