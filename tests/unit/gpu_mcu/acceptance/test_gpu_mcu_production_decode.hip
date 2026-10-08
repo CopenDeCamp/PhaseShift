@@ -29,6 +29,8 @@ namespace {
 namespace mcu = ::ps::runtime::gpu_mcu;
 
 int g_fail = 0;
+uint64_t g_compile_baseline = 0u;
+uint64_t g_upload_baseline = 0u;
 
 void check(bool condition, const std::string& message) {
     if (!condition) {
@@ -613,6 +615,31 @@ int main() {
                   "mcu plan was uploaded to the fsm");
             check(counters.host_fallback_count == 0u,
                   "mcu batch did not fall back to the host backend");
+            std::printf("production decode: static plans=%zu",
+                        executor.mcu_state->static_plans.size());
+            for (const auto& entry : executor.mcu_state->static_plans) {
+                std::printf(" [slot=%u key=%u rows=%u]", entry.program_slot,
+                            entry.attention_plan_key, entry.plan_end);
+            }
+            std::printf("\n");
+            check(counters.plan_compile_count >= 1u,
+                  "static plan was compiled at least once");
+            check(counters.plan_compile_count ==
+                      executor.mcu_state->static_plans.size(),
+                  "no static plan is compiled twice");
+            uint32_t plan_key = executor.mcu_state->static_plans.empty()
+                                    ? 0u
+                                    : executor.mcu_state->static_plans[0]
+                                          .attention_plan_key;
+            bool plan_key_uniform = true;
+            for (const auto& entry : executor.mcu_state->static_plans) {
+                if (entry.attention_plan_key != plan_key)
+                    plan_key_uniform = false;
+            }
+            check(plan_key_uniform,
+                  "static plan identity ignores the live batch");
+            g_compile_baseline = counters.plan_compile_count;
+            g_upload_baseline = counters.plan_upload_count;
             check(executor.mcu_state->persistent.batches_committed() >= 1u,
                   "mcu persistent execution committed the batch");
         }
@@ -677,6 +704,31 @@ int main() {
             check(equal,
                   "mcu mixed batch matches host mixed batch byte for byte");
         }
+    }
+
+    if (mcu_enabled && executor.mcu_state != nullptr) {
+        const auto& late = executor.mcu_state->cache.counters();
+        std::printf(
+            "production decode: after mixed compiles=%llu uploads=%llu\n",
+            static_cast<unsigned long long>(late.plan_compile_count),
+            static_cast<unsigned long long>(late.plan_upload_count));
+        check(late.plan_compile_count ==
+                  executor.mcu_state->static_plans.size(),
+              "mixed batch never compiles a static plan twice");
+        uint32_t late_key = executor.mcu_state->static_plans.empty()
+                                ? 0u
+                                : executor.mcu_state->static_plans[0]
+                                      .attention_plan_key;
+        bool late_uniform = true;
+        for (const auto& entry : executor.mcu_state->static_plans) {
+            if (entry.attention_plan_key != late_key) late_uniform = false;
+        }
+        check(late_uniform,
+              "mixed batch keeps one static plan identity");
+        check(late.plan_compile_count >= g_compile_baseline,
+              "mixed batch never drops a compiled static plan");
+        check(late.plan_upload_count >= g_upload_baseline,
+              "mixed batch never drops an uploaded static plan");
     }
 
     const auto shutdown_status = ps::qwen35::executor_shutdown(executor);
