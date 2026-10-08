@@ -72,6 +72,12 @@ __device__ __forceinline__ bool gpu_mcu_execution_step(
     const uint64_t consumed = state->execution_fsm->run_ctx.run_consumed;
     uint64_t epoch = state->execution_epoch + 1u;
     if (epoch <= consumed) epoch = consumed + 1u;
+    gpu_mcu_bind_attention_paths(context,
+                                 state->execution_fsm->attention_paths,
+                                 state->execution_fsm->attention_path_count,
+                                 state->execution_fsm->runtime_node_bindings,
+                                 state->execution_fsm
+                                     ->runtime_node_binding_count);
     gpu_mcu_bind_execution_plan(context, state->execution_patches,
                                 state->execution_patch_count,
                                 &state->stage_trace);

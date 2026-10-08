@@ -311,6 +311,39 @@ void run_prefill_scenario() {
     }
     check(has_prefill_kind, "prefill variant emitted");
 
+    q35::McuPlanCompileOptions static_opts = opts;
+    static_opts.static_plan = true;
+    q35::McuCompiledPlan static_plan;
+    const ps::Status static_status =
+        q35::compile_mcu_plan(program, ctx_static, static_opts, static_plan);
+    if (!static_status.ok()) {
+        std::printf("FAIL: static plan: %s\n", static_status.message().c_str());
+        check(false, "static plan compiled");
+        return;
+    }
+    check(static_plan.attention_path_spans.size() == 1u,
+          "static plan records one attention path span");
+    if (!static_plan.attention_path_spans.empty()) {
+        const auto& span = static_plan.attention_path_spans[0];
+        std::printf(
+            "static attention span: begin=%u direct_end=%u split_end=%u "
+            "min_visible=%u nodes=%zu\n",
+            span.node_begin, span.direct_node_end, span.split_node_end,
+            span.split_min_visible, static_plan.nodes.size());
+        check(span.node_begin < span.direct_node_end,
+              "static plan carries a direct attention node");
+        check(span.split_node_end >= span.direct_node_end,
+              "split group starts after the direct group");
+        check(span.split_node_end <= static_plan.nodes.size(),
+              "attention path span stays inside the node list");
+        check(span.split_min_visible == q35::kPagedAttentionSplitMinVisible,
+              "split threshold is carried by the span");
+        check(span.direct_node_end > span.node_begin &&
+                  static_plan.nodes[span.node_begin].flags ==
+                      mcu::kMcuNodeDispatch,
+              "span starts on a dispatch node");
+    }
+
     ::ps::runtime::DeviceRequestDescriptor mixed_reqs[2]{};
     mixed_reqs[0].execution_class = ::ps::runtime::ExecutionClass::DECODE;
     mixed_reqs[0].row_begin = 0u;

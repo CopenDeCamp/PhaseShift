@@ -276,6 +276,15 @@ Status McuDecodeRuntime::release_invocations() noexcept {
         runtime_bindings_ = nullptr;
         runtime_binding_count_ = 0u;
     }
+    if (attention_paths_ != nullptr) {
+        if (hipFree(attention_paths_) != hipSuccess) {
+            status = Status::hip_error(
+                "attention path free", hipGetErrorString(hipGetLastError()),
+                __FILE__, __LINE__);
+        }
+        attention_paths_ = nullptr;
+        attention_path_count_ = 0u;
+    }
     return status;
 }
 
@@ -903,6 +912,28 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
         }
         runtime_binding_count_ = static_cast<uint32_t>(bindings.size());
     }
+    if (!plan.attention_path_spans.empty()) {
+        const std::size_t path_bytes = plan.attention_path_spans.size() *
+                                       sizeof(mcu::McuAttentionPathSpan);
+        if (hipMalloc(&attention_paths_, path_bytes) != hipSuccess) {
+            attention_paths_ = nullptr;
+            (void)release_invocations();
+            return Status::hip_error(
+                "attention path allocation",
+                hipGetErrorString(hipGetLastError()), __FILE__, __LINE__);
+        }
+        if (hipMemcpy(attention_paths_, plan.attention_path_spans.data(),
+                      path_bytes, hipMemcpyHostToDevice) != hipSuccess) {
+            (void)hipFree(attention_paths_);
+            attention_paths_ = nullptr;
+            (void)release_invocations();
+            return Status::hip_error(
+                "attention path upload", hipGetErrorString(hipGetLastError()),
+                __FILE__, __LINE__);
+        }
+        attention_path_count_ =
+            static_cast<uint32_t>(plan.attention_path_spans.size());
+    }
     status = rebuild_row_global_patches();
     if (!status.ok()) {
         (void)release_invocations();
@@ -936,8 +967,11 @@ Status McuDecodeRuntime::prepare_plan(const McuCompiledPlan& plan) {
     config.kernarg_slot_stride = kernarg_.slot_stride;
     config.kernarg_slot_count = plan_node_count_ + 1u;
     config.runtime_node_bindings =
-        static_cast<const mcu::McuRuntimeNodeBinding*>(runtime_bindings_);
+        static_cast<mcu::McuRuntimeNodeBinding*>(runtime_bindings_);
     config.runtime_node_binding_count = runtime_binding_count_;
+    config.attention_paths =
+        static_cast<const mcu::McuAttentionPathSpan*>(attention_paths_);
+    config.attention_path_count = attention_path_count_;
     config.kernarg_sources =
         static_cast<const mcu::McuKernargSourceDesc*>(kernarg_sources_);
     config.kernarg_source_count = kernarg_source_count_;
@@ -1135,6 +1169,15 @@ Status McuDecodeRuntime::shutdown() noexcept {
         runtime_bindings_ = nullptr;
         runtime_binding_count_ = 0u;
     }
+    if (attention_paths_ != nullptr) {
+        if (hipFree(attention_paths_) != hipSuccess) {
+            status = Status::hip_error(
+                "attention path free", hipGetErrorString(hipGetLastError()),
+                __FILE__, __LINE__);
+        }
+        attention_paths_ = nullptr;
+        attention_path_count_ = 0u;
+    }
 
     if (plan_nodes_ != nullptr) {
         s = hipFree(plan_nodes_) == hipSuccess
@@ -1298,6 +1341,8 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     invocation_row_patches_ = std::move(other.invocation_row_patches_);
     runtime_bindings_ = other.runtime_bindings_;
     runtime_binding_count_ = other.runtime_binding_count_;
+    attention_paths_ = other.attention_paths_;
+    attention_path_count_ = other.attention_path_count_;
     gdn_recur_ = other.gdn_recur_;
     gdn_recur_count_ = other.gdn_recur_count_;
     gdn_reset_ = other.gdn_reset_;
@@ -1354,6 +1399,8 @@ void McuDecodeRuntime::move_from(McuDecodeRuntime&& other) noexcept {
     other.row_global_patches_ = nullptr;
     other.runtime_bindings_ = nullptr;
     other.runtime_binding_count_ = 0u;
+    other.attention_paths_ = nullptr;
+    other.attention_path_count_ = 0u;
     other.rms_count_ = 0u;
     other.quant_count_ = 0u;
     other.e4m3_count_ = 0u;

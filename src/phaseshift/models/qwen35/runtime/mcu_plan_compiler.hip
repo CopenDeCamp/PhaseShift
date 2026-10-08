@@ -4,6 +4,7 @@
 #include <phaseshift/models/qwen35/runtime/mcu_layer_range.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_value.h>
+#include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/kernels/optimized/verify_accept.h>
 #include <phaseshift/models/qwen35/kernels/optimized/embedding.h>
@@ -1083,18 +1084,6 @@ static Status compile_mcu_plan_impl(const Program& program,
                 break;
             }
             case KernelId::PAGED_ATTENTION: {
-                PhysicalPagedAttentionPlan plan{};
-                const auto resolved =
-                    options.static_plan
-                        ? resolve_paged_attention_physical_static_plan(
-                              program, i, ctx, plan)
-                        : resolve_paged_attention_physical(program, i, ctx,
-                                                          plan);
-                if (!resolved.ok()) return resolved.status();
-                if (resolved.value() != PhysicalResolveStatus::Applicable)
-                    return Status::unsupported(
-                        "paged attention dispatch is not applicable on the mcu",
-                        __FILE__, __LINE__);
                 const auto fill_common =
                     [](const ::ps::kernel::PagedAttentionCommonArgs& c, auto& inv) {
                         inv.q = reinterpret_cast<uint64_t>(c.q);
@@ -1123,158 +1112,213 @@ static Status compile_mcu_plan_impl(const Program& program,
                         inv.elems_per_layer = c.elems_per_layer;
                         inv.scale = c.scale;
                     };
-                for (uint32_t region = 0u; region < plan.physical_count; ++region) {
-                    const PhysicalPagedAttentionKernel& k = plan.kernels[region];
-                    switch (k.variant) {
-                        case PhysicalPagedAttentionVariant::Bf16Prefill: {
-                            if (k.common.head_dim !=
-                                    ::ps::kernel::kPagedAttentionHeadLimit ||
-                                k.common.page_tokens != 16u)
-                                return Status::unsupported(
-                                    "paged attention prefill shape has no mcu "
-                                    "entrypoint",
-                                    __FILE__, __LINE__);
-                            auto inv =
-                                mcu_plan_value<mcu::McuPagedAttentionInvocation>();
-                            fill_common(k.common, inv);
-                            inv.k_pool = k.k_pool;
-                            inv.v_pool = k.v_pool;
-                            const uint32_t index =
-                                static_cast<uint32_t>(out.attention_paged.size());
-                            out.attention_paged.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{0u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint32_t tiles =
-                                (k.common.rows +
-                                 ::ps::kernel::kPagedAttentionPrefillTileRows - 1u) /
-                                ::ps::kernel::kPagedAttentionPrefillTileRows;
-                            const uint16_t variant_id = mark_variant(
-                                out,
-                                McuCompiledVariantKind::AttentionPagedPrefillBf16,
-                                tiles, ::ps::kernel::kPagedAttentionPrefillBlock,
-                                k.common.q_heads);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPaged, index));
-                            break;
-                        }
-                        case PhysicalPagedAttentionVariant::Bf16FullHead: {
-                            auto inv =
-                                mcu_plan_value<mcu::McuPagedAttentionInvocation>();
-                            fill_common(k.common, inv);
-                            inv.k_pool = k.k_pool;
-                            inv.v_pool = k.v_pool;
-                            const uint32_t index =
-                                static_cast<uint32_t>(out.attention_paged.size());
-                            out.attention_paged.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{0u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint16_t variant_id = mark_variant(
-                                out, McuCompiledVariantKind::AttentionPagedBf16,
-                                k.grid, k.workgroup);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPaged, index));
-                            break;
-                        }
-                        case PhysicalPagedAttentionVariant::Bf16SplitQ4Full:
-                        case PhysicalPagedAttentionVariant::Bf16SplitOther: {
-                            McuCompiledVariantKind split_kind{};
-                            if (k.variant ==
-                                PhysicalPagedAttentionVariant::Bf16SplitQ4Full) {
-                                split_kind =
-                                    McuCompiledVariantKind::AttentionPagedSplitQ4Full;
-                            } else {
-                                if (k.q_per_kv != 6u ||
-                                    k.common.head_dim !=
-                                        ::ps::kernel::kPagedAttentionHeadLimit)
+                                const auto emit_regions =
+                    [&](const PhysicalPagedAttentionPlan& plan) -> Status {
+    for (uint32_t region = 0u; region < plan.physical_count; ++region) {
+                        const PhysicalPagedAttentionKernel& k = plan.kernels[region];
+                        switch (k.variant) {
+                            case PhysicalPagedAttentionVariant::Bf16Prefill: {
+                                if (k.common.head_dim !=
+                                        ::ps::kernel::kPagedAttentionHeadLimit ||
+                                    k.common.page_tokens != 16u)
                                     return Status::unsupported(
-                                        "paged attention split other shape has no "
-                                        "mcu entrypoint",
+                                        "paged attention prefill shape has no mcu "
+                                        "entrypoint",
                                         __FILE__, __LINE__);
-                                split_kind =
-                                    McuCompiledVariantKind::AttentionPagedSplitOther;
+                                auto inv =
+                                    mcu_plan_value<mcu::McuPagedAttentionInvocation>();
+                                fill_common(k.common, inv);
+                                inv.k_pool = k.k_pool;
+                                inv.v_pool = k.v_pool;
+                                const uint32_t index =
+                                    static_cast<uint32_t>(out.attention_paged.size());
+                                out.attention_paged.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{0u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint32_t tiles =
+                                    (k.common.rows +
+                                     ::ps::kernel::kPagedAttentionPrefillTileRows - 1u) /
+                                    ::ps::kernel::kPagedAttentionPrefillTileRows;
+                                const uint16_t variant_id = mark_variant(
+                                    out,
+                                    McuCompiledVariantKind::AttentionPagedPrefillBf16,
+                                    tiles, ::ps::kernel::kPagedAttentionPrefillBlock,
+                                    k.common.q_heads);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPaged, index));
+                                break;
                             }
-                            auto inv = mcu_plan_value<
-                                mcu::McuPagedAttentionSplitInvocation>();
-                            fill_common(k.common, inv);
-                            inv.k_pool = k.k_pool;
-                            inv.v_pool = k.v_pool;
-                            inv.partials = k.partials;
-                            inv.splits = k.splits;
-                            const uint32_t index = static_cast<uint32_t>(
-                                out.attention_paged_split.size());
-                            out.attention_paged_split.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{1u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint16_t variant_id =
-                                mark_variant(out, split_kind, k.grid, k.workgroup);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPagedSplit, index));
-                            break;
-                        }
-                        case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh1:
-                        case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh2:
-                        case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullBase:
-                        case PhysicalPagedAttentionVariant::Bf16ReduceOther: {
-                            McuCompiledVariantKind reduce_kind{};
-                            switch (k.variant) {
-                                case PhysicalPagedAttentionVariant::
-                                    Bf16ReduceQ4FullQh1:
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceQ4FullQh1;
-                                    break;
-                                case PhysicalPagedAttentionVariant::
-                                    Bf16ReduceQ4FullQh2:
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceQ4FullQh2;
-                                    break;
-                                case PhysicalPagedAttentionVariant::
-                                    Bf16ReduceQ4FullBase:
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceQ4FullBase;
-                                    break;
-                                default:
+                            case PhysicalPagedAttentionVariant::Bf16FullHead: {
+                                auto inv =
+                                    mcu_plan_value<mcu::McuPagedAttentionInvocation>();
+                                fill_common(k.common, inv);
+                                inv.k_pool = k.k_pool;
+                                inv.v_pool = k.v_pool;
+                                const uint32_t index =
+                                    static_cast<uint32_t>(out.attention_paged.size());
+                                out.attention_paged.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{0u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint16_t variant_id = mark_variant(
+                                    out, McuCompiledVariantKind::AttentionPagedBf16,
+                                    k.grid, k.workgroup);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPaged, index));
+                                break;
+                            }
+                            case PhysicalPagedAttentionVariant::Bf16SplitQ4Full:
+                            case PhysicalPagedAttentionVariant::Bf16SplitOther: {
+                                McuCompiledVariantKind split_kind{};
+                                if (k.variant ==
+                                    PhysicalPagedAttentionVariant::Bf16SplitQ4Full) {
+                                    split_kind =
+                                        McuCompiledVariantKind::AttentionPagedSplitQ4Full;
+                                } else {
                                     if (k.q_per_kv != 6u ||
                                         k.common.head_dim !=
                                             ::ps::kernel::kPagedAttentionHeadLimit)
                                         return Status::unsupported(
-                                            "paged attention reduce other shape "
-                                            "has no mcu entrypoint",
+                                            "paged attention split other shape has no "
+                                            "mcu entrypoint",
                                             __FILE__, __LINE__);
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceOther;
-                                    break;
+                                    split_kind =
+                                        McuCompiledVariantKind::AttentionPagedSplitOther;
+                                }
+                                auto inv = mcu_plan_value<
+                                    mcu::McuPagedAttentionSplitInvocation>();
+                                fill_common(k.common, inv);
+                                inv.k_pool = k.k_pool;
+                                inv.v_pool = k.v_pool;
+                                inv.partials = k.partials;
+                                inv.splits = k.splits;
+                                const uint32_t index = static_cast<uint32_t>(
+                                    out.attention_paged_split.size());
+                                out.attention_paged_split.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{1u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint16_t variant_id =
+                                    mark_variant(out, split_kind, k.grid, k.workgroup);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPagedSplit, index));
+                                break;
                             }
-                            auto inv = mcu_plan_value<
-                                mcu::McuPagedAttentionReduceInvocation>();
-                            fill_common(k.common, inv);
-                            inv.partials = k.partials;
-                            inv.splits = k.splits;
-                            const uint32_t index = static_cast<uint32_t>(
-                                out.attention_paged_reduce.size());
-                            out.attention_paged_reduce.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{2u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint16_t variant_id =
-                                mark_variant(out, reduce_kind, k.grid, k.workgroup);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPagedReduce, index));
-                            break;
+                            case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh1:
+                            case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh2:
+                            case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullBase:
+                            case PhysicalPagedAttentionVariant::Bf16ReduceOther: {
+                                McuCompiledVariantKind reduce_kind{};
+                                switch (k.variant) {
+                                    case PhysicalPagedAttentionVariant::
+                                        Bf16ReduceQ4FullQh1:
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceQ4FullQh1;
+                                        break;
+                                    case PhysicalPagedAttentionVariant::
+                                        Bf16ReduceQ4FullQh2:
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceQ4FullQh2;
+                                        break;
+                                    case PhysicalPagedAttentionVariant::
+                                        Bf16ReduceQ4FullBase:
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceQ4FullBase;
+                                        break;
+                                    default:
+                                        if (k.q_per_kv != 6u ||
+                                            k.common.head_dim !=
+                                                ::ps::kernel::kPagedAttentionHeadLimit)
+                                            return Status::unsupported(
+                                                "paged attention reduce other shape "
+                                                "has no mcu entrypoint",
+                                                __FILE__, __LINE__);
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceOther;
+                                        break;
+                                }
+                                auto inv = mcu_plan_value<
+                                    mcu::McuPagedAttentionReduceInvocation>();
+                                fill_common(k.common, inv);
+                                inv.partials = k.partials;
+                                inv.splits = k.splits;
+                                const uint32_t index = static_cast<uint32_t>(
+                                    out.attention_paged_reduce.size());
+                                out.attention_paged_reduce.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{2u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint16_t variant_id =
+                                    mark_variant(out, reduce_kind, k.grid, k.workgroup);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPagedReduce, index));
+                                break;
+                            }
+                            default:
+                                return Status::unsupported(
+                                    "paged attention physical variant has no mcu "
+                                    "entrypoint",
+                                    __FILE__, __LINE__);
                         }
-                        default:
-                            return Status::unsupported(
-                                "paged attention physical variant has no mcu "
-                                "entrypoint",
-                                __FILE__, __LINE__);
+                    }
+                    return Status::make_ok();
+                };
+                const auto resolve_and_emit =
+                    [&](const HostExecutionContext& rc) -> Status {
+                    PhysicalPagedAttentionPlan plan{};
+                    const auto resolved =
+                        options.static_plan
+                            ? resolve_paged_attention_physical_static_plan(
+                                  program, i, rc, plan)
+                            : resolve_paged_attention_physical(
+                                  program, i, rc, plan);
+                    if (!resolved.ok()) return resolved.status();
+                    if (resolved.value() != PhysicalResolveStatus::Applicable)
+                        return Status::unsupported(
+                            "paged attention dispatch is not applicable on the mcu",
+                            __FILE__, __LINE__);
+                    return emit_regions(plan);
+                };
+                const uint32_t span_begin =
+                    static_cast<uint32_t>(out.nodes.size());
+                const Status path_status = resolve_and_emit(ctx);
+                if (!path_status.ok()) return path_status;
+                const uint32_t direct_end =
+                    static_cast<uint32_t>(out.nodes.size());
+                if (options.static_plan) {
+                    const auto snap_nodes = out.nodes.size();
+                    const auto snap_variants = out.variants.size();
+                    const auto snap_paged = out.attention_paged.size();
+                    const auto snap_split = out.attention_paged_split.size();
+                    const auto snap_reduce = out.attention_paged_reduce.size();
+                    const auto snap_regions = out.attention_regions.size();
+                    const uint32_t snap_physical = physical_nodes;
+                    HostExecutionContext split_probe = ctx;
+                    split_probe.max_visible_tokens =
+                        kPagedAttentionSplitMinVisible;
+                    if (!resolve_and_emit(split_probe).ok()) {
+                        out.nodes.resize(snap_nodes);
+                        out.variants.resize(snap_variants);
+                        out.attention_paged.resize(snap_paged);
+                        out.attention_paged_split.resize(snap_split);
+                        out.attention_paged_reduce.resize(snap_reduce);
+                        out.attention_regions.resize(snap_regions);
+                        physical_nodes = snap_physical;
                     }
                 }
+                const uint32_t split_end =
+                    static_cast<uint32_t>(out.nodes.size());
+                if (options.static_plan && split_end > span_begin)
+                    out.attention_path_spans.push_back(
+                        mcu::McuAttentionPathSpan{span_begin, direct_end,
+                                                  split_end,
+                                                  kPagedAttentionSplitMinVisible});
+
                 break;
             }
             case KernelId::KV_APPEND: {

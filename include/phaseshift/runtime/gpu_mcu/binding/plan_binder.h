@@ -10,6 +10,37 @@
 
 namespace ps::runtime::gpu_mcu {
 
+__host__ __device__ __forceinline__ void gpu_mcu_bind_attention_paths(
+    const DeviceBatchContext* context,
+    const McuAttentionPathSpan* spans,
+    uint32_t span_count,
+    McuRuntimeNodeBinding* bindings,
+    uint32_t binding_count) noexcept {
+    if (context == nullptr || spans == nullptr || bindings == nullptr) return;
+    uint32_t max_visible = 0u;
+    if (context->requests != nullptr) {
+        for (uint32_t i = 0u; i < context->num_requests; ++i) {
+            const uint32_t visible = context->requests[i].sequence_length;
+            if (visible > max_visible) max_visible = visible;
+        }
+    }
+    for (uint32_t s = 0u; s < span_count; ++s) {
+        const McuAttentionPathSpan& span = spans[s];
+        const bool has_direct = span.direct_node_end > span.node_begin;
+        const bool has_split = span.split_node_end > span.direct_node_end;
+        const uint32_t split_on =
+            has_split && (!has_direct || max_visible >= span.split_min_visible)
+                ? 1u
+                : 0u;
+        for (uint32_t n = span.node_begin;
+             n < span.direct_node_end && n < binding_count; ++n)
+            bindings[n].enabled = split_on != 0u ? 0u : 1u;
+        for (uint32_t n = span.direct_node_end;
+             n < span.split_node_end && n < binding_count; ++n)
+            bindings[n].enabled = static_cast<uint16_t>(split_on);
+    }
+}
+
 __host__ __device__ __forceinline__ uint64_t gpu_mcu_patch_source_value(
     uint8_t source,
     uint32_t param,

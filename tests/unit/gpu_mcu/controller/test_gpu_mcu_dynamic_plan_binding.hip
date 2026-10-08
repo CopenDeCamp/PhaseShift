@@ -1,5 +1,7 @@
 #include "unit/gpu_mcu/gpu_mcu_fsm_test_util.h"
 
+#include <phaseshift/runtime/gpu_mcu/binding/plan_binder.h>
+
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -252,6 +254,58 @@ bool prepared_prefetch_case() {
 
 }  // namespace
 
+void attention_path_binding_case() {
+    mcu::McuRuntimeNodeBinding bindings[4] = {};
+    for (auto& b : bindings) {
+        b.enabled = 1u;
+        b.variant_id = 7u;
+    }
+
+    mcu::McuAttentionPathSpan spans[1] = {};
+    spans[0].node_begin = 1u;
+    spans[0].direct_node_end = 2u;
+    spans[0].split_node_end = 4u;
+    spans[0].split_min_visible = 2048u;
+
+    ::ps::runtime::DeviceRequestDescriptor requests[1] = {};
+    ::ps::runtime::DeviceBatchContext context{};
+    context.num_requests = 1u;
+    context.requests = requests;
+
+    requests[0].sequence_length = 100u;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 4u);
+    check(bindings[0].enabled == 1u, "node outside the span stays enabled");
+    check(bindings[1].enabled == 1u,
+          "direct node enabled below the split threshold");
+    check(bindings[2].enabled == 0u,
+          "split node disabled below the split threshold");
+    check(bindings[3].enabled == 0u,
+          "reduce node disabled below the split threshold");
+    check(bindings[1].variant_id == 7u, "binder leaves variant id alone");
+
+    requests[0].sequence_length = 4096u;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 4u);
+    check(bindings[1].enabled == 0u,
+          "direct node disabled above the split threshold");
+    check(bindings[2].enabled == 1u,
+          "split node enabled above the split threshold");
+    check(bindings[3].enabled == 1u,
+          "reduce node enabled above the split threshold");
+
+    spans[0].split_node_end = spans[0].direct_node_end;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 4u);
+    check(bindings[1].enabled == 1u,
+          "direct only plan keeps its node enabled");
+
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 0u, bindings, 4u);
+    check(bindings[1].enabled == 1u, "empty span table touches nothing");
+
+    ::ps::runtime::DeviceBatchContext empty{};
+    empty.num_requests = 1u;
+    mcu::gpu_mcu_bind_attention_paths(&empty, spans, 1u, bindings, 4u);
+    check(bindings[1].enabled == 1u, "missing request list falls back to direct");
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -265,6 +319,7 @@ int main() {
 
     (void)dynamic_geometry_case();
     (void)prepared_prefetch_case();
+    attention_path_binding_case();
 
     if (g_failed != 0) {
         std::printf("test_gpu_mcu_dynamic_plan_binding: %d failures\n", g_failed);

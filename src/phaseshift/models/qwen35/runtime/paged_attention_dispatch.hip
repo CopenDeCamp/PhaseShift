@@ -763,22 +763,24 @@ Result<McuStaticAttentionCatalog> build_static_attention_catalog(
     if (!direct_key.ok()) return direct_key.status();
     const Result<uint32_t> split_key =
         probe(kPagedAttentionSplitMinVisible, false);
-    if (!split_key.ok()) return split_key.status();
     const Result<uint32_t> prefill_key = probe(1u, true);
-    if (!prefill_key.ok()) return prefill_key.status();
 
     out.key = direct_key.value();
     out.splits = (out.key >> 2) & 0xFFFFu;
     const bool direct_optimized = (out.key & 1u) != 0u;
-    const uint32_t split_class = (split_key.value() >> 2) & 0xFFFFu;
-    const uint32_t prefill_class = (prefill_key.value() >> 2) & 0xFFFFu;
+    const uint32_t split_class =
+        split_key.ok() ? (split_key.value() >> 2) & 0xFFFFu : 0u;
+    const uint32_t prefill_class =
+        prefill_key.ok() ? (prefill_key.value() >> 2) & 0xFFFFu : 0u;
 
     out.supported = direct_optimized && (out.splits == 1u || out.splits == 16u);
     out.supports_decode_direct = out.supported && out.splits == 1u;
     out.supports_decode_split =
-        (split_key.value() & 1u) != 0u && split_class == 16u;
+        split_key.ok() && (split_key.value() & 1u) != 0u &&
+        split_class == 16u;
     out.supports_prefill =
-        (prefill_key.value() & 1u) != 0u && prefill_class == 1u;
+        prefill_key.ok() && (prefill_key.value() & 1u) != 0u &&
+        prefill_class == 1u;
     if (!out.supported) {
         out.canonical_max_visible_tokens = 0u;
         return out;

@@ -3,6 +3,7 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/models/qwen35/runtime/gpu_mcu/invocation_abi.h>
 #include <phaseshift/models/qwen35/runtime/gpu_mcu/kernarg_recipe.h>
+#include <phaseshift/runtime/gpu_mcu/binding/plan_binding_contract.h>
 #include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <phaseshift/models/qwen35/kernels/optimized/gdn/reset.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_compile_context.h>
@@ -211,6 +212,8 @@ struct McuCompiledPlan {
     std::vector<::ps::runtime::gpu_mcu::McuGdnSpecRestoreFromCountsInvocation>
         gdn_spec_restore_from_counts;
     std::vector<McuAttentionRegion> attention_regions;
+    std::vector<::ps::runtime::gpu_mcu::McuAttentionPathSpan>
+        attention_path_spans;
     std::vector<McuBf16VariantCatalog> bf16_variant_catalogs;
     std::vector<McuGeometryPatch> geometry_patches;
     std::vector<McuInvocationRowPatch> invocation_row_patches;

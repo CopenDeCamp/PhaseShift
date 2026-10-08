@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace ps::runtime::gpu_mcu {
 
@@ -54,5 +55,15 @@ static_assert(offsetof(McuInvocationPatch, target) == 0);
 static_assert(offsetof(McuInvocationPatch, source) == 8);
 static_assert(offsetof(McuInvocationPatch, width) == 9);
 static_assert(offsetof(McuInvocationPatch, null_guard) == 10);
+
+struct McuAttentionPathSpan {
+    uint32_t node_begin = 0;
+    uint32_t direct_node_end = 0;
+    uint32_t split_node_end = 0;
+    uint32_t split_min_visible = 0;
+};
+
+static_assert(sizeof(McuAttentionPathSpan) == 16);
+static_assert(std::is_trivially_copyable_v<McuAttentionPathSpan>);
 
 }  // namespace ps::runtime::gpu_mcu
