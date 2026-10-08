@@ -728,20 +728,6 @@ Result<McuStaticAttentionPlanClass> classify_static_attention_plan(
     }
     out.has_paged_attention = true;
 
-    bool use_prefill =
-        live_ctx.role == ::ps::runtime::ExecutionRole::Prefill &&
-        live_ctx.staged_requests != nullptr &&
-        live_ctx.staged_request_count == 1u;
-    for (uint32_t i = 0u; use_prefill && i < live_ctx.staged_request_count; ++i) {
-        const ::ps::runtime::DeviceRequestDescriptor& req =
-            live_ctx.staged_requests[i];
-        use_prefill = req.execution_class == ::ps::runtime::ExecutionClass::PREFILL &&
-                      req.row_begin == 0u && req.row_count >= live_ctx.actual_rows;
-    }
-    use_prefill = use_prefill &&
-                  row_capacity >= kPagedAttentionPrefillMinRows;
-    out.use_prefill = use_prefill;
-
     HostExecutionContext probe_ctx = live_ctx;
     probe_ctx.actual_rows = row_capacity;
     bool key_seeded = false;
@@ -750,7 +736,7 @@ Result<McuStaticAttentionPlanClass> classify_static_attention_plan(
             ::ps::runtime::KernelId::PAGED_ATTENTION)
             continue;
         const Result<uint32_t> sig = paged_attention_plan_signature(
-            program, i, probe_ctx, use_prefill);
+            program, i, probe_ctx, false);
         if (!sig.ok()) return sig.status();
         if (!key_seeded) {
             out.key = sig.value();

@@ -57,7 +57,6 @@ struct McuStaticAttentionPlanClass {
 
     uint32_t key = 0u;
 
-    bool use_prefill = false;
     uint32_t splits = 1u;
 
     uint32_t canonical_max_visible = 0u;

@@ -45,7 +45,6 @@ void* g_external_outputs[1] = {g_out_storage};
 const char* class_name(const q35::McuStaticAttentionPlanClass& c) {
     if (!c.has_paged_attention) return "None";
     if (!c.supported) return "Unsupported";
-    if (c.use_prefill) return "Prefill";
     if (c.splits >= 16u) return "Split16";
     return "Direct";
 }
@@ -148,47 +147,56 @@ int main() {
     rt::Program program{};
     build_program(program, true);
 
-    std::printf("=== [6-A] decode role boundary ===\n");
+    std::printf("=== [6-A] capacity driven classification ===\n");
     for (uint32_t rows : {127u, 128u, 129u}) {
         q35::HostExecutionContext ctx =
             make_context(rt::ExecutionRole::Decode, rows, 512u, false);
         const auto r =
             q35::classify_static_attention_plan(program, ctx, rows);
         if (!r.ok()) {
-            std::printf("FAIL: decode rows=%u classify: %s\n", rows,
+            std::printf("FAIL: rows=%u classify: %s\n", rows,
                         r.status().message().c_str());
             ++g_failed;
             continue;
         }
         const auto& c = r.value();
-        std::printf("[attn-class] role=Decode rows=%u use_prefill=%d\n", rows,
-                    c.use_prefill ? 1 : 0);
-        check(c.supported, "decode rows classify supported");
-        check(!c.use_prefill, "decode role never selects prefill shape");
+        std::printf("[attn-class] rows=%u key=%u class=%s canonical=%u\n",
+                    rows, c.key, class_name(c), c.canonical_max_visible);
+        check(c.supported, "rows classify supported");
     }
 
-    std::printf("=== [6-B] prefill role boundary ===\n");
-    const bool prefill_expect[3] = {false, true, true};
-    const uint32_t prefill_rows[3] = {127u, 128u, 129u};
-    for (int i = 0; i < 3; ++i) {
-        const uint32_t rows = prefill_rows[i];
-        q35::HostExecutionContext ctx = make_context(
-            rt::ExecutionRole::Prefill, rows, 512u, true);
-        const auto r =
-            q35::classify_static_attention_plan(program, ctx, rows);
-        if (!r.ok()) {
-            std::printf("FAIL: prefill rows=%u classify: %s\n", rows,
-                        r.status().message().c_str());
-            ++g_failed;
-            continue;
+    std::printf("=== [6-B] classification ignores current execution class ===\n");
+    for (uint32_t rows : {127u, 128u, 129u}) {
+        for (uint32_t visible : {512u, 4096u}) {
+            const q35::HostExecutionContext decode_ctx =
+                make_context(rt::ExecutionRole::Decode, rows, visible, false);
+            const q35::HostExecutionContext prefill_ctx =
+                make_context(rt::ExecutionRole::Prefill, rows, visible, true);
+            const auto d =
+                q35::classify_static_attention_plan(program, decode_ctx, rows);
+            const auto p =
+                q35::classify_static_attention_plan(program, prefill_ctx, rows);
+            if (!d.ok() || !p.ok()) {
+                std::printf("FAIL: rows=%u visible=%u classify role pair\n",
+                            rows, visible);
+                ++g_failed;
+                continue;
+            }
+            std::printf(
+                "[attn-class] rows=%u visible=%u decode{key=%u class=%s} "
+                "prefill{key=%u class=%s}\n",
+                rows, visible, d.value().key, class_name(d.value()),
+                p.value().key, class_name(p.value()));
+            check(d.value().key == p.value().key,
+                  "execution class does not change the static plan key");
+            check(d.value().splits == p.value().splits,
+                  "execution class does not change the split class");
+            check(d.value().canonical_max_visible ==
+                      p.value().canonical_max_visible,
+                  "execution class does not change the canonical selector input");
+            check(d.value().supported == p.value().supported,
+                  "execution class does not change support");
         }
-        const auto& c = r.value();
-        std::printf("[attn-class] role=Prefill rows=%u use_prefill=%d expect=%d\n",
-                    rows, c.use_prefill ? 1 : 0,
-                    prefill_expect[i] ? 1 : 0);
-        check(c.supported, "prefill rows classify supported");
-        check(c.use_prefill == prefill_expect[i],
-              "prefill shape needs prefill role and threshold");
     }
 
     std::printf("=== [6-C]/[6-D]/[6-E] visible boundary ===\n");
