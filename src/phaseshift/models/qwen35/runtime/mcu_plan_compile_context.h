@@ -139,8 +139,7 @@ struct McuPlanResolverInput {
 };
 
 inline McuPlanResolverInput make_plan_resolver_input(
-    const McuStaticPlanCompileContext& sc, bool static_plan,
-    uint32_t visible_tokens) {
+    const McuStaticPlanCompileContext& sc, uint32_t visible_tokens) {
     McuPlanResolverInput view{};
     HostExecutionContext& ctx = view.ctx;
     ctx.batch_context = sc.batch_context;
@@ -194,8 +193,6 @@ inline McuPlanResolverInput make_plan_resolver_input(
     ctx.numeric_mode = sc.numeric_mode;
     ctx.gdn_spec_history = sc.gdn_spec_history;
     ctx.gdn_compact = sc.gdn_compact;
-    ctx.static_plan_compile = static_plan;
-    ctx.static_attention_use_prefill = false;
     ctx.role = sc.verify_exact ? ::ps::runtime::ExecutionRole::Verify
                                : ::ps::runtime::ExecutionRole::Decode;
     ctx.actual_rows = sc.row_capacity;

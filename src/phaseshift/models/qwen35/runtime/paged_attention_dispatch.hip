@@ -494,9 +494,8 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
 
     if (!mixed) {
         const bool use_prefill =
-            static_plan ? ctx.static_attention_use_prefill
-                        : should_use_paged_attention_prefill(a.common.rows,
-                                                             ctx);
+            !static_plan &&
+            should_use_paged_attention_prefill(a.common.rows, ctx);
         const PagedAttentionPlan plan = plan_paged_attention(a, ctx, use_prefill);
         if (!plan.optimized) return PhysicalResolveStatus::NotApplicable;
         out.optimized = true;
@@ -731,7 +730,7 @@ Result<McuStaticAttentionCatalog> build_static_attention_catalog(
     const auto probe = [&](uint32_t visible,
                            bool use_prefill) -> Result<uint32_t> {
         const McuPlanResolverInput input =
-            make_plan_resolver_input(static_ctx, false, visible);
+            make_plan_resolver_input(static_ctx, visible);
         const HostExecutionContext& p = input.ctx;
         bool seeded = false;
         uint32_t key = 0u;

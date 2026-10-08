@@ -441,8 +441,8 @@ static Status compile_mcu_plan_impl(const Program& program,
     if (options.dispatch_begin == options.dispatch_end)
         return Status::invalid_argument("empty dispatch range", __FILE__, __LINE__);
 
-    const McuPlanResolverInput input = make_plan_resolver_input(
-        sc, options.static_plan, sc.max_visible_tokens);
+    const McuPlanResolverInput input =
+        make_plan_resolver_input(sc, sc.max_visible_tokens);
 
     const uint16_t marker_variant =
         mark_variant(out, McuCompiledVariantKind::CompletionMarker,
@@ -1299,8 +1299,8 @@ static Status compile_mcu_plan_impl(const Program& program,
                     const auto snap_regions = out.attention_regions.size();
                     const uint32_t snap_physical = physical_nodes;
                     const McuPlanResolverInput split_input =
-                        make_plan_resolver_input(sc, options.static_plan,
-                                                 kPagedAttentionSplitMinVisible);
+                        make_plan_resolver_input(
+                            sc, kPagedAttentionSplitMinVisible);
                     if (!resolve_and_emit(split_input).ok()) {
                         out.nodes.resize(snap_nodes);
                         out.variants.resize(snap_variants);

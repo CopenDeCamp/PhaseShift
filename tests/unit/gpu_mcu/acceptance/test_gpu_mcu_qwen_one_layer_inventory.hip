@@ -439,7 +439,7 @@ int main() {
         if (b.kernel_id == ps::runtime::KernelId::LINEAR_PSQ8) {
             ps::qwen35::runtime::PhysicalPsq8Launch resolved{};
             const auto rstatus = ps::qwen35::runtime::resolve_psq8_physical(
-                program, b, ctx, resolved);
+                program, b, ctx, true, resolved);
             std::printf("  psq8[%zu] %s verdict=%s%s%s\n", i, debug_name, verdict,
                         status.ok() ? "" : " reason=",
                         status.ok() ? "" : status.message().c_str());

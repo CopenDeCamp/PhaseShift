@@ -20,8 +20,6 @@ PHASESHIFT_MCU_STATIC_RESOLVE(resolve_embedding_physical, PhysicalEmbeddingLaunc
 PHASESHIFT_MCU_STATIC_RESOLVE(resolve_rmsnorm_physical, PhysicalRmsNormLaunch)
 PHASESHIFT_MCU_STATIC_RESOLVE(resolve_activation_quantize_physical,
                               PhysicalActivationQuantizeLaunch)
-PHASESHIFT_MCU_STATIC_RESOLVE(resolve_psq4_physical, PhysicalPsq4Launch)
-PHASESHIFT_MCU_STATIC_RESOLVE(resolve_psq8_physical, PhysicalPsq8Launch)
 PHASESHIFT_MCU_STATIC_RESOLVE(resolve_elementwise_physical,
                               PhysicalElementwiseLaunch)
 PHASESHIFT_MCU_STATIC_RESOLVE(resolve_bf16_physical, PhysicalBf16Launch)
@@ -34,6 +32,20 @@ PHASESHIFT_MCU_STATIC_RESOLVE(resolve_gdn_recurrence_physical,
 PHASESHIFT_MCU_STATIC_RESOLVE(resolve_rope_physical, PhysicalRopeLaunch)
 
 #undef PHASESHIFT_MCU_STATIC_RESOLVE
+
+Result<PhysicalResolveStatus> resolve_psq4_physical_static(
+    const ::ps::runtime::Program& program,
+    const ::ps::runtime::DispatchBinding& b,
+    const McuPlanResolverInput& input, PhysicalPsq4Launch& out) {
+    return resolve_psq4_physical(program, b, input.ctx, false, out);
+}
+
+Result<PhysicalResolveStatus> resolve_psq8_physical_static(
+    const ::ps::runtime::Program& program,
+    const ::ps::runtime::DispatchBinding& b,
+    const McuPlanResolverInput& input, PhysicalPsq8Launch& out) {
+    return resolve_psq8_physical(program, b, input.ctx, false, out);
+}
 
 Result<PhysicalResolveStatus> resolve_kv_append_physical_static(
     const ::ps::runtime::Program& program, size_t dispatch_index,
