@@ -29,8 +29,6 @@ namespace {
 namespace mcu = ::ps::runtime::gpu_mcu;
 
 int g_fail = 0;
-uint64_t g_compile_baseline = 0u;
-uint64_t g_upload_baseline = 0u;
 
 void check(bool condition, const std::string& message) {
     if (!condition) {
@@ -622,8 +620,8 @@ int main() {
                             entry.attention_plan_key, entry.plan_end);
             }
             std::printf("\n");
-            check(counters.plan_compile_count >= 1u,
-                  "static plan was compiled at least once");
+            check(counters.plan_compile_count == 1u,
+                  "one static plan compile for the whole session");
             check(counters.plan_compile_count ==
                       executor.mcu_state->static_plans.size(),
                   "no static plan is compiled twice");
@@ -638,8 +636,7 @@ int main() {
             }
             check(plan_key_uniform,
                   "static plan identity ignores the live batch");
-            g_compile_baseline = counters.plan_compile_count;
-            g_upload_baseline = counters.plan_upload_count;
+
             check(executor.mcu_state->persistent.batches_committed() >= 1u,
                   "mcu persistent execution committed the batch");
         }
@@ -725,10 +722,8 @@ int main() {
         }
         check(late_uniform,
               "mixed batch keeps one static plan identity");
-        check(late.plan_compile_count >= g_compile_baseline,
-              "mixed batch never drops a compiled static plan");
-        check(late.plan_upload_count >= g_upload_baseline,
-              "mixed batch never drops an uploaded static plan");
+        check(late.plan_compile_count == 1u,
+              "prefill/decode/mixed share one static plan");
     }
 
     const auto shutdown_status = ps::qwen35::executor_shutdown(executor);

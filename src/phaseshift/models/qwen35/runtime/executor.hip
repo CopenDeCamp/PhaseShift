@@ -1309,6 +1309,26 @@ Result<PendingBatch> submit_co_batch(
             return on_error(mcu_st);
         }
     }
+    if (executor.config.backend == runtime::DecodeBackend::GpuMcu) {
+        const uint32_t session_rows =
+            executor.config.max_scheduled_tokens != 0u
+                ? executor.config.max_scheduled_tokens
+                : (bucket_m != 0u ? bucket_m : 1u);
+        const auto pinned = ::ps::runtime::resolve_row_bucket(
+            session_rows > 2048u ? 2048u : session_rows);
+        if (pinned.ok()) {
+            auto* pinned_program = executor.program_set.resolve(pinned.value());
+            if (pinned_program != nullptr &&
+                executor
+                        .mcu_body_range[static_cast<std::size_t>(
+                            pinned_program -
+                            &executor.program_set.programs[0])]
+                        .valid) {
+                bucket = pinned.value();
+                program = pinned_program;
+            }
+        }
+    }
     runtime::DecodeBackendInputs backend_inputs{};
     backend_inputs.requested = executor.config.backend;
     backend_inputs.role_is_decode =
