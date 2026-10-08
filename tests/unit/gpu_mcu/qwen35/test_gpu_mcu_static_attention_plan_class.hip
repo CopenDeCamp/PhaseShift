@@ -1,3 +1,4 @@
+#include <phaseshift/models/qwen35/runtime/mcu_plan_compile_context.h>
 #include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/runtime/batch/device_batch_context.h>
@@ -42,7 +43,7 @@ rt::DeviceRequestDescriptor g_requests[1] = {};
 void* g_external_inputs[1] = {g_q_storage};
 void* g_external_outputs[1] = {g_out_storage};
 
-const char* class_name(const q35::McuStaticAttentionPlanClass& c) {
+const char* class_name(const q35::McuStaticAttentionCatalog& c) {
     if (!c.has_paged_attention) return "None";
     if (!c.supported) return "Unsupported";
     if (c.splits >= 16u) return "Split16";
@@ -141,6 +142,18 @@ q35::HostExecutionContext make_context(rt::ExecutionRole role,
     return ctx;
 }
 
+q35::McuStaticPlanCompileContext make_static(
+    const q35::HostExecutionContext& ctx, uint32_t row_capacity) {
+    return q35::make_static_plan_compile_context(ctx, row_capacity, 0u, 0u, 0u);
+}
+
+ps::Result<q35::McuStaticAttentionCatalog> catalog_for(
+    const rt::Program& program, const q35::HostExecutionContext& ctx,
+    uint32_t row_capacity) {
+    return q35::build_static_attention_catalog(program,
+                                               make_static(ctx, row_capacity));
+}
+
 }  // namespace
 
 int main() {
@@ -152,7 +165,7 @@ int main() {
         q35::HostExecutionContext ctx =
             make_context(rt::ExecutionRole::Decode, rows, 512u, false);
         const auto r =
-            q35::classify_static_attention_plan(program, ctx, rows);
+            catalog_for(program, ctx, rows);
         if (!r.ok()) {
             std::printf("FAIL: rows=%u classify: %s\n", rows,
                         r.status().message().c_str());
@@ -161,7 +174,7 @@ int main() {
         }
         const auto& c = r.value();
         std::printf("[attn-class] rows=%u key=%u class=%s canonical=%u\n",
-                    rows, c.key, class_name(c), c.canonical_max_visible);
+                    rows, c.key, class_name(c), c.canonical_max_visible_tokens);
         check(c.supported, "rows classify supported");
     }
 
@@ -173,9 +186,9 @@ int main() {
             const q35::HostExecutionContext prefill_ctx =
                 make_context(rt::ExecutionRole::Prefill, rows, visible, true);
             const auto d =
-                q35::classify_static_attention_plan(program, decode_ctx, rows);
+                catalog_for(program, decode_ctx, rows);
             const auto p =
-                q35::classify_static_attention_plan(program, prefill_ctx, rows);
+                catalog_for(program, prefill_ctx, rows);
             if (!d.ok() || !p.ok()) {
                 std::printf("FAIL: rows=%u visible=%u classify role pair\n",
                             rows, visible);
@@ -191,77 +204,56 @@ int main() {
                   "execution class does not change the static plan key");
             check(d.value().splits == p.value().splits,
                   "execution class does not change the split class");
-            check(d.value().canonical_max_visible ==
-                      p.value().canonical_max_visible,
+            check(d.value().canonical_max_visible_tokens ==
+                      p.value().canonical_max_visible_tokens,
                   "execution class does not change the canonical selector input");
             check(d.value().supported == p.value().supported,
                   "execution class does not change support");
         }
     }
 
-    std::printf("=== [6-C]/[6-D]/[6-E] visible boundary ===\n");
-    const uint32_t direct_visible[3] = {512u, 1024u, 2047u};
-    const uint32_t split_visible[2] = {2048u, 4096u};
-    uint32_t direct_key = 0u;
-    uint32_t split_key = 0u;
-    bool direct_key_ok = true;
-    bool split_key_ok = true;
-    for (uint32_t visible : direct_visible) {
+    std::printf(
+        "=== [6-C]/[6-D] catalog is independent of live visible tokens ===\n");
+    uint32_t catalog_key = 0u;
+    bool catalog_key_ok = true;
+    for (uint32_t visible : {1u, 512u, 1024u, 2047u, 2048u, 4096u}) {
         q35::HostExecutionContext ctx =
             make_context(rt::ExecutionRole::Decode, 128u, visible, false);
-        const auto r = q35::classify_static_attention_plan(program, ctx, 128u);
+        const auto r = catalog_for(program, ctx, 128u);
         if (!r.ok()) {
-            std::printf("FAIL: visible=%u classify: %s\n", visible,
+            std::printf("FAIL: visible=%u catalog: %s\n", visible,
                         r.status().message().c_str());
             ++g_failed;
             continue;
         }
         const auto& c = r.value();
-        std::printf("[attn-class] visible=%-5u key=%u class=%s canonical=%u\n",
-                    visible, c.key, class_name(c), c.canonical_max_visible);
-        check(c.supported, "direct visible supported");
-        check(c.splits == 1u, "direct class uses one region");
-        check(c.canonical_max_visible == 1u,
-              "direct canonical selector input is 1");
-        if (direct_key == 0u) {
-            direct_key = c.key;
-        } else if (direct_key != c.key) {
-            direct_key_ok = false;
+        std::printf(
+            "[attn-class] live_visible=%-5u key=%u class=%s canonical=%u "
+            "direct=%d split=%d prefill=%d\n",
+            visible, c.key, class_name(c), c.canonical_max_visible_tokens,
+            c.supports_decode_direct ? 1 : 0, c.supports_decode_split ? 1 : 0,
+            c.supports_prefill ? 1 : 0);
+        check(c.supported, "live visible value keeps the static plan supported");
+        check(c.splits == 1u, "canonical decode class uses one region");
+        check(c.canonical_max_visible_tokens == 1u,
+              "canonical selector input is 1");
+        check(c.supports_decode_direct, "decode direct is a static capability");
+        check(c.supports_decode_split, "decode split is a static capability");
+        check(c.supports_prefill, "prefill is a static capability");
+        if (catalog_key == 0u) {
+            catalog_key = c.key;
+        } else if (catalog_key != c.key) {
+            catalog_key_ok = false;
         }
     }
-    for (uint32_t visible : split_visible) {
-        q35::HostExecutionContext ctx =
-            make_context(rt::ExecutionRole::Decode, 128u, visible, false);
-        const auto r = q35::classify_static_attention_plan(program, ctx, 128u);
-        if (!r.ok()) {
-            std::printf("FAIL: visible=%u classify: %s\n", visible,
-                        r.status().message().c_str());
-            ++g_failed;
-            continue;
-        }
-        const auto& c = r.value();
-        std::printf("[attn-class] visible=%-5u key=%u class=%s canonical=%u\n",
-                    visible, c.key, class_name(c), c.canonical_max_visible);
-        check(c.supported, "split visible supported");
-        check(c.splits == 16u, "split class uses sixteen regions");
-        check(c.canonical_max_visible == q35::kPagedAttentionSplitMinVisible,
-              "split canonical selector input is the split threshold");
-        if (split_key == 0u) {
-            split_key = c.key;
-        } else if (split_key != c.key) {
-            split_key_ok = false;
-        }
-    }
-    check(direct_key_ok, "direct visible values share one structural key");
-    check(split_key_ok, "split visible values share one structural key");
-    check(direct_key != 0u && split_key != 0u && direct_key != split_key,
-          "direct key differs from split key");
+    check(catalog_key_ok,
+          "live visible tokens never change the static plan key");
 
     std::printf("=== [13] selector geometry is capacity ===\n");
     {
         q35::HostExecutionContext ctx =
             make_context(rt::ExecutionRole::Decode, 4096u, 512u, false);
-        const auto r = q35::classify_static_attention_plan(program, ctx, 128u);
+        const auto r = catalog_for(program, ctx, 128u);
         if (r.ok()) {
             std::printf("[attn-class] live=4096 capacity=128 class=%s\n",
                         class_name(r.value()));
@@ -274,7 +266,7 @@ int main() {
     {
         q35::HostExecutionContext ctx =
             make_context(rt::ExecutionRole::Decode, 128u, 512u, false);
-        const auto r = q35::classify_static_attention_plan(program, ctx, 4096u);
+        const auto r = catalog_for(program, ctx, 4096u);
         if (r.ok()) {
             std::printf("[attn-class] live=128 capacity=4096 class=%s\n",
                         class_name(r.value()));
@@ -292,7 +284,7 @@ int main() {
         q35::HostExecutionContext ctx =
             make_context(rt::ExecutionRole::Decode, 128u, 512u, false);
         const auto r =
-            q35::classify_static_attention_plan(plain, ctx, 128u);
+            catalog_for(plain, ctx, 128u);
         if (!r.ok()) {
             check(false, "missing paged attention still classifies");
         } else {
@@ -306,23 +298,23 @@ int main() {
         }
     }
 
-    std::printf("=== [15] outside optimized envelope ===\n");
+    std::printf("=== [15] live batch outside the measured envelope ===\n");
     {
         q35::HostExecutionContext ctx =
             make_context(rt::ExecutionRole::Decode, 128u,
                          kOutOfEnvelopeVisible, false);
-        const auto r = q35::classify_static_attention_plan(program, ctx, 128u);
+        const auto r = catalog_for(program, ctx, 128u);
         if (!r.ok()) {
             check(false, "envelope classification resolves");
         } else {
             const auto& c = r.value();
-            std::printf("[attn-class] visible=%u class=%s supported=%d\n",
+            std::printf("[attn-class] live_visible=%u class=%s supported=%d\n",
                         kOutOfEnvelopeVisible, class_name(c),
                         c.supported ? 1 : 0);
-            check(!c.supported,
-                  "live batch outside envelope is not optimized away");
-            check(c.canonical_max_visible == 0u,
-                  "unsupported class has no canonical selector input");
+            check(c.supported,
+                  "live batch outside envelope keeps the static plan");
+            check(c.canonical_max_visible_tokens == 1u,
+                  "canonical selector input stays a static value");
         }
     }
 

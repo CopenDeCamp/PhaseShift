@@ -11,6 +11,7 @@
 namespace ps::qwen35::runtime {
 
 struct HostExecutionContext;
+struct McuStaticPlanCompileContext;
 
 struct PagedAttentionResolvedArgs {
     ::ps::qwen35::KVCacheDType kv_dtype = ::ps::qwen35::KVCacheDType::BF16;
@@ -51,7 +52,7 @@ constexpr uint32_t kPagedAttentionSplitMinVisible = 2048u;
 
 uint32_t make_paged_attention_plan_key(const PagedAttentionPlan& plan);
 
-struct McuStaticAttentionPlanClass {
+struct McuStaticAttentionCatalog {
     bool has_paged_attention = false;
     bool supported = false;
 
@@ -59,13 +60,16 @@ struct McuStaticAttentionPlanClass {
 
     uint32_t splits = 1u;
 
-    uint32_t canonical_max_visible = 0u;
+    uint32_t canonical_max_visible_tokens = 0u;
+
+    bool supports_prefill = false;
+    bool supports_decode_direct = false;
+    bool supports_decode_split = false;
 };
 
-Result<McuStaticAttentionPlanClass> classify_static_attention_plan(
+Result<McuStaticAttentionCatalog> build_static_attention_catalog(
     const ::ps::runtime::Program& program,
-    const HostExecutionContext& live_ctx,
-    uint32_t row_capacity);
+    const McuStaticPlanCompileContext& static_ctx);
 
 PagedAttentionPlan plan_paged_attention(
     const PagedAttentionResolvedArgs& args,

@@ -646,16 +646,16 @@ Status preflight_mcu_plan(
             request_capacity, ctx.actual_stochastic_outputs);
     plan_ctx.slot_capacity = slot_capacity;
 
-    const Result<runtime::McuStaticAttentionPlanClass> attn_class =
-        runtime::classify_static_attention_plan(program, ctx, row_capacity);
+    const Result<runtime::McuStaticAttentionCatalog> attn_class =
+        runtime::build_static_attention_catalog(program, plan_ctx);
     if (!attn_class.ok()) return attn_class.status();
-    const runtime::McuStaticAttentionPlanClass& attn = attn_class.value();
+    const runtime::McuStaticAttentionCatalog& attn = attn_class.value();
     if (!attn.supported) {
         return Status::unsupported("mcu static attention topology unavailable",
                                    __FILE__, __LINE__);
     }
     plan_ctx.max_visible_tokens = attn.has_paged_attention
-                                      ? attn.canonical_max_visible
+                                      ? attn.canonical_max_visible_tokens
                                       : 1u;
 
     for (const runtime::McuStaticPlanEntry& entry : state.static_plans) {
