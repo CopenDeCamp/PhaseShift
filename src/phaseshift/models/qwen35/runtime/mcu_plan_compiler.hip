@@ -5,6 +5,7 @@
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_value.h>
 #include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
+#include <phaseshift/models/qwen35/runtime/physical_launch_static.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/kernels/optimized/verify_accept.h>
 #include <phaseshift/models/qwen35/kernels/optimized/embedding.h>
@@ -440,9 +441,8 @@ static Status compile_mcu_plan_impl(const Program& program,
     if (options.dispatch_begin == options.dispatch_end)
         return Status::invalid_argument("empty dispatch range", __FILE__, __LINE__);
 
-    const McuStaticResolveView resolve_view =
-        make_static_resolve_view(sc, options.static_plan);
-    const HostExecutionContext& ctx = resolve_view.ctx;
+    const McuPlanResolverInput input = make_plan_resolver_input(
+        sc, options.static_plan, sc.max_visible_tokens);
 
     const uint16_t marker_variant =
         mark_variant(out, McuCompiledVariantKind::CompletionMarker,
@@ -476,7 +476,7 @@ static Status compile_mcu_plan_impl(const Program& program,
 
     const auto row_source_for = [&](::ps::runtime::ValueId value,
                                     uint8_t& source) -> Status {
-        auto resolved = resolve_host_value(program, value, ctx);
+        auto resolved = resolve_host_value_static(program, value, input);
         if (!resolved.ok()) return resolved.status();
         source = static_cast<uint8_t>(
             resolved.value().row_domain ==
@@ -497,7 +497,7 @@ static Status compile_mcu_plan_impl(const Program& program,
 
     const auto emit_embedding = [&](const DispatchBinding& b) -> Status {
         PhysicalEmbeddingLaunch launch{};
-        const auto resolved = resolve_embedding_physical(program, b, ctx, launch);
+        const auto resolved = resolve_embedding_physical_static(program, b, input, launch);
         if (!resolved.ok()) return resolved.status();
         if (resolved.value() != PhysicalResolveStatus::Applicable)
             return Status::unsupported(
@@ -570,11 +570,11 @@ static Status compile_mcu_plan_impl(const Program& program,
         if (b.input_count != 1u || b.output_count != 1u)
             return Status::unsupported("output gather io count is invalid",
                                        __FILE__, __LINE__);
-        auto in_res = resolve_host_value(
-            program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        auto in_res = resolve_host_value_static(
+            program, ::ps::runtime::ValueId{b.input_slots[0]}, input);
         if (!in_res.ok()) return in_res.status();
-        auto out_res = resolve_host_value(
-            program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        auto out_res = resolve_host_value_static(
+            program, ::ps::runtime::ValueId{b.output_slots[0]}, input);
         if (!out_res.ok()) return out_res.status();
         const HostResolvedValue src = in_res.value();
         const HostResolvedValue dst = out_res.value();
@@ -684,7 +684,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::RMS_NORM: {
                 PhysicalRmsNormLaunch launch{};
                 const auto resolved =
-                    resolve_rmsnorm_physical(program, b, ctx, launch);
+                    resolve_rmsnorm_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -740,7 +740,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::ACTIVATION_QUANTIZE_W4A8: {
                 PhysicalActivationQuantizeLaunch launch{};
                 const auto resolved =
-                    resolve_activation_quantize_physical(program, b, ctx, launch);
+                    resolve_activation_quantize_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -803,7 +803,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             }
             case KernelId::LINEAR_PSQ4: {
                 PhysicalPsq4Launch launch{};
-                const auto resolved = resolve_psq4_physical(program, b, ctx, launch);
+                const auto resolved = resolve_psq4_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -907,7 +907,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             }
             case KernelId::LINEAR_PSQ8: {
                 PhysicalPsq8Launch launch{};
-                const auto resolved = resolve_psq8_physical(program, b, ctx, launch);
+                const auto resolved = resolve_psq8_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1007,7 +1007,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::SIGMOID: {
                 PhysicalElementwiseLaunch launch{};
                 const auto resolved =
-                    resolve_elementwise_physical(program, b, ctx, launch);
+                    resolve_elementwise_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1269,13 +1269,13 @@ static Status compile_mcu_plan_impl(const Program& program,
                     return Status::make_ok();
                 };
                 const auto resolve_and_emit =
-                    [&](const HostExecutionContext& rc) -> Status {
+                    [&](const McuPlanResolverInput& rc) -> Status {
                     PhysicalPagedAttentionPlan plan{};
                     const auto resolved =
                         options.static_plan
-                            ? resolve_paged_attention_physical_static_plan(
-                                  program, i, rc, plan)
-                            : resolve_paged_attention_physical(
+                            ? resolve_paged_attention_static_plan(program, i,
+                                                                  rc, plan)
+                            : resolve_paged_attention_host_immediate(
                                   program, i, rc, plan);
                     if (!resolved.ok()) return resolved.status();
                     if (resolved.value() != PhysicalResolveStatus::Applicable)
@@ -1286,7 +1286,7 @@ static Status compile_mcu_plan_impl(const Program& program,
                 };
                 const uint32_t span_begin =
                     static_cast<uint32_t>(out.nodes.size());
-                const Status path_status = resolve_and_emit(ctx);
+                const Status path_status = resolve_and_emit(input);
                 if (!path_status.ok()) return path_status;
                 const uint32_t direct_end =
                     static_cast<uint32_t>(out.nodes.size());
@@ -1298,10 +1298,10 @@ static Status compile_mcu_plan_impl(const Program& program,
                     const auto snap_reduce = out.attention_paged_reduce.size();
                     const auto snap_regions = out.attention_regions.size();
                     const uint32_t snap_physical = physical_nodes;
-                    HostExecutionContext split_probe = ctx;
-                    split_probe.max_visible_tokens =
-                        kPagedAttentionSplitMinVisible;
-                    if (!resolve_and_emit(split_probe).ok()) {
+                    const McuPlanResolverInput split_input =
+                        make_plan_resolver_input(sc, options.static_plan,
+                                                 kPagedAttentionSplitMinVisible);
+                    if (!resolve_and_emit(split_input).ok()) {
                         out.nodes.resize(snap_nodes);
                         out.variants.resize(snap_variants);
                         out.attention_paged.resize(snap_paged);
@@ -1324,7 +1324,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::KV_APPEND: {
                 PhysicalKvAppendLaunch launch{};
                 const auto resolved =
-                    resolve_kv_append_physical(program, i, ctx, launch);
+                    resolve_kv_append_physical_static(program, i, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1383,7 +1383,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::ROPE: {
                 PhysicalRopeLaunch launch{};
                 const auto resolved =
-                    resolve_rope_physical(program, b, ctx, launch);
+                    resolve_rope_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1423,7 +1423,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::LINEAR_BF16: {
                 PhysicalBf16Launch launch{};
                 const auto resolved =
-                    resolve_bf16_physical(program, b, ctx, launch);
+                    resolve_bf16_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1536,7 +1536,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::L2_NORMALIZE: {
                 PhysicalL2NormalizeLaunch launch{};
                 const auto resolved =
-                    resolve_l2_normalize_physical(program, b, ctx, launch);
+                    resolve_l2_normalize_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1581,7 +1581,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::STATEFUL_CAUSAL_CONV1D: {
                 PhysicalGdnConv1dLaunch launch{};
                 const auto resolved =
-                    resolve_gdn_conv1d_physical(program, b, ctx, launch);
+                    resolve_gdn_conv1d_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1629,7 +1629,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::GDN_RECURRENCE: {
                 PhysicalGdnRecurrenceLaunch launch{};
                 const auto resolved =
-                    resolve_gdn_recurrence_physical(program, b, ctx, launch);
+                    resolve_gdn_recurrence_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1697,12 +1697,12 @@ static Status compile_mcu_plan_impl(const Program& program,
                     return Status::unsupported(
                         "stochastic sampling has no mcu entrypoint", __FILE__,
                         __LINE__);
-                auto logits_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+                auto logits_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[0]}, input);
                 if (!logits_res.ok()) return logits_res.status();
                 const HostResolvedValue logits = logits_res.value();
-                auto sampled_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+                auto sampled_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.output_slots[0]}, input);
                 if (!sampled_res.ok()) return sampled_res.status();
                 const HostResolvedValue sampled = sampled_res.value();
                 if (logits.dtype != ::ps::runtime::ValueDType::F32 ||
@@ -1766,17 +1766,17 @@ static Status compile_mcu_plan_impl(const Program& program,
                 if (request_count == 0u || max_candidates == 0u)
                     return Status::unsupported(
                         "verify accept geometry is invalid", __FILE__, __LINE__);
-                auto cand_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+                auto cand_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[0]}, input);
                 if (!cand_res.ok()) return cand_res.status();
-                auto samp_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
+                auto samp_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[1]}, input);
                 if (!samp_res.ok()) return samp_res.status();
-                auto count_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[2]}, ctx);
+                auto count_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[2]}, input);
                 if (!count_res.ok()) return count_res.status();
-                auto committed_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+                auto committed_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.output_slots[0]}, input);
                 if (!committed_res.ok()) return committed_res.status();
                 const HostResolvedValue cand = cand_res.value();
                 const HostResolvedValue samp = samp_res.value();

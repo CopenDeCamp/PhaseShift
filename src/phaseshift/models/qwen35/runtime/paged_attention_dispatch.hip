@@ -728,21 +728,21 @@ Result<McuStaticAttentionCatalog> build_static_attention_catalog(
     }
     out.has_paged_attention = true;
 
-    const McuStaticResolveView view = make_static_resolve_view(static_ctx, false);
-    const HostExecutionContext& base = view.ctx;
-
     const auto probe = [&](uint32_t visible,
                            bool use_prefill) -> Result<uint32_t> {
-        HostExecutionContext p = base;
-        p.max_visible_tokens = visible;
+        const McuPlanResolverInput input =
+            make_plan_resolver_input(static_ctx, false, visible);
+        const HostExecutionContext& p = input.ctx;
         bool seeded = false;
         uint32_t key = 0u;
         for (size_t i = 0u; i < program.dispatches.size(); ++i) {
             if (program.dispatches[i].kernel_id !=
                 ::ps::runtime::KernelId::PAGED_ATTENTION)
                 continue;
+            HostExecutionContext probe_ctx = p;
             const Result<uint32_t> sig =
-                paged_attention_plan_signature(program, i, p, use_prefill);
+                paged_attention_plan_signature(program, i, probe_ctx,
+                                               use_prefill);
             if (!sig.ok()) return sig.status();
             if (!seeded) {
                 key = sig.value();

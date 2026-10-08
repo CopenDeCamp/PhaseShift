@@ -133,14 +133,15 @@ inline McuStaticPlanCompileContext make_static_plan_compile_context(
     return out;
 }
 
-struct McuStaticResolveView {
+struct McuPlanResolverInput {
     HostExecutionContext ctx;
     std::vector<::ps::runtime::DeviceRequestDescriptor> requests;
 };
 
-inline McuStaticResolveView make_static_resolve_view(
-    const McuStaticPlanCompileContext& sc, bool static_plan) {
-    McuStaticResolveView view{};
+inline McuPlanResolverInput make_plan_resolver_input(
+    const McuStaticPlanCompileContext& sc, bool static_plan,
+    uint32_t visible_tokens) {
+    McuPlanResolverInput view{};
     HostExecutionContext& ctx = view.ctx;
     ctx.batch_context = sc.batch_context;
     ctx.model_state = sc.model_state;
@@ -155,7 +156,7 @@ inline McuStaticResolveView make_static_resolve_view(
     ctx.rope_inv_freq = sc.rope_inv_freq;
     ctx.row_sequence_slots = sc.row_sequence_slots;
     ctx.min_visible_tokens = sc.min_visible_tokens;
-    ctx.max_visible_tokens = sc.max_visible_tokens;
+    ctx.max_visible_tokens = visible_tokens;
     ctx.external_inputs = sc.external_inputs;
     ctx.external_input_count = sc.external_input_count;
     ctx.external_outputs = sc.external_outputs;
