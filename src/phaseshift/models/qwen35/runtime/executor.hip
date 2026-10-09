@@ -597,6 +597,7 @@ void report_full_plan_reject(const Status& status) {
                  status.message().c_str());
 }
 
+
 Status preflight_mcu_plan(
     Executor& executor,
     const ::ps::runtime::Program& program,
@@ -687,6 +688,7 @@ Status preflight_mcu_plan(
     if (!full_st.ok()) report_full_plan_reject(full_st);
     state.cache.note_compile();
     out.plan = std::move(plan);
+    out.plan.fingerprint = runtime::mcu_plan_raw_fingerprint(out.plan).hash;
     out.plan_begin = plan_begin;
     out.plan_end = plan_end;
     runtime::McuStaticPlanEntry entry;

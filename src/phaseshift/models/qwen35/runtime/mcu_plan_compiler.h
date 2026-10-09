@@ -227,6 +227,7 @@ struct McuCompiledPlan {
     uint32_t physical_dispatch_count = 0;
     uint32_t kernarg_slots_required = 0;
     uint32_t marker_count = 0;
+    uint64_t fingerprint = 0;
 };
 
 struct McuPlanCompileOptions {

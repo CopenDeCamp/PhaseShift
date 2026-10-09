@@ -622,6 +622,8 @@ int main() {
             std::printf("\n");
             check(counters.plan_compile_count == 1u,
                   "one static plan compile for the whole session");
+            check(counters.plan_upload_count == 1u,
+                  "one plan upload for the whole session");
             check(counters.plan_compile_count ==
                       executor.mcu_state->static_plans.size(),
                   "no static plan is compiled twice");
@@ -724,6 +726,8 @@ int main() {
               "mixed batch keeps one static plan identity");
         check(late.plan_compile_count == 1u,
               "prefill/decode/mixed share one static plan");
+        check(late.plan_upload_count == 1u,
+              "no plan re-upload while the controller runs");
     }
 
     const auto shutdown_status = ps::qwen35::executor_shutdown(executor);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstring>
 
 namespace ps {
@@ -9,7 +10,8 @@ namespace runtime {
 template <typename T>
 T mcu_plan_value() {
     T value{};
-    std::memset(reinterpret_cast<unsigned char*>(&value), 0, sizeof(T));
+    auto* bytes = reinterpret_cast<volatile unsigned char*>(&value);
+    for (std::size_t i = 0; i < sizeof(T); ++i) bytes[i] = 0;
     return value;
 }
 
