@@ -93,6 +93,81 @@ MCU submission overhead（`queue_ahead_depth=4` と packet ごとの doorbell）
 [../rnd/gpu_mcu/full_transformer_static_region.md](../rnd/gpu_mcu/full_transformer_static_region.md)
 の region starvation 計測と一致する。
 
+## TP=2 decode（`test_qwen35_tp_e2e`）
+
+TP は `TpCoordinator` 経由のみで `phaseshift-bench` / `phaseshift-compute` /
+server からは露出していない（[../developer/tensor_parallel_execution.md](../developer/tensor_parallel_execution.md) §10）。
+計測口は `build/tests/test_qwen35_tp_e2e` のみである。
+
+この表は上記「計測断面」の measurement revision とは異なる revision の値である。
+
+`PHASESHIFT_TP_MODEL_DIR=models/Qwen3.8-27B-PSQ` を設定して 5 回走らせ、
+decode の p50 を採る。
+
+| 指標 | TP=1 | TP=2 |
+| --- | ---: | ---: |
+| decode_ms p50 | 535.196 | 370.994 |
+| decode ms/token | 35.680 | 24.733 |
+| decode tok/s p50 | 28.03 | **40.43** |
+| run 間 spread | 0.25% | 2.55% |
+
+2 GPU による加速は **1.442×**、効率は **72.1%**（40.43 / (28.03 × 2)）。
+
+TP2 の 5 run は 370.305 / 370.703 / 370.994 ms と 378.825 / 379.765 ms の
+2 クラスタに分かれた（差 +2.4%）。p50 は低クラスタ側にある。
+
+### 計測条件
+
+| 項目 | 値 |
+| --- | --- |
+| measurement revision | commit `f83c8e1e`（branch `exp/gpu-mcu`） |
+| date | 2026-10-10 |
+| build | Release / gfx1201 / benchmarks ON / optional tests OFF / `build` |
+| working tree | HEAD と同一（未コミットの実験変更なし） |
+| prompt | 5 token（`304 17 283 2454 304`） |
+| new tokens | 16（prefill step 1 + decode 15） |
+| max_seq_len | 64 |
+| max_scheduled_tokens / requests | 16 / 2 |
+| page_tokens | 16 |
+| arena | TP=1 24 GiB、TP=2 は rank あたり 20 GiB |
+| device | TP=1 HIP 0、TP=2 HIP 0+1 |
+| transport | `PHASESHIFT_TP_TRANSPORT` 未設定（report の `transport=hip-p2p`） |
+| HIP graph | OFF（`PHASESHIFT_HIP_GRAPH`） |
+| value_trace | decode 区間は無効（prefill 直後に解除） |
+
+### 指標の定義
+
+`decode_ms` は `ContinuousBatcher::step()` の decode ループ
+（`while (batcher.has_pending())`）の wall 時間である。
+`decode tok/s = decode_steps / decode_ms × 1000`。
+
+**prefill step は既に token0 をサンプルする**（`token_budget_scheduler` の
+`sample = final_chunk && max_new_tokens > 0`）。したがって decode 窓は
+「生成 token 数 − 1」step 分しか含まない。生成 token 数で割ると分母が1過剰になり、
+16 token なら **+6.7% の過大表示**になる。正は `TP_TIMING` の `decode_steps` である。
+
+`prefill_ms` は value_trace が有効な区間を測っているうえ、prompt が 5 token で
+固定オーバーヘッドが支配的であるため、**性能値として記録しない**。
+
+### 正しさ
+
+`test_qwen35_tp_e2e` 5/5 PASS。全 run で次の値が一致した。
+
+- greedy 16 token の TP1 / TP2 の列が完全一致
+- prefill logits の argmax が一致（`17`）、max abs diff `0.596`（上限 2.0）
+- final hidden の相対差 `0.0356`（上限 0.10）
+- `tp1 gate_rows=17408 / tp2 gate_rows=8704`、`kv_heads 4 / 2`（rank-local）
+
+### 計測コマンド
+
+```sh
+PHASESHIFT_TP_MODEL_DIR=models/Qwen3.8-27B-PSQ ./build/tests/test_qwen35_tp_e2e
+```
+
+既存の Gate 記録（[../rnd/quantization/tp2_resource_regime.md](../rnd/quantization/tp2_resource_regime.md)
+の ctx64 decode 24.761 ms/token）とは **−0.11%** で一致する。ただし相手は
+`new_tokens=32` の別 probe（削除済み）であり、条件は同一ではない。
+
 ## DFlash2 speculative decode（prose K7 256）
 
 `--dflash2-drafts 7`、256 new tokens、3 rep 中央値。
@@ -140,6 +215,7 @@ DFlash2 自体は A/B を行っていないので推定にとどめる。
 - `phaseshift-compute`（DFlash2）— `GENERATED_IDS` の sha1 先頭 12 桁
   `47aebe55d048`、`DFLASH2_ROUNDS=84`、`DFLASH2_ACCEPTED_DRAFTS=171` が全 rep で一致。
 - `phaseshift-bench pp` — `--mode forward` のため生成結果を持たない。
+- `test_qwen35_tp_e2e` — greedy 16 token の TP1 / TP2 の列が全 5 run で完全一致。
 
 `GENERATED_IDS` の sha1 は `GENERATED_IDS=` 行の値部分（行末改行を含む）に対する
 ものである。次のコマンドで再現できる。
