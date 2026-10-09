@@ -1,5 +1,6 @@
 #include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
+#include <phaseshift/models/qwen35/runtime/mcu_plan_compile_context.h>
 #include <phaseshift/models/qwen35/kernels/correctness/model_dispatch_correctness.h>
 #include <phaseshift/models/qwen35/runtime/paged_attention_selector.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
@@ -472,8 +473,9 @@ PhysicalResolveStatus append_prefill_region(
 namespace {
 
 enum class PagedAttentionResolveMode : uint8_t {
-    DynamicHost = 0,
+    HostImmediate = 0,
     StaticPlan = 1,
+    StaticPrefill = 2,
 };
 
 Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
@@ -487,15 +489,17 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_impl(
     if (a.common.rows == 0u) return PhysicalResolveStatus::Skipped;
 
     const auto* bc = ctx.batch_context;
-    const bool static_plan = mode == PagedAttentionResolveMode::StaticPlan;
+    const bool static_plan = mode != PagedAttentionResolveMode::HostImmediate;
+    const bool prefill_intent =
+        mode == PagedAttentionResolveMode::StaticPrefill;
     const bool mixed = !static_plan && bc != nullptr &&
                        bc->requests != nullptr && bc->num_requests > 1u;
 
     if (!mixed) {
         const bool use_prefill =
-            static_plan ? ctx.static_attention_use_prefill
-                        : should_use_paged_attention_prefill(a.common.rows,
-                                                             ctx);
+            static_plan
+                ? prefill_intent
+                : should_use_paged_attention_prefill(a.common.rows, ctx);
         const PagedAttentionPlan plan = plan_paged_attention(a, ctx, use_prefill);
         if (!plan.optimized) return PhysicalResolveStatus::NotApplicable;
         out.optimized = true;
@@ -571,7 +575,7 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical(
     const ::ps::runtime::Program& program, size_t dispatch_index,
     const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
     return resolve_paged_attention_physical_impl(
-        program, dispatch_index, ctx, PagedAttentionResolveMode::DynamicHost,
+        program, dispatch_index, ctx, PagedAttentionResolveMode::HostImmediate,
         out);
 }
 
@@ -580,6 +584,14 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_plan(
     const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
     return resolve_paged_attention_physical_impl(
         program, dispatch_index, ctx, PagedAttentionResolveMode::StaticPlan,
+        out);
+}
+
+Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_prefill(
+    const ::ps::runtime::Program& program, size_t dispatch_index,
+    const HostExecutionContext& ctx, PhysicalPagedAttentionPlan& out) {
+    return resolve_paged_attention_physical_impl(
+        program, dispatch_index, ctx, PagedAttentionResolveMode::StaticPrefill,
         out);
 }
 
@@ -707,11 +719,10 @@ Result<uint32_t> paged_attention_plan_signature(
     return make_paged_attention_plan_key(plan);
 }
 
-Result<McuStaticAttentionPlanClass> classify_static_attention_plan(
+Result<McuStaticAttentionCatalog> build_static_attention_catalog(
     const ::ps::runtime::Program& program,
-    const HostExecutionContext& live_ctx,
-    uint32_t row_capacity) {
-    McuStaticAttentionPlanClass out{};
+    const McuStaticPlanCompileContext& static_ctx) {
+    McuStaticAttentionCatalog out{};
     size_t matched = 0u;
     for (size_t i = 0u; i < program.dispatches.size(); ++i) {
         if (program.dispatches[i].kernel_id ==
@@ -723,58 +734,69 @@ Result<McuStaticAttentionPlanClass> classify_static_attention_plan(
         out.supported = true;
         out.key = 0u;
         out.splits = 1u;
-        out.canonical_max_visible = 0u;
+        out.canonical_max_visible_tokens = 0u;
         return out;
     }
     out.has_paged_attention = true;
 
-    bool use_prefill =
-        live_ctx.role == ::ps::runtime::ExecutionRole::Prefill &&
-        live_ctx.staged_requests != nullptr &&
-        live_ctx.staged_request_count == 1u;
-    for (uint32_t i = 0u; use_prefill && i < live_ctx.staged_request_count; ++i) {
-        const ::ps::runtime::DeviceRequestDescriptor& req =
-            live_ctx.staged_requests[i];
-        use_prefill = req.execution_class == ::ps::runtime::ExecutionClass::PREFILL &&
-                      req.row_begin == 0u && req.row_count >= live_ctx.actual_rows;
-    }
-    use_prefill = use_prefill &&
-                  row_capacity >= kPagedAttentionPrefillMinRows;
-    out.use_prefill = use_prefill;
-
-    HostExecutionContext probe_ctx = live_ctx;
-    probe_ctx.actual_rows = row_capacity;
-    bool key_seeded = false;
-    for (size_t i = 0u; i < program.dispatches.size(); ++i) {
-        if (program.dispatches[i].kernel_id !=
-            ::ps::runtime::KernelId::PAGED_ATTENTION)
-            continue;
-        const Result<uint32_t> sig = paged_attention_plan_signature(
-            program, i, probe_ctx, use_prefill);
-        if (!sig.ok()) return sig.status();
-        if (!key_seeded) {
-            out.key = sig.value();
-            key_seeded = true;
-        } else if (sig.value() != out.key) {
-            return Status::unsupported(
-                "paged attention dispatches classify differently",
-                __FILE__, __LINE__);
+    const auto probe = [&](uint32_t visible,
+                           bool use_prefill) -> Result<uint32_t> {
+        const McuPlanResolverInput input =
+            make_plan_resolver_input(static_ctx, visible);
+        const HostExecutionContext& p = input.ctx;
+        bool seeded = false;
+        uint32_t key = 0u;
+        for (size_t i = 0u; i < program.dispatches.size(); ++i) {
+            if (program.dispatches[i].kernel_id !=
+                ::ps::runtime::KernelId::PAGED_ATTENTION)
+                continue;
+            HostExecutionContext probe_ctx = p;
+            const Result<uint32_t> sig =
+                paged_attention_plan_signature(program, i, probe_ctx,
+                                               use_prefill);
+            if (!sig.ok()) return sig.status();
+            if (!seeded) {
+                key = sig.value();
+                seeded = true;
+            } else if (sig.value() != key) {
+                return Status::unsupported(
+                    "paged attention dispatches classify differently",
+                    __FILE__, __LINE__);
+            }
         }
-    }
-    if (!key_seeded) {
-        return Status::unsupported("paged attention dispatch missing",
-                                   __FILE__, __LINE__);
-    }
+        if (!seeded)
+            return Status::unsupported("paged attention dispatch missing",
+                                       __FILE__, __LINE__);
+        return key;
+    };
+
+    const Result<uint32_t> direct_key = probe(1u, false);
+    if (!direct_key.ok()) return direct_key.status();
+    const Result<uint32_t> split_key =
+        probe(kPagedAttentionSplitMinVisible, false);
+    const Result<uint32_t> prefill_key = probe(1u, true);
+
+    out.key = direct_key.value();
     out.splits = (out.key >> 2) & 0xFFFFu;
-    const bool optimized = (out.key & 1u) != 0u;
-    if (!optimized || (out.splits > 1u && out.splits != 16u)) {
-        out.supported = false;
-        out.canonical_max_visible = 0u;
+    const bool direct_optimized = (out.key & 1u) != 0u;
+    const uint32_t split_class =
+        split_key.ok() ? (split_key.value() >> 2) & 0xFFFFu : 0u;
+    const uint32_t prefill_class =
+        prefill_key.ok() ? (prefill_key.value() >> 2) & 0xFFFFu : 0u;
+
+    out.supported = direct_optimized && (out.splits == 1u || out.splits == 16u);
+    out.supports_decode_direct = out.supported && out.splits == 1u;
+    out.supports_decode_split =
+        split_key.ok() && (split_key.value() & 1u) != 0u &&
+        split_class == 16u;
+    out.supports_prefill =
+        prefill_key.ok() && (prefill_key.value() & 1u) != 0u &&
+        prefill_class == 1u;
+    if (!out.supported) {
+        out.canonical_max_visible_tokens = 0u;
         return out;
     }
-    out.supported = true;
-    out.canonical_max_visible =
-        out.splits >= 16u ? kPagedAttentionSplitMinVisible : 1u;
+    out.canonical_max_visible_tokens = 1u;
     return out;
 }
 

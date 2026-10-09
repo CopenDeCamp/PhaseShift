@@ -3,16 +3,16 @@
 #include <phaseshift/core/status.h>
 #include <phaseshift/models/qwen35/runtime/gpu_mcu/invocation_abi.h>
 #include <phaseshift/models/qwen35/runtime/gpu_mcu/kernarg_recipe.h>
+#include <phaseshift/runtime/gpu_mcu/binding/plan_binding_contract.h>
 #include <phaseshift/runtime/gpu_mcu/execution/micro_fsm.h>
 #include <phaseshift/models/qwen35/kernels/optimized/gdn/reset.h>
+#include <phaseshift/models/qwen35/runtime/mcu_plan_compile_context.h>
 #include <phaseshift/runtime/program/program.h>
 
 #include <cstdint>
 #include <vector>
 
 namespace ps::qwen35::runtime {
-
-struct HostExecutionContext;
 
 enum class McuCompiledVariantKind : uint8_t {
     CompletionMarker = 0,
@@ -212,6 +212,8 @@ struct McuCompiledPlan {
     std::vector<::ps::runtime::gpu_mcu::McuGdnSpecRestoreFromCountsInvocation>
         gdn_spec_restore_from_counts;
     std::vector<McuAttentionRegion> attention_regions;
+    std::vector<::ps::runtime::gpu_mcu::McuAttentionPathSpan>
+        attention_path_spans;
     std::vector<McuBf16VariantCatalog> bf16_variant_catalogs;
     std::vector<McuGeometryPatch> geometry_patches;
     std::vector<McuInvocationRowPatch> invocation_row_patches;
@@ -225,6 +227,7 @@ struct McuCompiledPlan {
     uint32_t physical_dispatch_count = 0;
     uint32_t kernarg_slots_required = 0;
     uint32_t marker_count = 0;
+    uint64_t fingerprint = 0;
 };
 
 struct McuPlanCompileOptions {
@@ -239,10 +242,11 @@ struct McuPlanCompileOptions {
     const void* verify_recurrent_history = nullptr;
     uint64_t verify_conv_history_stride = 0;
     uint64_t verify_recurrent_history_stride = 0;
+    bool static_plan = false;
 };
 
 Status compile_mcu_plan(const ::ps::runtime::Program& program,
-                        const HostExecutionContext& ctx,
+                        const McuStaticPlanCompileContext& static_ctx,
                         const McuPlanCompileOptions& options,
                         McuCompiledPlan& out);
 

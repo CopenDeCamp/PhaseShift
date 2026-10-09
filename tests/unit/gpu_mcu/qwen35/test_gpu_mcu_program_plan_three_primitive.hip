@@ -104,8 +104,13 @@ int main() {
     options.marker_workgroup = 64u;
 
     q35::McuCompiledPlan compiled;
+    const q35::McuStaticPlanCompileContext ctx_mcu_static =
+        q35::make_static_plan_compile_context(
+            ctx_mcu, ctx_mcu.actual_rows, ctx_mcu.actual_outputs,
+            ctx_mcu.staged_request_count,
+            ctx_mcu.actual_stochastic_outputs);
     const ps::Status compiled_status =
-        q35::compile_mcu_plan(program, ctx_mcu, options, compiled);
+        q35::compile_mcu_plan(program,ctx_mcu_static, options, compiled);
     if (!compiled_status.ok()) {
         std::printf("FAIL: compile: %s\n", compiled_status.message().c_str());
         ++g_failed;
@@ -155,8 +160,13 @@ int main() {
     unsupported.dispatches.push_back(rope);
     unsupported.dispatch_source_node.push_back(1u);
     q35::McuCompiledPlan rejected;
+    const q35::McuStaticPlanCompileContext ctx_mcu_static2 =
+        q35::make_static_plan_compile_context(
+            ctx_mcu, ctx_mcu.actual_rows, ctx_mcu.actual_outputs,
+            ctx_mcu.staged_request_count,
+            ctx_mcu.actual_stochastic_outputs);
     const ps::Status unsupported_status = q35::compile_mcu_plan(
-        unsupported, ctx_mcu, q35::McuPlanCompileOptions{0u, 4u, 1u, 64u},
+        unsupported,ctx_mcu_static2, q35::McuPlanCompileOptions{0u, 4u, 1u, 64u},
         rejected);
     check(!unsupported_status.ok() &&
               unsupported_status.code() == ps::Status::Code::unsupported,

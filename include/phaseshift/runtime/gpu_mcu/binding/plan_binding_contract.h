@@ -2,10 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace ps::runtime::gpu_mcu {
 
-struct alignas(32) McuDynamicNodeBinding {
+struct alignas(32) McuRuntimeNodeBinding {
     uint16_t enabled = 0;
     uint16_t variant_id = 0;
     uint32_t workgroup_count_x = 0;
@@ -16,15 +17,15 @@ struct alignas(32) McuDynamicNodeBinding {
     uint32_t reserved1 = 0;
 };
 
-static_assert(sizeof(McuDynamicNodeBinding) == 32);
-static_assert(alignof(McuDynamicNodeBinding) == 32);
-static_assert(offsetof(McuDynamicNodeBinding, enabled) == 0);
-static_assert(offsetof(McuDynamicNodeBinding, variant_id) == 2);
-static_assert(offsetof(McuDynamicNodeBinding, workgroup_count_x) == 4);
-static_assert(offsetof(McuDynamicNodeBinding, workgroup_count_y) == 8);
-static_assert(offsetof(McuDynamicNodeBinding, workgroup_count_z) == 12);
-static_assert(offsetof(McuDynamicNodeBinding, invocation_index) == 16);
-static_assert(offsetof(McuDynamicNodeBinding, variant_override) == 20);
+static_assert(sizeof(McuRuntimeNodeBinding) == 32);
+static_assert(alignof(McuRuntimeNodeBinding) == 32);
+static_assert(offsetof(McuRuntimeNodeBinding, enabled) == 0);
+static_assert(offsetof(McuRuntimeNodeBinding, variant_id) == 2);
+static_assert(offsetof(McuRuntimeNodeBinding, workgroup_count_x) == 4);
+static_assert(offsetof(McuRuntimeNodeBinding, workgroup_count_y) == 8);
+static_assert(offsetof(McuRuntimeNodeBinding, workgroup_count_z) == 12);
+static_assert(offsetof(McuRuntimeNodeBinding, invocation_index) == 16);
+static_assert(offsetof(McuRuntimeNodeBinding, variant_override) == 20);
 
 enum class McuInvocationPatchSource : uint8_t {
     ActualRows = 0,
@@ -54,5 +55,17 @@ static_assert(offsetof(McuInvocationPatch, target) == 0);
 static_assert(offsetof(McuInvocationPatch, source) == 8);
 static_assert(offsetof(McuInvocationPatch, width) == 9);
 static_assert(offsetof(McuInvocationPatch, null_guard) == 10);
+
+struct McuAttentionPathSpan {
+    uint32_t node_begin = 0;
+    uint32_t prefill_node_end = 0;
+    uint32_t direct_node_end = 0;
+    uint32_t split_node_end = 0;
+    uint32_t split_min_visible = 0;
+    uint32_t prefill_min_rows = 0;
+};
+
+static_assert(sizeof(McuAttentionPathSpan) == 24);
+static_assert(std::is_trivially_copyable_v<McuAttentionPathSpan>);
 
 }  // namespace ps::runtime::gpu_mcu

@@ -29,6 +29,8 @@ struct McuPlanFingerprint {
     }
 };
 
+McuPlanFingerprint mcu_plan_raw_fingerprint(const McuCompiledPlan& plan) noexcept;
+
 McuPlanFingerprint mcu_plan_fingerprint(const McuCompiledPlan& plan) noexcept;
 
 struct McuPlanCacheStep {

@@ -166,6 +166,58 @@ void check_gpu_mcu_model_hooks(const fs::path& root) {
     }
 }
 
+std::string between(const std::string& text, const std::string& begin,
+                    const std::string& end) {
+    const size_t i = text.find(begin);
+    if (i == std::string::npos) return "";
+    const size_t j = text.find(end, i + begin.size());
+    if (j == std::string::npos) return "";
+    return text.substr(i, j - i);
+}
+
+void check_clean_text(const std::string& where, const std::string& text,
+                      const std::vector<const char*>& forbidden) {
+    for (const char* needle : forbidden) {
+        if (contains(text, needle)) {
+            fail(where + std::string(" contains forbidden ") + needle);
+        }
+    }
+    ++passed;
+}
+
+void check_gpu_mcu_static_plan_boundary(const fs::path& root) {
+    const fs::path compiler =
+        root / "src/phaseshift/models/qwen35/runtime/mcu_plan_compiler.hip";
+    check_clean_text(compiler.string(), read_file(compiler),
+                     {"HostExecutionContext", "ExecutionRole",
+                      "ExecutionClass", "staged_requests",
+                      "staged_request_count", "DeviceBatchContext",
+                      "should_use_paged_attention_prefill"});
+
+    const fs::path context_header =
+        root / "src/phaseshift/models/qwen35/runtime/mcu_plan_compile_context.h";
+    const std::string context_struct = between(
+        read_file(context_header), "struct McuStaticPlanCompileContext {", "};");
+    if (context_struct.empty()) {
+        fail("McuStaticPlanCompileContext struct not found");
+        return;
+    }
+    check_clean_text("McuStaticPlanCompileContext", context_struct,
+                     {"actual_rows", "actual_outputs", "staged_requests",
+                      "ExecutionRole", "ExecutionClass",
+                      "static_plan_compile", "static_attention_use_prefill"});
+
+    const fs::path binder =
+        root / "include/phaseshift/runtime/gpu_mcu/binding/plan_binder.h";
+    check_clean_text(binder.string(), read_file(binder), {"compile_mcu_plan"});
+
+    const fs::path control =
+        root /
+        "src/phaseshift/runtime/gpu_mcu/execution/detail/micro_fsm_control.h";
+    check_clean_text(control.string(), read_file(control),
+                     {"compile_mcu_plan"});
+}
+
 void check_gpu_mcu_executor_model_abi(const fs::path& root) {
     const std::vector<fs::path> dirs = {
         root / "include/phaseshift/runtime/gpu_mcu",
@@ -265,6 +317,7 @@ int main() {
     check_gpu_mcu_layering(root);
     check_gpu_mcu_model_hooks(root);
     check_gpu_mcu_executor_model_abi(root);
+    check_gpu_mcu_static_plan_boundary(root);
 
     check_correctness_location(root);
     check_correctness_layout(root);

@@ -282,7 +282,12 @@ void run_prefill_scenario() {
     opts.marker_grid = 1u;
     opts.marker_workgroup = 64u;
     q35::McuCompiledPlan plan;
-    const ps::Status plan_status = q35::compile_mcu_plan(program, ctx, opts, plan);
+    const q35::McuStaticPlanCompileContext ctx_static =
+        q35::make_static_plan_compile_context(
+            ctx, ctx.actual_rows, ctx.actual_outputs,
+            ctx.staged_request_count,
+            ctx.actual_stochastic_outputs);
+    const ps::Status plan_status = q35::compile_mcu_plan(program,ctx_static, opts, plan);
     if (!plan_status.ok()) {
         std::printf("FAIL: prefill plan: %s\n", plan_status.message().c_str());
         check(false, "prefill plan compiled");
@@ -306,6 +311,44 @@ void run_prefill_scenario() {
     }
     check(has_prefill_kind, "prefill variant emitted");
 
+    q35::McuPlanCompileOptions static_opts = opts;
+    static_opts.static_plan = true;
+    q35::McuCompiledPlan static_plan;
+    const ps::Status static_status =
+        q35::compile_mcu_plan(program, ctx_static, static_opts, static_plan);
+    if (!static_status.ok()) {
+        std::printf("FAIL: static plan: %s\n", static_status.message().c_str());
+        check(false, "static plan compiled");
+        return;
+    }
+    check(static_plan.attention_path_spans.size() == 1u,
+          "static plan records one attention path span");
+    if (!static_plan.attention_path_spans.empty()) {
+        const auto& span = static_plan.attention_path_spans[0];
+        std::printf(
+            "static attention span: begin=%u prefill_end=%u direct_end=%u "
+            "split_end=%u min_visible=%u min_prefill=%u nodes=%zu\n",
+            span.node_begin, span.prefill_node_end, span.direct_node_end,
+            span.split_node_end, span.split_min_visible, span.prefill_min_rows,
+            static_plan.nodes.size());
+        check(span.node_begin < span.prefill_node_end,
+              "static plan carries a prefill attention node");
+        check(span.prefill_node_end < span.direct_node_end,
+              "static plan carries a decode attention node");
+        check(span.prefill_min_rows == q35::kPagedAttentionPrefillMinRows,
+              "prefill threshold is carried by the span");
+        check(span.split_node_end >= span.direct_node_end,
+              "split group starts after the direct group");
+        check(span.split_node_end <= static_plan.nodes.size(),
+              "attention path span stays inside the node list");
+        check(span.split_min_visible == q35::kPagedAttentionSplitMinVisible,
+              "split threshold is carried by the span");
+        check(span.direct_node_end > span.node_begin &&
+                  static_plan.nodes[span.node_begin].flags ==
+                      mcu::kMcuNodeDispatch,
+              "span starts on a dispatch node");
+    }
+
     ::ps::runtime::DeviceRequestDescriptor mixed_reqs[2]{};
     mixed_reqs[0].execution_class = ::ps::runtime::ExecutionClass::DECODE;
     mixed_reqs[0].row_begin = 0u;
@@ -318,8 +361,13 @@ void run_prefill_scenario() {
     bc.num_decode_requests = 1u;
     bc.num_prefill_requests = 1u;
     q35::McuCompiledPlan mixed_plan;
+    const q35::McuStaticPlanCompileContext ctx_static2 =
+        q35::make_static_plan_compile_context(
+            ctx, ctx.actual_rows, ctx.actual_outputs,
+            ctx.staged_request_count,
+            ctx.actual_stochastic_outputs);
     const ps::Status mixed_status =
-        q35::compile_mcu_plan(program, ctx, opts, mixed_plan);
+        q35::compile_mcu_plan(program,ctx_static2, opts, mixed_plan);
     bc.requests = &req;
     bc.num_requests = 1u;
     bc.num_decode_requests = 0u;
@@ -762,7 +810,12 @@ int main() {
     opts.marker_grid = 1u;
     opts.marker_workgroup = 64u;
     q35::McuCompiledPlan plan;
-    const ps::Status plan_status = q35::compile_mcu_plan(program, ctx, opts, plan);
+    const q35::McuStaticPlanCompileContext ctx_static3 =
+        q35::make_static_plan_compile_context(
+            ctx, ctx.actual_rows, ctx.actual_outputs,
+            ctx.staged_request_count,
+            ctx.actual_stochastic_outputs);
+    const ps::Status plan_status = q35::compile_mcu_plan(program,ctx_static3, opts, plan);
     if (!plan_status.ok()) {
         std::printf("FAIL: attention plan: %s\n", plan_status.message().c_str());
         return 1;

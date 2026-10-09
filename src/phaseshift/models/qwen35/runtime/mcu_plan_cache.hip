@@ -28,6 +28,18 @@ uint64_t hash_vector(uint64_t hash, const std::vector<T>& values) noexcept {
 }  // namespace
 
 McuPlanFingerprint mcu_plan_fingerprint(const McuCompiledPlan& plan) noexcept {
+    if (plan.fingerprint != 0ull) {
+        McuPlanFingerprint stored{};
+        stored.hash = plan.fingerprint;
+        stored.dispatch_count = plan.dispatch_count;
+        stored.variant_count =
+            static_cast<uint32_t>(plan.variants.size());
+        return stored;
+    }
+    return mcu_plan_raw_fingerprint(plan);
+}
+
+McuPlanFingerprint mcu_plan_raw_fingerprint(const McuCompiledPlan& plan) noexcept {
     uint64_t hash = kFnvOffset;
     hash = hash_vector(hash, plan.nodes);
     hash = hash_vector(hash, plan.variants);

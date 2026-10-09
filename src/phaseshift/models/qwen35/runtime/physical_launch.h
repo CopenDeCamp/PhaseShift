@@ -289,12 +289,14 @@ Result<PhysicalResolveStatus> resolve_psq4_physical(
     const ::ps::runtime::Program& program,
     const ::ps::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
+    bool allow_unguarded_prefill2d,
     PhysicalPsq4Launch& out);
 
 Result<PhysicalResolveStatus> resolve_psq8_physical(
     const ::ps::runtime::Program& program,
     const ::ps::runtime::DispatchBinding& b,
     const HostExecutionContext& ctx,
+    bool allow_unguarded_prefill2d,
     PhysicalPsq8Launch& out);
 
 Result<PhysicalResolveStatus> resolve_elementwise_physical(
@@ -454,6 +456,12 @@ Result<PhysicalResolveStatus> resolve_paged_attention_physical(
     PhysicalPagedAttentionPlan& out);
 
 Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_plan(
+    const ::ps::runtime::Program& program,
+    size_t dispatch_index,
+    const HostExecutionContext& ctx,
+    PhysicalPagedAttentionPlan& out);
+
+Result<PhysicalResolveStatus> resolve_paged_attention_physical_static_prefill(
     const ::ps::runtime::Program& program,
     size_t dispatch_index,
     const HostExecutionContext& ctx,

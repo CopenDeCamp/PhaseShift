@@ -199,6 +199,7 @@ add_library(phaseshift_qwen35_runtime STATIC
     src/phaseshift/models/qwen35/runtime/scheduled_batch.cpp
     src/phaseshift/models/qwen35/runtime/linear_selector.cpp
     src/phaseshift/models/qwen35/runtime/physical_launch.hip
+    src/phaseshift/models/qwen35/runtime/physical_launch_static.hip
     src/phaseshift/models/qwen35/runtime/mcu_plan_compiler.hip
     src/phaseshift/models/qwen35/runtime/decode_backend.cpp
     src/phaseshift/models/qwen35/runtime/mcu_kernel_registry.hip

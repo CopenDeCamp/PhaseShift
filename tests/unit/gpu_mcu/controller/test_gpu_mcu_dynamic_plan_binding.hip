@@ -1,5 +1,7 @@
 #include "unit/gpu_mcu/gpu_mcu_fsm_test_util.h"
 
+#include <phaseshift/runtime/gpu_mcu/binding/plan_binder.h>
+
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -25,8 +27,8 @@ void check(bool condition, const char* message) {
     }
 }
 
-__global__ void set_binding_kernel(mcu::McuDynamicNodeBinding* dst,
-                                   mcu::McuDynamicNodeBinding value) {
+__global__ void set_binding_kernel(mcu::McuRuntimeNodeBinding* dst,
+                                   mcu::McuRuntimeNodeBinding value) {
     if (threadIdx.x == 0u && blockIdx.x == 0u) {
         dst[0] = value;
         __threadfence_system();
@@ -41,10 +43,10 @@ __global__ void clear_output_kernel(uint32_t* out, uint32_t count,
     }
 }
 
-mcu::McuDynamicNodeBinding binding(uint16_t enabled, uint16_t variant_id,
+mcu::McuRuntimeNodeBinding binding(uint16_t enabled, uint16_t variant_id,
                                    uint32_t grid_x, uint32_t grid_y,
                                    uint32_t grid_z) {
-    mcu::McuDynamicNodeBinding out{};
+    mcu::McuRuntimeNodeBinding out{};
     out.enabled = enabled;
     out.variant_id = variant_id;
     out.workgroup_count_x = grid_x;
@@ -82,15 +84,15 @@ void expect_sentinel_range(const std::vector<uint32_t>& out, uint32_t begin,
     check(ok, message);
 }
 
-void clear_and_patch(Rig& rig, const mcu::McuDynamicNodeBinding& b) {
+void clear_and_patch(Rig& rig, const mcu::McuRuntimeNodeBinding& b) {
     hipStream_t stream = rig.partition.worker_stream();
     clear_output_kernel<<<(kOutputSpan + 63u) / 64u, 64u, 0, stream>>>(
         rig.output, kOutputSpan, kSentinel);
-    set_binding_kernel<<<1, 32, 0, stream>>>(rig.dynamic_bindings, b);
+    set_binding_kernel<<<1, 32, 0, stream>>>(rig.runtime_bindings, b);
     (void)hipStreamSynchronize(stream);
 }
 
-bool run_dynamic_case(Rig& rig, const mcu::McuDynamicNodeBinding& b,
+bool run_runtime_case(Rig& rig, const mcu::McuRuntimeNodeBinding& b,
                       uint64_t plans, const char* name) {
     clear_and_patch(rig, b);
     if (!rig.fsm.request_run().ok()) {
@@ -138,9 +140,9 @@ bool dynamic_geometry_case() {
         mcu::make_probe_variant(1u, rig.meta, 32u, 1u)};
     if (!rig.upload(chain.nodes, variants)) return false;
 
-    const mcu::McuDynamicNodeBinding initial =
+    const mcu::McuRuntimeNodeBinding initial =
         binding(1u, 0u, 0u, 0u, 0u);
-    if (!rig.set_dynamic_bindings(&initial, 1u)) return false;
+    if (!rig.set_runtime_bindings(&initial, 1u)) return false;
 
     mcu::GpuMcuFsmConfig config{};
     config.plan_id = 21u;
@@ -153,7 +155,7 @@ bool dynamic_geometry_case() {
 
     uint64_t plans = 0u;
 
-    if (!run_dynamic_case(rig, binding(1u, 0u, 0u, 0u, 0u), ++plans, "static")) {
+    if (!run_runtime_case(rig, binding(1u, 0u, 0u, 0u, 0u), ++plans, "static")) {
         return false;
     }
     std::vector<uint32_t> out = read_span(rig);
@@ -162,7 +164,7 @@ bool dynamic_geometry_case() {
                           "static geometry leaves tail untouched");
     check(rig.fsm.dispatches() == 1u, "static geometry one dispatch");
 
-    if (!run_dynamic_case(rig, binding(1u, 1u, 0u, 0u, 0u), ++plans,
+    if (!run_runtime_case(rig, binding(1u, 1u, 0u, 0u, 0u), ++plans,
                           "variant switch")) {
         return false;
     }
@@ -172,7 +174,7 @@ bool dynamic_geometry_case() {
                           "variant switch leaves tail untouched");
     check(rig.fsm.dispatches() == 2u, "variant switch one dispatch");
 
-    if (!run_dynamic_case(rig, binding(1u, 0u, 2u, 1u, 1u), ++plans,
+    if (!run_runtime_case(rig, binding(1u, 0u, 2u, 1u, 1u), ++plans,
                           "grid override")) {
         return false;
     }
@@ -183,7 +185,7 @@ bool dynamic_geometry_case() {
     check(rig.fsm.dispatches() == 3u, "grid override one dispatch");
 
     const uint64_t before = rig.fsm.dispatches();
-    if (!run_dynamic_case(rig, binding(0u, 0u, 0u, 0u, 0u), ++plans,
+    if (!run_runtime_case(rig, binding(0u, 0u, 0u, 0u, 0u), ++plans,
                           "disabled")) {
         return false;
     }
@@ -214,13 +216,13 @@ bool prepared_prefetch_case() {
         mcu::make_probe_variant(1u, rig.meta, 32u, 1u)};
     if (!rig.upload(chain.nodes, variants)) return false;
 
-    std::vector<mcu::McuDynamicNodeBinding> bindings(5u);
+    std::vector<mcu::McuRuntimeNodeBinding> bindings(5u);
     bindings[0] = binding(1u, 0u, 0u, 0u, 0u);
     bindings[1] = binding(1u, 0u, 0u, 0u, 0u);
     bindings[2] = binding(1u, 1u, 4u, 1u, 1u);
     bindings[3] = binding(1u, 0u, 0u, 0u, 0u);
     bindings[4] = binding(1u, 0u, 0u, 0u, 0u);
-    if (!rig.set_dynamic_bindings(bindings.data(),
+    if (!rig.set_runtime_bindings(bindings.data(),
                                   static_cast<uint32_t>(bindings.size()))) {
         return false;
     }
@@ -252,6 +254,72 @@ bool prepared_prefetch_case() {
 
 }  // namespace
 
+void attention_path_binding_case() {
+    mcu::McuRuntimeNodeBinding bindings[6] = {};
+    for (auto& b : bindings) {
+        b.enabled = 1u;
+        b.variant_id = 7u;
+    }
+
+    mcu::McuAttentionPathSpan spans[1] = {};
+    spans[0].node_begin = 1u;
+    spans[0].prefill_node_end = 2u;
+    spans[0].direct_node_end = 3u;
+    spans[0].split_node_end = 5u;
+    spans[0].split_min_visible = 2048u;
+    spans[0].prefill_min_rows = 128u;
+
+    ::ps::runtime::DeviceRequestDescriptor requests[2] = {};
+    ::ps::runtime::DeviceBatchContext context{};
+    context.num_requests = 1u;
+    context.requests = requests;
+    requests[0].row_begin = 0u;
+    requests[0].row_count = 100u;
+    context.actual_rows = 100u;
+    requests[0].sequence_length = 100u;
+
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[0].enabled == 1u, "node outside the span stays enabled");
+    check(bindings[1].enabled == 0u, "prefill node off below the row threshold");
+    check(bindings[2].enabled == 1u, "direct node on for a short decode batch");
+    check(bindings[3].enabled == 0u, "split node off below the visible threshold");
+    check(bindings[4].enabled == 0u, "reduce node off below the visible threshold");
+    check(bindings[2].variant_id == 7u, "binder leaves variant id alone");
+
+    requests[0].sequence_length = 4096u;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[1].enabled == 0u, "prefill node off for a short batch");
+    check(bindings[2].enabled == 0u, "direct node off above the split threshold");
+    check(bindings[3].enabled == 1u, "split node on above the split threshold");
+    check(bindings[4].enabled == 1u, "reduce node on above the split threshold");
+
+    requests[0].row_count = 256u;
+    context.actual_rows = 256u;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[1].enabled == 1u, "prefill node on for a full prefill batch");
+    check(bindings[2].enabled == 0u, "direct node off during prefill");
+    check(bindings[3].enabled == 0u, "split node off during prefill");
+    check(bindings[4].enabled == 0u, "reduce node off during prefill");
+
+    context.num_requests = 2u;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[1].enabled == 0u, "mixed batch never selects the prefill node");
+    check(bindings[3].enabled == 1u, "mixed batch keeps the split path");
+
+    spans[0].split_node_end = spans[0].direct_node_end;
+    spans[0].prefill_node_end = spans[0].node_begin;
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 1u, bindings, 6u);
+    check(bindings[2].enabled == 1u, "direct only plan stays enabled");
+
+    mcu::gpu_mcu_bind_attention_paths(&context, spans, 0u, bindings, 6u);
+    check(bindings[2].enabled == 1u, "empty span table touches nothing");
+
+    ::ps::runtime::DeviceBatchContext empty{};
+    empty.num_requests = 1u;
+    mcu::gpu_mcu_bind_attention_paths(&empty, spans, 1u, bindings, 6u);
+    check(bindings[2].enabled == 1u, "missing request list falls back to direct");
+}
+
 int main() {
     int device_count = 0;
     if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
@@ -265,6 +333,7 @@ int main() {
 
     (void)dynamic_geometry_case();
     (void)prepared_prefetch_case();
+    attention_path_binding_case();
 
     if (g_failed != 0) {
         std::printf("test_gpu_mcu_dynamic_plan_binding: %d failures\n", g_failed);

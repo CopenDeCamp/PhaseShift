@@ -169,7 +169,8 @@ int main() {
           "activation quantize resolved for the mcu path");
     check(lq.kind == q35::PhysicalActivationQuantizeKind::E4M3,
           "activation quantize resolved to the production e4m3 path");
-    const auto s3 = q35::resolve_psq4_physical(program, program.dispatches[2], ctx_mcu, lp);
+    const auto s3 = q35::resolve_psq4_physical(program, program.dispatches[2], ctx_mcu, true,
+                            lp);
     check(s3.ok() && s3.value() == q35::PhysicalResolveStatus::Applicable,
           "psq4 resolved for the mcu path");
     check(lp.variant == q35::PhysicalPsq4Variant::Decode1Bf16,

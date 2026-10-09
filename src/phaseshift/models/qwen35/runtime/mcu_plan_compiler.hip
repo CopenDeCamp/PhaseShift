@@ -4,6 +4,8 @@
 #include <phaseshift/models/qwen35/runtime/mcu_layer_range.h>
 #include <phaseshift/models/qwen35/runtime/physical_launch.h>
 #include <phaseshift/models/qwen35/runtime/mcu_plan_value.h>
+#include <phaseshift/models/qwen35/runtime/paged_attention_dispatch.h>
+#include <phaseshift/models/qwen35/runtime/physical_launch_static.h>
 #include <phaseshift/models/qwen35/runtime/program_executor.h>
 #include <phaseshift/models/qwen35/kernels/optimized/verify_accept.h>
 #include <phaseshift/models/qwen35/kernels/optimized/embedding.h>
@@ -428,7 +430,7 @@ Status find_dispatch_range_for_graph_prefix(
 }
 
 static Status compile_mcu_plan_impl(const Program& program,
-                                    const HostExecutionContext& ctx,
+                                    const McuStaticPlanCompileContext& sc,
                                     const McuPlanCompileOptions& options,
                                     McuCompiledPlan& out) {
     out = McuCompiledPlan{};
@@ -438,6 +440,9 @@ static Status compile_mcu_plan_impl(const Program& program,
                                         __LINE__);
     if (options.dispatch_begin == options.dispatch_end)
         return Status::invalid_argument("empty dispatch range", __FILE__, __LINE__);
+
+    const McuPlanResolverInput input =
+        make_plan_resolver_input(sc, sc.max_visible_tokens);
 
     const uint16_t marker_variant =
         mark_variant(out, McuCompiledVariantKind::CompletionMarker,
@@ -471,7 +476,7 @@ static Status compile_mcu_plan_impl(const Program& program,
 
     const auto row_source_for = [&](::ps::runtime::ValueId value,
                                     uint8_t& source) -> Status {
-        auto resolved = resolve_host_value(program, value, ctx);
+        auto resolved = resolve_host_value_static(program, value, input);
         if (!resolved.ok()) return resolved.status();
         source = static_cast<uint8_t>(
             resolved.value().row_domain ==
@@ -492,7 +497,7 @@ static Status compile_mcu_plan_impl(const Program& program,
 
     const auto emit_embedding = [&](const DispatchBinding& b) -> Status {
         PhysicalEmbeddingLaunch launch{};
-        const auto resolved = resolve_embedding_physical(program, b, ctx, launch);
+        const auto resolved = resolve_embedding_physical_static(program, b, input, launch);
         if (!resolved.ok()) return resolved.status();
         if (resolved.value() != PhysicalResolveStatus::Applicable)
             return Status::unsupported(
@@ -504,7 +509,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             inv.scales = launch.scales;
             inv.token_ids = launch.token_ids;
             inv.output = launch.output;
-            inv.error_word = reinterpret_cast<uint64_t>(ctx.error_word);
+            inv.error_word = reinterpret_cast<uint64_t>(sc.error_word);
             inv.codes_row_stride_bytes = launch.codes_row_stride_bytes;
             inv.scale_row_stride_bytes = launch.scale_row_stride_bytes;
             inv.rows = launch.rows;
@@ -537,7 +542,7 @@ static Status compile_mcu_plan_impl(const Program& program,
         inv.table = launch.table;
         inv.token_ids = launch.token_ids;
         inv.output = launch.output;
-        inv.error_word = reinterpret_cast<uint64_t>(ctx.error_word);
+        inv.error_word = reinterpret_cast<uint64_t>(sc.error_word);
         inv.rows = launch.rows;
         inv.vocab_size = launch.vocab_size;
         inv.hidden_size = launch.hidden_size;
@@ -565,11 +570,11 @@ static Status compile_mcu_plan_impl(const Program& program,
         if (b.input_count != 1u || b.output_count != 1u)
             return Status::unsupported("output gather io count is invalid",
                                        __FILE__, __LINE__);
-        auto in_res = resolve_host_value(
-            program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+        auto in_res = resolve_host_value_static(
+            program, ::ps::runtime::ValueId{b.input_slots[0]}, input);
         if (!in_res.ok()) return in_res.status();
-        auto out_res = resolve_host_value(
-            program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+        auto out_res = resolve_host_value_static(
+            program, ::ps::runtime::ValueId{b.output_slots[0]}, input);
         if (!out_res.ok()) return out_res.status();
         const HostResolvedValue src = in_res.value();
         const HostResolvedValue dst = out_res.value();
@@ -585,10 +590,10 @@ static Status compile_mcu_plan_impl(const Program& program,
         if (src.feature_count == 0u)
             return Status::unsupported("output gather feature count is zero",
                                        __FILE__, __LINE__);
-        if (ctx.device_output_rows == nullptr)
+        if (sc.device_output_rows == nullptr)
             return Status::unsupported("output gather requires output rows",
                                        __FILE__, __LINE__);
-        const uint32_t num_outputs = ctx.actual_outputs;
+        const uint32_t num_outputs = sc.output_capacity;
         if (num_outputs == 0u)
             return Status::unsupported("output gather output count is zero",
                                        __FILE__, __LINE__);
@@ -596,7 +601,7 @@ static Status compile_mcu_plan_impl(const Program& program,
         inv.input = reinterpret_cast<uint64_t>(src.ptr);
         inv.output = reinterpret_cast<uint64_t>(dst.ptr);
         inv.output_rows =
-            reinterpret_cast<uint64_t>(ctx.device_output_rows);
+            reinterpret_cast<uint64_t>(sc.device_output_rows);
         inv.input_row_stride = src.row_stride;
         inv.output_row_stride = dst.row_stride;
         inv.num_outputs = num_outputs;
@@ -646,17 +651,17 @@ static Status compile_mcu_plan_impl(const Program& program,
         }
     }
     if (range_touches_gdn_state) {
-        const ::ps::qwen35::GdnStatePoolDeviceView& gdn = ctx.model_state.gdn;
-        if (ctx.batch_context != nullptr && gdn.conv_base != nullptr &&
+        const ::ps::qwen35::GdnStatePoolDeviceView& gdn = sc.model_state.gdn;
+        if (sc.batch_context != nullptr && gdn.conv_base != nullptr &&
             gdn.recurrent_base != nullptr && gdn.conv_slot_stride != 0u &&
             gdn.recurrent_slot_stride != 0u &&
             gdn.conv_slot_stride <= 0xFFFFFFFFull &&
             gdn.recurrent_slot_stride <= 0xFFFFFFFFull &&
-            ctx.device_requests != nullptr) {
+            sc.device_requests != nullptr) {
             auto inv = mcu_plan_value<mcu::GpuMcuGdnResetInvocation>();
             inv.conv_base = reinterpret_cast<uint16_t*>(gdn.conv_base);
             inv.recurrent_base = reinterpret_cast<uint32_t*>(gdn.recurrent_base);
-            inv.context = ctx.batch_context;
+            inv.context = sc.batch_context;
             inv.conv_slot_stride = gdn.conv_slot_stride;
             inv.recurrent_slot_stride = gdn.recurrent_slot_stride;
             inv.conv_slot_count = static_cast<uint32_t>(gdn.conv_slot_stride);
@@ -679,7 +684,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::RMS_NORM: {
                 PhysicalRmsNormLaunch launch{};
                 const auto resolved =
-                    resolve_rmsnorm_physical(program, b, ctx, launch);
+                    resolve_rmsnorm_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -735,7 +740,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::ACTIVATION_QUANTIZE_W4A8: {
                 PhysicalActivationQuantizeLaunch launch{};
                 const auto resolved =
-                    resolve_activation_quantize_physical(program, b, ctx, launch);
+                    resolve_activation_quantize_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -798,7 +803,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             }
             case KernelId::LINEAR_PSQ4: {
                 PhysicalPsq4Launch launch{};
-                const auto resolved = resolve_psq4_physical(program, b, ctx, launch);
+                const auto resolved = resolve_psq4_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -902,7 +907,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             }
             case KernelId::LINEAR_PSQ8: {
                 PhysicalPsq8Launch launch{};
-                const auto resolved = resolve_psq8_physical(program, b, ctx, launch);
+                const auto resolved = resolve_psq8_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1002,7 +1007,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::SIGMOID: {
                 PhysicalElementwiseLaunch launch{};
                 const auto resolved =
-                    resolve_elementwise_physical(program, b, ctx, launch);
+                    resolve_elementwise_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1079,18 +1084,6 @@ static Status compile_mcu_plan_impl(const Program& program,
                 break;
             }
             case KernelId::PAGED_ATTENTION: {
-                PhysicalPagedAttentionPlan plan{};
-                const auto resolved =
-                    ctx.static_plan_compile
-                        ? resolve_paged_attention_physical_static_plan(
-                              program, i, ctx, plan)
-                        : resolve_paged_attention_physical(program, i, ctx,
-                                                          plan);
-                if (!resolved.ok()) return resolved.status();
-                if (resolved.value() != PhysicalResolveStatus::Applicable)
-                    return Status::unsupported(
-                        "paged attention dispatch is not applicable on the mcu",
-                        __FILE__, __LINE__);
                 const auto fill_common =
                     [](const ::ps::kernel::PagedAttentionCommonArgs& c, auto& inv) {
                         inv.q = reinterpret_cast<uint64_t>(c.q);
@@ -1119,164 +1112,244 @@ static Status compile_mcu_plan_impl(const Program& program,
                         inv.elems_per_layer = c.elems_per_layer;
                         inv.scale = c.scale;
                     };
-                for (uint32_t region = 0u; region < plan.physical_count; ++region) {
-                    const PhysicalPagedAttentionKernel& k = plan.kernels[region];
-                    switch (k.variant) {
-                        case PhysicalPagedAttentionVariant::Bf16Prefill: {
-                            if (k.common.head_dim !=
-                                    ::ps::kernel::kPagedAttentionHeadLimit ||
-                                k.common.page_tokens != 16u)
-                                return Status::unsupported(
-                                    "paged attention prefill shape has no mcu "
-                                    "entrypoint",
-                                    __FILE__, __LINE__);
-                            auto inv =
-                                mcu_plan_value<mcu::McuPagedAttentionInvocation>();
-                            fill_common(k.common, inv);
-                            inv.k_pool = k.k_pool;
-                            inv.v_pool = k.v_pool;
-                            const uint32_t index =
-                                static_cast<uint32_t>(out.attention_paged.size());
-                            out.attention_paged.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{0u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint32_t tiles =
-                                (k.common.rows +
-                                 ::ps::kernel::kPagedAttentionPrefillTileRows - 1u) /
-                                ::ps::kernel::kPagedAttentionPrefillTileRows;
-                            const uint16_t variant_id = mark_variant(
-                                out,
-                                McuCompiledVariantKind::AttentionPagedPrefillBf16,
-                                tiles, ::ps::kernel::kPagedAttentionPrefillBlock,
-                                k.common.q_heads);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPaged, index));
-                            break;
-                        }
-                        case PhysicalPagedAttentionVariant::Bf16FullHead: {
-                            auto inv =
-                                mcu_plan_value<mcu::McuPagedAttentionInvocation>();
-                            fill_common(k.common, inv);
-                            inv.k_pool = k.k_pool;
-                            inv.v_pool = k.v_pool;
-                            const uint32_t index =
-                                static_cast<uint32_t>(out.attention_paged.size());
-                            out.attention_paged.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{0u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint16_t variant_id = mark_variant(
-                                out, McuCompiledVariantKind::AttentionPagedBf16,
-                                k.grid, k.workgroup);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPaged, index));
-                            break;
-                        }
-                        case PhysicalPagedAttentionVariant::Bf16SplitQ4Full:
-                        case PhysicalPagedAttentionVariant::Bf16SplitOther: {
-                            McuCompiledVariantKind split_kind{};
-                            if (k.variant ==
-                                PhysicalPagedAttentionVariant::Bf16SplitQ4Full) {
-                                split_kind =
-                                    McuCompiledVariantKind::AttentionPagedSplitQ4Full;
-                            } else {
-                                if (k.q_per_kv != 6u ||
-                                    k.common.head_dim !=
-                                        ::ps::kernel::kPagedAttentionHeadLimit)
+                                const auto emit_regions =
+                    [&](const PhysicalPagedAttentionPlan& plan) -> Status {
+    for (uint32_t region = 0u; region < plan.physical_count; ++region) {
+                        const PhysicalPagedAttentionKernel& k = plan.kernels[region];
+                        switch (k.variant) {
+                            case PhysicalPagedAttentionVariant::Bf16Prefill: {
+                                if (k.common.head_dim !=
+                                        ::ps::kernel::kPagedAttentionHeadLimit ||
+                                    k.common.page_tokens != 16u)
                                     return Status::unsupported(
-                                        "paged attention split other shape has no "
-                                        "mcu entrypoint",
+                                        "paged attention prefill shape has no mcu "
+                                        "entrypoint",
                                         __FILE__, __LINE__);
-                                split_kind =
-                                    McuCompiledVariantKind::AttentionPagedSplitOther;
+                                auto inv =
+                                    mcu_plan_value<mcu::McuPagedAttentionInvocation>();
+                                fill_common(k.common, inv);
+                                inv.k_pool = k.k_pool;
+                                inv.v_pool = k.v_pool;
+                                const uint32_t index =
+                                    static_cast<uint32_t>(out.attention_paged.size());
+                                out.attention_paged.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{0u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint32_t tiles =
+                                    (k.common.rows +
+                                     ::ps::kernel::kPagedAttentionPrefillTileRows - 1u) /
+                                    ::ps::kernel::kPagedAttentionPrefillTileRows;
+                                const uint16_t variant_id = mark_variant(
+                                    out,
+                                    McuCompiledVariantKind::AttentionPagedPrefillBf16,
+                                    tiles, ::ps::kernel::kPagedAttentionPrefillBlock,
+                                    k.common.q_heads);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPaged, index));
+                                break;
                             }
-                            auto inv = mcu_plan_value<
-                                mcu::McuPagedAttentionSplitInvocation>();
-                            fill_common(k.common, inv);
-                            inv.k_pool = k.k_pool;
-                            inv.v_pool = k.v_pool;
-                            inv.partials = k.partials;
-                            inv.splits = k.splits;
-                            const uint32_t index = static_cast<uint32_t>(
-                                out.attention_paged_split.size());
-                            out.attention_paged_split.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{1u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint16_t variant_id =
-                                mark_variant(out, split_kind, k.grid, k.workgroup);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPagedSplit, index));
-                            break;
-                        }
-                        case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh1:
-                        case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh2:
-                        case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullBase:
-                        case PhysicalPagedAttentionVariant::Bf16ReduceOther: {
-                            McuCompiledVariantKind reduce_kind{};
-                            switch (k.variant) {
-                                case PhysicalPagedAttentionVariant::
-                                    Bf16ReduceQ4FullQh1:
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceQ4FullQh1;
-                                    break;
-                                case PhysicalPagedAttentionVariant::
-                                    Bf16ReduceQ4FullQh2:
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceQ4FullQh2;
-                                    break;
-                                case PhysicalPagedAttentionVariant::
-                                    Bf16ReduceQ4FullBase:
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceQ4FullBase;
-                                    break;
-                                default:
+                            case PhysicalPagedAttentionVariant::Bf16FullHead: {
+                                auto inv =
+                                    mcu_plan_value<mcu::McuPagedAttentionInvocation>();
+                                fill_common(k.common, inv);
+                                inv.k_pool = k.k_pool;
+                                inv.v_pool = k.v_pool;
+                                const uint32_t index =
+                                    static_cast<uint32_t>(out.attention_paged.size());
+                                out.attention_paged.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{0u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint16_t variant_id = mark_variant(
+                                    out, McuCompiledVariantKind::AttentionPagedBf16,
+                                    k.grid, k.workgroup);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPaged, index));
+                                break;
+                            }
+                            case PhysicalPagedAttentionVariant::Bf16SplitQ4Full:
+                            case PhysicalPagedAttentionVariant::Bf16SplitOther: {
+                                McuCompiledVariantKind split_kind{};
+                                if (k.variant ==
+                                    PhysicalPagedAttentionVariant::Bf16SplitQ4Full) {
+                                    split_kind =
+                                        McuCompiledVariantKind::AttentionPagedSplitQ4Full;
+                                } else {
                                     if (k.q_per_kv != 6u ||
                                         k.common.head_dim !=
                                             ::ps::kernel::kPagedAttentionHeadLimit)
                                         return Status::unsupported(
-                                            "paged attention reduce other shape "
-                                            "has no mcu entrypoint",
+                                            "paged attention split other shape has no "
+                                            "mcu entrypoint",
                                             __FILE__, __LINE__);
-                                    reduce_kind = McuCompiledVariantKind::
-                                        AttentionPagedReduceOther;
-                                    break;
+                                    split_kind =
+                                        McuCompiledVariantKind::AttentionPagedSplitOther;
+                                }
+                                auto inv = mcu_plan_value<
+                                    mcu::McuPagedAttentionSplitInvocation>();
+                                fill_common(k.common, inv);
+                                inv.k_pool = k.k_pool;
+                                inv.v_pool = k.v_pool;
+                                inv.partials = k.partials;
+                                inv.splits = k.splits;
+                                const uint32_t index = static_cast<uint32_t>(
+                                    out.attention_paged_split.size());
+                                out.attention_paged_split.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{1u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint16_t variant_id =
+                                    mark_variant(out, split_kind, k.grid, k.workgroup);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPagedSplit, index));
+                                break;
                             }
-                            auto inv = mcu_plan_value<
-                                mcu::McuPagedAttentionReduceInvocation>();
-                            fill_common(k.common, inv);
-                            inv.partials = k.partials;
-                            inv.splits = k.splits;
-                            const uint32_t index = static_cast<uint32_t>(
-                                out.attention_paged_reduce.size());
-                            out.attention_paged_reduce.push_back(inv);
-                            out.attention_regions.push_back(
-                                McuAttentionRegion{2u, index, k.row_begin,
-                                                   k.common.rows});
-                            const uint16_t variant_id =
-                                mark_variant(out, reduce_kind, k.grid, k.workgroup);
-                            push_dispatch(make_dispatch_node(
-                                out.nodes.size(), variant_id,
-                                mcu::kMcuKernargRecipeAttentionPagedReduce, index));
-                            break;
+                            case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh1:
+                            case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullQh2:
+                            case PhysicalPagedAttentionVariant::Bf16ReduceQ4FullBase:
+                            case PhysicalPagedAttentionVariant::Bf16ReduceOther: {
+                                McuCompiledVariantKind reduce_kind{};
+                                switch (k.variant) {
+                                    case PhysicalPagedAttentionVariant::
+                                        Bf16ReduceQ4FullQh1:
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceQ4FullQh1;
+                                        break;
+                                    case PhysicalPagedAttentionVariant::
+                                        Bf16ReduceQ4FullQh2:
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceQ4FullQh2;
+                                        break;
+                                    case PhysicalPagedAttentionVariant::
+                                        Bf16ReduceQ4FullBase:
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceQ4FullBase;
+                                        break;
+                                    default:
+                                        if (k.q_per_kv != 6u ||
+                                            k.common.head_dim !=
+                                                ::ps::kernel::kPagedAttentionHeadLimit)
+                                            return Status::unsupported(
+                                                "paged attention reduce other shape "
+                                                "has no mcu entrypoint",
+                                                __FILE__, __LINE__);
+                                        reduce_kind = McuCompiledVariantKind::
+                                            AttentionPagedReduceOther;
+                                        break;
+                                }
+                                auto inv = mcu_plan_value<
+                                    mcu::McuPagedAttentionReduceInvocation>();
+                                fill_common(k.common, inv);
+                                inv.partials = k.partials;
+                                inv.splits = k.splits;
+                                const uint32_t index = static_cast<uint32_t>(
+                                    out.attention_paged_reduce.size());
+                                out.attention_paged_reduce.push_back(inv);
+                                out.attention_regions.push_back(
+                                    McuAttentionRegion{2u, index, k.row_begin,
+                                                       k.common.rows});
+                                const uint16_t variant_id =
+                                    mark_variant(out, reduce_kind, k.grid, k.workgroup);
+                                push_dispatch(make_dispatch_node(
+                                    out.nodes.size(), variant_id,
+                                    mcu::kMcuKernargRecipeAttentionPagedReduce, index));
+                                break;
+                            }
+                            default:
+                                return Status::unsupported(
+                                    "paged attention physical variant has no mcu "
+                                    "entrypoint",
+                                    __FILE__, __LINE__);
                         }
-                        default:
-                            return Status::unsupported(
-                                "paged attention physical variant has no mcu "
-                                "entrypoint",
-                                __FILE__, __LINE__);
+                    }
+                    return Status::make_ok();
+                };
+                const auto resolve_and_emit =
+                    [&](const McuPlanResolverInput& rc) -> Status {
+                    PhysicalPagedAttentionPlan plan{};
+                    const auto resolved =
+                        options.static_plan
+                            ? resolve_paged_attention_static_plan(program, i,
+                                                                  rc, plan)
+                            : resolve_paged_attention_host_immediate(
+                                  program, i, rc, plan);
+                    if (!resolved.ok()) return resolved.status();
+                    if (resolved.value() != PhysicalResolveStatus::Applicable)
+                        return Status::unsupported(
+                            "paged attention dispatch is not applicable on the mcu",
+                            __FILE__, __LINE__);
+                    return emit_regions(plan);
+                };
+                const uint32_t span_begin =
+                    static_cast<uint32_t>(out.nodes.size());
+                if (options.static_plan) {
+                    const auto snap_nodes = out.nodes.size();
+                    const auto snap_variants = out.variants.size();
+                    const auto snap_paged = out.attention_paged.size();
+                    const auto snap_regions = out.attention_regions.size();
+                    const uint32_t snap_physical = physical_nodes;
+                    PhysicalPagedAttentionPlan prefill_plan{};
+                    const auto prefill_res = resolve_paged_attention_static_prefill(
+                        program, i, input, prefill_plan);
+                    if (!prefill_res.ok() ||
+                        prefill_res.value() !=
+                            PhysicalResolveStatus::Applicable ||
+                        prefill_plan.physical_count == 0u ||
+                        !prefill_plan.use_prefill ||
+                        !emit_regions(prefill_plan).ok()) {
+                        out.nodes.resize(snap_nodes);
+                        out.variants.resize(snap_variants);
+                        out.attention_paged.resize(snap_paged);
+                        out.attention_regions.resize(snap_regions);
+                        physical_nodes = snap_physical;
                     }
                 }
+                const uint32_t prefill_end =
+                    static_cast<uint32_t>(out.nodes.size());
+                const Status path_status = resolve_and_emit(input);
+                if (!path_status.ok()) return path_status;
+                const uint32_t direct_end =
+                    static_cast<uint32_t>(out.nodes.size());
+                if (options.static_plan) {
+                    const auto snap_nodes = out.nodes.size();
+                    const auto snap_variants = out.variants.size();
+                    const auto snap_paged = out.attention_paged.size();
+                    const auto snap_split = out.attention_paged_split.size();
+                    const auto snap_reduce = out.attention_paged_reduce.size();
+                    const auto snap_regions = out.attention_regions.size();
+                    const uint32_t snap_physical = physical_nodes;
+                    const McuPlanResolverInput split_input =
+                        make_plan_resolver_input(
+                            sc, kPagedAttentionSplitMinVisible);
+                    if (!resolve_and_emit(split_input).ok()) {
+                        out.nodes.resize(snap_nodes);
+                        out.variants.resize(snap_variants);
+                        out.attention_paged.resize(snap_paged);
+                        out.attention_paged_split.resize(snap_split);
+                        out.attention_paged_reduce.resize(snap_reduce);
+                        out.attention_regions.resize(snap_regions);
+                        physical_nodes = snap_physical;
+                    }
+                }
+                const uint32_t split_end =
+                    static_cast<uint32_t>(out.nodes.size());
+                if (options.static_plan && split_end > span_begin)
+                    out.attention_path_spans.push_back(
+                        mcu::McuAttentionPathSpan{
+                            span_begin, prefill_end, direct_end, split_end,
+                            kPagedAttentionSplitMinVisible,
+                            kPagedAttentionPrefillMinRows});
+
                 break;
             }
             case KernelId::KV_APPEND: {
                 PhysicalKvAppendLaunch launch{};
                 const auto resolved =
-                    resolve_kv_append_physical(program, i, ctx, launch);
+                    resolve_kv_append_physical_static(program, i, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1335,7 +1408,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::ROPE: {
                 PhysicalRopeLaunch launch{};
                 const auto resolved =
-                    resolve_rope_physical(program, b, ctx, launch);
+                    resolve_rope_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1375,7 +1448,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::LINEAR_BF16: {
                 PhysicalBf16Launch launch{};
                 const auto resolved =
-                    resolve_bf16_physical(program, b, ctx, launch);
+                    resolve_bf16_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1488,7 +1561,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::L2_NORMALIZE: {
                 PhysicalL2NormalizeLaunch launch{};
                 const auto resolved =
-                    resolve_l2_normalize_physical(program, b, ctx, launch);
+                    resolve_l2_normalize_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1533,7 +1606,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::STATEFUL_CAUSAL_CONV1D: {
                 PhysicalGdnConv1dLaunch launch{};
                 const auto resolved =
-                    resolve_gdn_conv1d_physical(program, b, ctx, launch);
+                    resolve_gdn_conv1d_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1581,7 +1654,7 @@ static Status compile_mcu_plan_impl(const Program& program,
             case KernelId::GDN_RECURRENCE: {
                 PhysicalGdnRecurrenceLaunch launch{};
                 const auto resolved =
-                    resolve_gdn_recurrence_physical(program, b, ctx, launch);
+                    resolve_gdn_recurrence_physical_static(program, b, input, launch);
                 if (!resolved.ok()) return resolved.status();
                 if (resolved.value() != PhysicalResolveStatus::Applicable)
                     return Status::unsupported(
@@ -1645,16 +1718,16 @@ static Status compile_mcu_plan_impl(const Program& program,
                 break;
             }
             case KernelId::SAMPLING: {
-                if (ctx.actual_stochastic_outputs != 0u)
+                if (sc.stochastic_output_capacity != 0u)
                     return Status::unsupported(
                         "stochastic sampling has no mcu entrypoint", __FILE__,
                         __LINE__);
-                auto logits_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+                auto logits_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[0]}, input);
                 if (!logits_res.ok()) return logits_res.status();
                 const HostResolvedValue logits = logits_res.value();
-                auto sampled_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+                auto sampled_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.output_slots[0]}, input);
                 if (!sampled_res.ok()) return sampled_res.status();
                 const HostResolvedValue sampled = sampled_res.value();
                 if (logits.dtype != ::ps::runtime::ValueDType::F32 ||
@@ -1668,24 +1741,24 @@ static Status compile_mcu_plan_impl(const Program& program,
                     sampled.ptr == nullptr)
                     return Status::unsupported("sampling output value is invalid",
                                                __FILE__, __LINE__);
-                if (ctx.output_sampling_params == nullptr)
+                if (sc.output_sampling_params == nullptr)
                     return Status::unsupported(
                         "sampling requires output sampling params", __FILE__,
                         __LINE__);
-                const uint32_t outputs = ctx.actual_outputs;
+                const uint32_t outputs = sc.output_capacity;
                 if (outputs == 0u)
                     return Status::unsupported("sampling output count is zero",
                                                __FILE__, __LINE__);
                 auto inv = mcu_plan_value<mcu::McuArgmaxF32Invocation>();
                 inv.logits = reinterpret_cast<uint64_t>(logits.ptr);
                 inv.sampling =
-                    reinterpret_cast<uint64_t>(ctx.output_sampling_params);
+                    reinterpret_cast<uint64_t>(sc.output_sampling_params);
                 inv.sampled_tokens = reinterpret_cast<uint64_t>(sampled.ptr);
                 inv.outputs = outputs;
                 inv.vocab_size = logits.feature_count;
                 inv.logits_row_stride = logits.row_stride;
                 inv.output_rows =
-                    reinterpret_cast<uint64_t>(ctx.device_output_rows);
+                    reinterpret_cast<uint64_t>(sc.device_output_rows);
                 const uint32_t index =
                     static_cast<uint32_t>(out.argmax_f32.size());
                 out.argmax_f32.push_back(inv);
@@ -1707,28 +1780,28 @@ static Status compile_mcu_plan_impl(const Program& program,
                 if (b.input_count != 3u || b.output_count != 1u)
                     return Status::unsupported(
                         "verify accept io count is invalid", __FILE__, __LINE__);
-                if (ctx.batch_context == nullptr ||
-                    ctx.device_requests == nullptr ||
-                    ctx.device_output_rows == nullptr)
+                if (sc.batch_context == nullptr ||
+                    sc.device_requests == nullptr ||
+                    sc.device_output_rows == nullptr)
                     return Status::unsupported(
                         "verify accept requires a batch context", __FILE__,
                         __LINE__);
-                const uint32_t request_count = ctx.staged_request_count;
+                const uint32_t request_count = sc.request_capacity;
                 const uint32_t max_candidates = b.rotary_dim;
                 if (request_count == 0u || max_candidates == 0u)
                     return Status::unsupported(
                         "verify accept geometry is invalid", __FILE__, __LINE__);
-                auto cand_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[0]}, ctx);
+                auto cand_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[0]}, input);
                 if (!cand_res.ok()) return cand_res.status();
-                auto samp_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[1]}, ctx);
+                auto samp_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[1]}, input);
                 if (!samp_res.ok()) return samp_res.status();
-                auto count_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.input_slots[2]}, ctx);
+                auto count_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.input_slots[2]}, input);
                 if (!count_res.ok()) return count_res.status();
-                auto committed_res = resolve_host_value(
-                    program, ::ps::runtime::ValueId{b.output_slots[0]}, ctx);
+                auto committed_res = resolve_host_value_static(
+                    program, ::ps::runtime::ValueId{b.output_slots[0]}, input);
                 if (!committed_res.ok()) return committed_res.status();
                 const HostResolvedValue cand = cand_res.value();
                 const HostResolvedValue samp = samp_res.value();
@@ -1746,9 +1819,9 @@ static Status compile_mcu_plan_impl(const Program& program,
                 inv.request_count = request_count;
                 inv.candidate_stride = max_candidates;
                 inv.max_candidates = max_candidates;
-                inv.requests = reinterpret_cast<uint64_t>(ctx.device_requests);
+                inv.requests = reinterpret_cast<uint64_t>(sc.device_requests);
                 inv.output_rows =
-                    reinterpret_cast<uint64_t>(ctx.device_output_rows);
+                    reinterpret_cast<uint64_t>(sc.device_output_rows);
                 const uint32_t index =
                     static_cast<uint32_t>(out.verify_accept.size());
                 out.verify_accept.push_back(inv);
@@ -1768,10 +1841,10 @@ static Status compile_mcu_plan_impl(const Program& program,
     }
     if (options.verify_committed_counts != nullptr &&
         options.verify_sampled_tokens != nullptr &&
-        options.verify_max_candidates != 0u && ctx.batch_context != nullptr &&
-        ctx.device_requests != nullptr) {
+        options.verify_max_candidates != 0u && sc.batch_context != nullptr &&
+        sc.device_requests != nullptr) {
         auto inv = mcu_plan_value<mcu::McuVerifyAcceptBatchInvocation>();
-        inv.context = reinterpret_cast<uint64_t>(ctx.batch_context);
+        inv.context = reinterpret_cast<uint64_t>(sc.batch_context);
         inv.sampled_tokens =
             reinterpret_cast<uint64_t>(options.verify_sampled_tokens);
         inv.committed_counts =
@@ -1794,27 +1867,27 @@ static Status compile_mcu_plan_impl(const Program& program,
     }
 
     if (options.verify_conv_history != nullptr &&
-        options.verify_recurrent_history != nullptr && ctx.batch_context != nullptr &&
-        ctx.model_state.gdn.conv_base != nullptr &&
-        ctx.model_state.gdn.recurrent_base != nullptr) {
+        options.verify_recurrent_history != nullptr && sc.batch_context != nullptr &&
+        sc.model_state.gdn.conv_base != nullptr &&
+        sc.model_state.gdn.recurrent_base != nullptr) {
         auto inv =
             mcu_plan_value<mcu::McuGdnSpecRestoreFromCountsInvocation>();
-        inv.context = reinterpret_cast<uint64_t>(ctx.batch_context);
+        inv.context = reinterpret_cast<uint64_t>(sc.batch_context);
         inv.committed_counts =
             reinterpret_cast<uint64_t>(options.verify_committed_counts);
         inv.conv_history = reinterpret_cast<uint64_t>(options.verify_conv_history);
         inv.recurrent_history =
             reinterpret_cast<uint64_t>(options.verify_recurrent_history);
-        inv.conv_pool = reinterpret_cast<uint64_t>(ctx.model_state.gdn.conv_base);
+        inv.conv_pool = reinterpret_cast<uint64_t>(sc.model_state.gdn.conv_base);
         inv.recurrent_pool =
-            reinterpret_cast<uint64_t>(ctx.model_state.gdn.recurrent_base);
-        inv.conv_slot_stride = ctx.model_state.gdn.conv_slot_stride;
-        inv.recurrent_slot_stride = ctx.model_state.gdn.recurrent_slot_stride;
+            reinterpret_cast<uint64_t>(sc.model_state.gdn.recurrent_base);
+        inv.conv_slot_stride = sc.model_state.gdn.conv_slot_stride;
+        inv.recurrent_slot_stride = sc.model_state.gdn.recurrent_slot_stride;
         inv.conv_history_stride = options.verify_conv_history_stride;
         inv.recurrent_history_stride = options.verify_recurrent_history_stride;
-        inv.conv_elems = static_cast<uint32_t>(ctx.model_state.gdn.conv_slot_stride);
+        inv.conv_elems = static_cast<uint32_t>(sc.model_state.gdn.conv_slot_stride);
         inv.recurrent_elems =
-            static_cast<uint32_t>(ctx.model_state.gdn.recurrent_slot_stride);
+            static_cast<uint32_t>(sc.model_state.gdn.recurrent_slot_stride);
         inv.max_candidates = options.verify_max_candidates;
         const uint32_t index = static_cast<uint32_t>(
             out.gdn_spec_restore_from_counts.size());
@@ -1866,10 +1939,12 @@ static Status compile_mcu_plan_impl(const Program& program,
     return Status::make_ok();
 }
 
-Status compile_mcu_plan(const Program& program, const HostExecutionContext& ctx,
+Status compile_mcu_plan(const Program& program,
+                        const McuStaticPlanCompileContext& static_ctx,
                         const McuPlanCompileOptions& options,
                         McuCompiledPlan& out) {
-    const Status status = compile_mcu_plan_impl(program, ctx, options, out);
+    const Status status =
+        compile_mcu_plan_impl(program, static_ctx, options, out);
     const char* plan_dump = std::getenv("PHASESHIFT_MCU_PLAN_DUMP");
     if (plan_dump != nullptr && plan_dump[0] != '\0') {
         std::fprintf(stderr, "MCU_PLAN_DUMP status=%s variants=%zu nodes=%zu\n",

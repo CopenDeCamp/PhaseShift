@@ -126,7 +126,12 @@ int main() {
     plain_opts.dispatch_end = static_cast<uint32_t>(dispatch_count);
 
     q35::McuCompiledPlan plain{};
-    const ps::Status plain_st = q35::compile_mcu_plan(program, ctx, plain_opts, plain);
+    const q35::McuStaticPlanCompileContext ctx_static =
+        q35::make_static_plan_compile_context(
+            ctx, ctx.actual_rows, ctx.actual_outputs,
+            ctx.staged_request_count,
+            ctx.actual_stochastic_outputs);
+    const ps::Status plain_st = q35::compile_mcu_plan(program,ctx_static, plain_opts, plain);
     if (!plain_st.ok()) {
         std::printf("FAIL: plain compile: %s\n", plain_st.message().c_str());
         return 1;
@@ -138,8 +143,13 @@ int main() {
     verify_opts.verify_max_candidates = 32u;
 
     q35::McuCompiledPlan verify{};
+    const q35::McuStaticPlanCompileContext ctx_static2 =
+        q35::make_static_plan_compile_context(
+            ctx, ctx.actual_rows, ctx.actual_outputs,
+            ctx.staged_request_count,
+            ctx.actual_stochastic_outputs);
     const ps::Status verify_st =
-        q35::compile_mcu_plan(program, ctx, verify_opts, verify);
+        q35::compile_mcu_plan(program,ctx_static2, verify_opts, verify);
     if (!verify_st.ok()) {
         std::printf("FAIL: verify compile: %s\n", verify_st.message().c_str());
         return 1;

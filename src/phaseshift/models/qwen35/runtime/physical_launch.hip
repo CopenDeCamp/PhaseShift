@@ -213,6 +213,7 @@ Result<PhysicalResolveStatus> resolve_psq4_physical(
     const Program& program,
     const DispatchBinding& b,
     const HostExecutionContext& ctx,
+    bool allow_unguarded_prefill2d,
     PhysicalPsq4Launch& out) {
     out = PhysicalPsq4Launch{};
     if (b.output_count != 1 || b.input_count != 0)
@@ -290,7 +291,7 @@ Result<PhysicalResolveStatus> resolve_psq4_physical(
         return Status::invalid_state("psq4 linear: rows out of range", __FILE__,
                                      __LINE__);
     Psq4GemmSelectorInput lin{rows, e.rows, e.cols, wkp};
-    lin.allow_unguarded_prefill2d = !ctx.static_plan_compile;
+    lin.allow_unguarded_prefill2d = allow_unguarded_prefill2d;
     const auto config = select_psq4_gemm_config(lin);
     if (!config) {
         linear_record_fallback(LinearFamilyRef::Fp4,
@@ -399,6 +400,7 @@ Result<PhysicalResolveStatus> resolve_psq8_physical(
     const Program& program,
     const DispatchBinding& b,
     const HostExecutionContext& ctx,
+    bool allow_unguarded_prefill2d,
     PhysicalPsq8Launch& out) {
     out = PhysicalPsq8Launch{};
     if (b.output_count != 1 || b.input_count != 0)
@@ -476,7 +478,7 @@ Result<PhysicalResolveStatus> resolve_psq8_physical(
         return Status::invalid_state("psq8 linear: rows out of range", __FILE__,
                                      __LINE__);
     Psq8GemmSelectorInput lin{rows, e.rows, e.cols, wkp};
-    lin.allow_unguarded_prefill2d = !ctx.static_plan_compile;
+    lin.allow_unguarded_prefill2d = allow_unguarded_prefill2d;
     const auto config = select_psq8_gemm_config(lin);
     if (!config) {
         linear_record_fallback(LinearFamilyRef::Fp8,

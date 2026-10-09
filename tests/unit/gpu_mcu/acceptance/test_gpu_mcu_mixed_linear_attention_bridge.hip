@@ -1021,7 +1021,12 @@ int main() {
     opts.marker_grid = 1u;
     opts.marker_workgroup = 64u;
     q35::McuCompiledPlan plan;
-    const ps::Status plan_status = q35::compile_mcu_plan(program, ctx_mcu, opts, plan);
+    const q35::McuStaticPlanCompileContext ctx_mcu_static =
+        q35::make_static_plan_compile_context(
+            ctx_mcu, ctx_mcu.actual_rows, ctx_mcu.actual_outputs,
+            ctx_mcu.staged_request_count,
+            ctx_mcu.actual_stochastic_outputs);
+    const ps::Status plan_status = q35::compile_mcu_plan(program,ctx_mcu_static, opts, plan);
     if (!plan_status.ok()) {
         std::printf("FAIL: plan: %s\n", plan_status.message().c_str());
         return 1;

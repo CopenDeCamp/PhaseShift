@@ -43,7 +43,7 @@ model であり、GPU-MCU backend の execution driver として使用しない�
 `GpuMcuPersistentMcu::start()` は初期化時に一度だけ行う。
 static plan の compile と upload も初期化時に行い、request 到着後には
 compile / switch を行わない。batch ごとの差は `DeviceBatchContext` /
-`McuInvocationPatch` / `McuDynamicNodeBinding` で吸収する。
+`McuInvocationPatch` / `McuRuntimeNodeBinding` で吸収する。
 
 Host が runtime で許される操作は次の5つだけである。
 
@@ -391,7 +391,7 @@ contract を文書で守るのではなく、compile 前に落とす。
   `[region_begin, body_end)` へ fallback する。`McuDecodeState::full_plan` が選択結果を持つ。
 - lm-head の `LINEAR_BF16` は `ExactRows` の rows 1..16 を MCU catalog として持つ。
   `output_rows` domain の node には rows 1..16 の variant を登録し、
-  `McuDynamicNodeBinding::variant_override` を `Bf16ExactRowsVariant` patch が loop ごとの
+  `McuRuntimeNodeBinding::variant_override` を `Bf16ExactRowsVariant` patch が loop ごとの
   `num_outputs` で上書きする。16 を超える output は invalid variant として fail-closed。
 
 ## runtime execution epilogue

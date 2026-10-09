@@ -213,7 +213,7 @@ Result<OptimizedLaunchResult> try_launch_linear_psq4(
     hipStream_t stream) {
     PhysicalPsq4Launch launch{};
     const Result<PhysicalResolveStatus> resolved =
-        resolve_psq4_physical(program, b, ctx, launch);
+        resolve_psq4_physical(program, b, ctx, true, launch);
     if (!resolved.ok())
         return resolved.status();
     if (resolved.value() == PhysicalResolveStatus::NotApplicable)

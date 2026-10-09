@@ -597,6 +597,7 @@ void report_full_plan_reject(const Status& status) {
                  status.message().c_str());
 }
 
+
 Status preflight_mcu_plan(
     Executor& executor,
     const ::ps::runtime::Program& program,
@@ -629,6 +630,7 @@ Status preflight_mcu_plan(
     compile_options.verify_conv_history_stride = gdn_history.conv_row_stride;
     compile_options.verify_recurrent_history_stride =
         gdn_history.recurrent_row_stride;
+    compile_options.static_plan = true;
     const uint32_t row_capacity =
         ::ps::runtime::row_bucket_limit(program.row_bucket);
     const uint32_t request_capacity =
@@ -639,31 +641,22 @@ Status preflight_mcu_plan(
         executor.sequence_pool != nullptr
             ? executor.sequence_pool->max_sequences()
             : request_capacity;
-    std::vector<::ps::runtime::DeviceRequestDescriptor> plan_requests(
-        request_capacity);
-    for (uint32_t i = 0u; i < request_capacity; ++i) {
-        plan_requests[i].request_handle.slot =
-            slot_capacity != 0u ? i % slot_capacity : 0u;
-        plan_requests[i].row_count = i == 0u ? row_capacity : 1u;
-    }
-    runtime::HostExecutionContext plan_ctx = ctx;
-    plan_ctx.actual_rows = row_capacity;
-    plan_ctx.actual_outputs = executor.config.max_scheduled_output_rows;
-    plan_ctx.staged_requests = plan_requests.data();
-    plan_ctx.staged_request_count = request_capacity;
+    runtime::McuStaticPlanCompileContext plan_ctx =
+        runtime::make_static_plan_compile_context(
+            ctx, row_capacity, executor.config.max_scheduled_output_rows,
+            request_capacity, ctx.actual_stochastic_outputs);
+    plan_ctx.slot_capacity = slot_capacity;
 
-    plan_ctx.static_plan_compile = true;
-
-    const Result<runtime::McuStaticAttentionPlanClass> attn_class =
-        runtime::classify_static_attention_plan(program, ctx, row_capacity);
+    const Result<runtime::McuStaticAttentionCatalog> attn_class =
+        runtime::build_static_attention_catalog(program, plan_ctx);
     if (!attn_class.ok()) return attn_class.status();
-    const runtime::McuStaticAttentionPlanClass& attn = attn_class.value();
+    const runtime::McuStaticAttentionCatalog& attn = attn_class.value();
     if (!attn.supported) {
         return Status::unsupported("mcu static attention topology unavailable",
                                    __FILE__, __LINE__);
     }
     plan_ctx.max_visible_tokens = attn.has_paged_attention
-                                      ? attn.canonical_max_visible
+                                      ? attn.canonical_max_visible_tokens
                                       : 1u;
 
     for (const runtime::McuStaticPlanEntry& entry : state.static_plans) {
@@ -695,6 +688,7 @@ Status preflight_mcu_plan(
     if (!full_st.ok()) report_full_plan_reject(full_st);
     state.cache.note_compile();
     out.plan = std::move(plan);
+    out.plan.fingerprint = runtime::mcu_plan_raw_fingerprint(out.plan).hash;
     out.plan_begin = plan_begin;
     out.plan_end = plan_end;
     runtime::McuStaticPlanEntry entry;
@@ -1315,6 +1309,26 @@ Result<PendingBatch> submit_co_batch(
         const Status mcu_st = ensure_mcu_state(executor);
         if (!mcu_st.ok()) {
             return on_error(mcu_st);
+        }
+    }
+    if (executor.config.backend == runtime::DecodeBackend::GpuMcu) {
+        const uint32_t session_rows =
+            executor.config.max_scheduled_tokens != 0u
+                ? executor.config.max_scheduled_tokens
+                : (bucket_m != 0u ? bucket_m : 1u);
+        const auto pinned = ::ps::runtime::resolve_row_bucket(
+            session_rows > 2048u ? 2048u : session_rows);
+        if (pinned.ok()) {
+            auto* pinned_program = executor.program_set.resolve(pinned.value());
+            if (pinned_program != nullptr &&
+                executor
+                        .mcu_body_range[static_cast<std::size_t>(
+                            pinned_program -
+                            &executor.program_set.programs[0])]
+                        .valid) {
+                bucket = pinned.value();
+                program = pinned_program;
+            }
         }
     }
     runtime::DecodeBackendInputs backend_inputs{};

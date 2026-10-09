@@ -195,8 +195,8 @@ struct Rig {
     mcu::McuPlanNode* plan = nullptr;
     mcu::McuKernelVariantDesc* variants = nullptr;
     mcu::GpuMcuRetainedPacket* retained = nullptr;
-    mcu::McuDynamicNodeBinding* dynamic_bindings = nullptr;
-    uint32_t dynamic_binding_count = 0;
+    mcu::McuRuntimeNodeBinding* runtime_bindings = nullptr;
+    uint32_t runtime_binding_count = 0;
     mcu::McuKernargSourceDesc* kernarg_sources = nullptr;
     uint32_t kernarg_source_count = 0;
     mcu::McuDispatchTiming* timing = nullptr;
@@ -888,17 +888,17 @@ struct Rig {
         return true;
     }
 
-    bool set_dynamic_bindings(
-        const mcu::McuDynamicNodeBinding* source, uint32_t count) {
+    bool set_runtime_bindings(
+        const mcu::McuRuntimeNodeBinding* source, uint32_t count) {
         if (count == 0u) return true;
         const std::size_t bytes = static_cast<std::size_t>(count) *
-                                  sizeof(mcu::McuDynamicNodeBinding);
-        if (hipMalloc(reinterpret_cast<void**>(&dynamic_bindings), bytes) !=
+                                  sizeof(mcu::McuRuntimeNodeBinding);
+        if (hipMalloc(reinterpret_cast<void**>(&runtime_bindings), bytes) !=
             hipSuccess) {
             return check(false, "dynamic binding table allocated");
         }
-        dynamic_binding_count = count;
-        if (hipMemcpy(dynamic_bindings, source, bytes,
+        runtime_binding_count = count;
+        if (hipMemcpy(runtime_bindings, source, bytes,
                       hipMemcpyHostToDevice) != hipSuccess) {
             return check(false, "dynamic binding table uploaded");
         }
@@ -1119,8 +1119,8 @@ struct Rig {
         c.node_count = node_count;
         c.variants = variants;
         c.variant_count = variant_count;
-        c.dynamic_node_bindings = dynamic_bindings;
-        c.dynamic_node_binding_count = dynamic_binding_count;
+        c.runtime_node_bindings = runtime_bindings;
+        c.runtime_node_binding_count = runtime_binding_count;
         c.kernarg_sources = kernarg_sources;
         c.kernarg_source_count = kernarg_source_count;
         c.retained = retained;
@@ -1246,10 +1246,10 @@ struct Rig {
         if (plan) { ok &= hipFree(plan) == hipSuccess; plan = nullptr; }
         if (variants) { ok &= hipFree(variants) == hipSuccess; variants = nullptr; }
         if (retained) { ok &= hipFree(retained) == hipSuccess; retained = nullptr; }
-        if (dynamic_bindings) {
-            ok &= hipFree(dynamic_bindings) == hipSuccess;
-            dynamic_bindings = nullptr;
-            dynamic_binding_count = 0;
+        if (runtime_bindings) {
+            ok &= hipFree(runtime_bindings) == hipSuccess;
+            runtime_bindings = nullptr;
+            runtime_binding_count = 0;
         }
         if (kernarg_sources) {
             ok &= hipFree(kernarg_sources) == hipSuccess;
