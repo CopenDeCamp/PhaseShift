@@ -290,6 +290,13 @@ commit 依存は不可避なので、現実的な到達点は **330〜360 ms** �
 
 ## 4. 改善候補のリスク / 成功率評価
 
+> **2026-10-10 更新**: 本節の Attribution は `rocprofv3` ありの計測であり、
+> **e2e の改善余地を過大評価している**（tracer が `hipLaunchKernel` 等の host API を
+> 膨張させ、律速を host 側へ逆転させる）。実測により dispatch 構築の削減は
+> ceiling = 0、`ScopedDevice` arch 検証は判定閾値未満（換算 2.4 ms）で
+> **いずれも打ち切り**。結果の正本は
+> [rnd/tp2_host_dispatch.md](rnd/tp2_host_dispatch.md)、以下は過程の記録である。
+
 ### 最有力（リスク最低・成功判定が trace で機械的できる）
 
 **`ScopedDevice::create` の arch 検証を hot path から外す**
@@ -341,19 +348,19 @@ inline bool is_gfx1201(uint32_t device = 0) {
 
 ### 推奨する順番
 
-1. **host 側 8.3 µs/dispatch の Attribution（`perf` 等）** — 情報価値が高い。
-   本命がどこか分かるまで手を出さない
-2. ScopedDevice の arch 検証キャッシュ — リスク・検証・成功判定が揃っている
-3. 以降は 1 の結果を見て決める
+> 1 は実施済み（結果は [rnd/tp2_host_dispatch.md](rnd/tp2_host_dispatch.md)）。
+> 2 は検出不能（換算 2.4 ms < 閾値 9.5 ms）のため打ち切り。
+> 残る候補は kernel fusion で launch 数削減のみ。
 
 ---
 
 ## 5. 未完了タスク
 
+- [x] host 側 dispatch の Attribution（§3）— [rnd/tp2_host_dispatch.md](rnd/tp2_host_dispatch.md) へ
+- [x] ScopedDevice の arch 検証キャッシュ実装（§4）— 判定閾値未満のため打ち切り
 - [ ] `docs/now_task.md` の残課題（§1 の5件）の処理判断
 - [ ] host バックエンドでの pp2048 / tg128 計測の実行（§2、コマンド準備済み）
-- [ ] host 側 8.3 µs/dispatch の Attribution（§3、本命の black box）
-- [ ] ScopedDevice の arch 検証キャッシュ実装（§4、リスク最低の改善）
+- [ ] kernel fusion で launch 数削減の要否判断（[rnd/tp2_host_dispatch.md](rnd/tp2_host_dispatch.md) §5、リスク高）
 - [ ] `docs/developer/testing.md` の required 構成の記述更新（§1 残課題4）
 
 ## 6. 環境
