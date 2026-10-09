@@ -475,7 +475,7 @@ void GpuMcuPersistentMcu::dump_state(std::FILE* out) const noexcept {
                  "[mcu-persistent] started=%u iterations=%llu heartbeat=%llu "
                  "stop=%u execution_enabled=%u execution_fsm=%p "
                  "batch_context=%p batch_ready_epoch=%p "
-                 "ready=%llu active=%llu epoch=%llu wrap_faulted=%u "
+                 "active=%llu epoch=%llu wrap_faulted=%u "
                  "dispatched=%llu completed=%llu committed=%llu failed=%llu\n",
                  static_cast<uint32_t>(host_state_->started),
                  static_cast<unsigned long long>(host_state_->iterations),
@@ -487,10 +487,6 @@ void GpuMcuPersistentMcu::dump_state(std::FILE* out) const noexcept {
                  static_cast<const void*>(host_state_->execution_fsm),
                  static_cast<const void*>(host_state_->batch_context),
                  static_cast<const void*>(host_state_->batch_ready_epoch),
-                 host_state_->batch_ready_epoch != nullptr
-                     ? static_cast<unsigned long long>(
-                           *host_state_->batch_ready_epoch)
-                     : 0ull,
                  static_cast<unsigned long long>(
                      host_state_->active_batch_ready_epoch),
                  static_cast<unsigned long long>(
@@ -512,8 +508,7 @@ void GpuMcuPersistentMcu::dump_state(std::FILE* out) const noexcept {
                  stage.patch_index, stage.patch_source, stage.patch_width,
                  stage.patch_target_high, stage.patch_target_low);
     if (host_state_->batch_context != nullptr) {
-        std::fprintf(out,
-                     "[mcu-persistent] batch_capacity=%u max_rows=%u\n",
+        std::fprintf(out, "[mcu-persistent] batch_capacity=%u max_rows=%u\n",
                      host_state_->batch_max_requests, host_state_->batch_max_rows);
     }
 }

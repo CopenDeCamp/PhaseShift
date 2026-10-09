@@ -486,21 +486,20 @@ Status ensure_mcu_state(Executor& executor) {
     void* plan_epoch = nullptr;
     void* ready_epoch = nullptr;
     void* verify = nullptr;
+    const std::size_t slot_bytes =
+        static_cast<size_t>(max_slots) *
+        sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotState);
+    const std::size_t binding_bytes =
+        static_cast<size_t>(max_slots) *
+        sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotBinding);
+    const std::size_t verify_bytes =
+        static_cast<size_t>(max_requests) * sizeof(uint32_t);
     const bool alloc_ok =
-        hipMallocManaged(&slots,
-                         static_cast<size_t>(max_slots) *
-                             sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotState)) ==
-            hipSuccess &&
-        hipMallocManaged(
-            &bindings,
-            static_cast<size_t>(max_slots) *
-                sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotBinding)) ==
-            hipSuccess &&
-        hipMallocManaged(&plan_epoch, sizeof(uint64_t)) == hipSuccess &&
-        hipMallocManaged(&ready_epoch, sizeof(uint64_t)) == hipSuccess &&
-        hipMallocManaged(&verify,
-                         static_cast<size_t>(max_requests) * sizeof(uint32_t)) ==
-            hipSuccess;
+        hipMalloc(&slots, slot_bytes) == hipSuccess &&
+        hipMalloc(&bindings, binding_bytes) == hipSuccess &&
+        hipMalloc(&plan_epoch, sizeof(uint64_t)) == hipSuccess &&
+        hipMalloc(&ready_epoch, sizeof(uint64_t)) == hipSuccess &&
+        hipMalloc(&verify, verify_bytes) == hipSuccess;
     if (!alloc_ok) {
         if (slots != nullptr) (void)hipFree(slots);
         if (bindings != nullptr) (void)hipFree(bindings);
@@ -520,16 +519,36 @@ Status ensure_mcu_state(Executor& executor) {
     state->verify_counts = static_cast<uint32_t*>(verify);
     state->commit_max_slots = max_slots;
     state->commit_max_requests = max_requests;
-    std::memset(slots, 0,
-                static_cast<size_t>(max_slots) *
-                    sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotState));
-    std::memset(bindings, 0,
-                static_cast<size_t>(max_slots) *
-                    sizeof(::ps::runtime::gpu_mcu::GpuMcuSlotBinding));
-    *state->plan_epoch = 0u;
-    *state->ready_epoch = 0u;
-    std::memset(verify, 0,
-                static_cast<size_t>(max_requests) * sizeof(uint32_t));
+    state->commit_slots_host.assign(
+        max_slots, ::ps::runtime::gpu_mcu::GpuMcuSlotState{});
+    state->commit_bindings_host.assign(
+        max_slots, ::ps::runtime::gpu_mcu::GpuMcuSlotBinding{});
+    state->ready_epoch_value = 0u;
+
+    hipError_t zerr = hipMemsetAsync(slots, 0, slot_bytes, control);
+    if (zerr == hipSuccess)
+        zerr = hipMemsetAsync(bindings, 0, binding_bytes, control);
+    if (zerr == hipSuccess)
+        zerr = hipMemsetAsync(plan_epoch, 0, sizeof(uint64_t), control);
+    if (zerr == hipSuccess)
+        zerr = hipMemsetAsync(ready_epoch, 0, sizeof(uint64_t), control);
+    if (zerr == hipSuccess)
+        zerr = hipMemsetAsync(verify, 0, verify_bytes, control);
+    if (zerr == hipSuccess) zerr = hipStreamSynchronize(control);
+    if (zerr != hipSuccess) {
+        (void)hipFree(slots);
+        (void)hipFree(bindings);
+        (void)hipFree(plan_epoch);
+        (void)hipFree(ready_epoch);
+        (void)hipFree(verify);
+        state->commit_slots = nullptr;
+        state->commit_bindings = nullptr;
+        state->plan_epoch = nullptr;
+        state->ready_epoch = nullptr;
+        state->verify_counts = nullptr;
+        return Status::hip_error("mcu state device initialization",
+                                 hipGetErrorString(zerr), __FILE__, __LINE__);
+    }
 
     executor.mcu_state = std::move(state);
     return Status::make_ok();
@@ -538,10 +557,16 @@ Status ensure_mcu_state(Executor& executor) {
 Status stage_mcu_commit_slots(
     runtime::McuDecodeState& state,
     const ::ps::runtime::DeviceRequestDescriptor* staging,
-    uint32_t request_count) {
+    uint32_t request_count,
+    hipStream_t stream) {
     namespace mcu = ::ps::runtime::gpu_mcu;
     if (state.commit_slots == nullptr || state.commit_bindings == nullptr) {
         return Status::invalid_state("mcu commit table is not allocated",
+                                     __FILE__, __LINE__);
+    }
+    if (state.commit_slots_host.size() < state.commit_max_slots ||
+        state.commit_bindings_host.size() < state.commit_max_slots) {
+        return Status::invalid_state("mcu commit staging is not allocated",
                                      __FILE__, __LINE__);
     }
     if (request_count > state.commit_max_requests) {
@@ -572,14 +597,27 @@ Status stage_mcu_commit_slots(
             fresh.committed_position = d.prefix_length;
             fresh.sequence_length = d.prefix_length + d.row_count;
         }
-        state.commit_slots[slot] = fresh;
+        state.commit_slots_host[slot] = fresh;
         mcu::GpuMcuSlotBinding binding{};
         binding.handle = d.request_handle;
         binding.stop_conditions_handle =
             reinterpret_cast<uint64_t>(state.stop_conditions);
-        state.commit_bindings[slot] = binding;
+        state.commit_bindings_host[slot] = binding;
+        const hipError_t slot_err = hipMemcpyAsync(
+            state.commit_slots + slot, &state.commit_slots_host[slot],
+            sizeof(mcu::GpuMcuSlotState), hipMemcpyHostToDevice, stream);
+        if (slot_err != hipSuccess)
+            return Status::hip_error("mcu commit slot upload",
+                                     hipGetErrorString(slot_err), __FILE__,
+                                     __LINE__);
+        const hipError_t binding_err = hipMemcpyAsync(
+            state.commit_bindings + slot, &state.commit_bindings_host[slot],
+            sizeof(mcu::GpuMcuSlotBinding), hipMemcpyHostToDevice, stream);
+        if (binding_err != hipSuccess)
+            return Status::hip_error("mcu commit binding upload",
+                                     hipGetErrorString(binding_err), __FILE__,
+                                     __LINE__);
     }
-    std::atomic_thread_fence(std::memory_order_seq_cst);
     return Status::make_ok();
 }
 
@@ -708,8 +746,6 @@ Status execute_mcu_hybrid(
     runtime::HostExecutionContext& ctx,
     hipStream_t stream,
     uint32_t dispatch_count,
-    const ::ps::runtime::DeviceRequestDescriptor* staging,
-    uint32_t request_count,
     const McuPlanPreflight& preflight) {
     namespace mcu = ::ps::runtime::gpu_mcu;
     if (executor.mcu_state == nullptr) {
@@ -738,9 +774,6 @@ Status execute_mcu_hybrid(
         if (!st.ok()) return st;
         state.persistent_configured = false;
     }
-
-    st = stage_mcu_commit_slots(state, staging, request_count);
-    if (!st.ok()) return st;
 
     ::ps::runtime::DeviceBatchContext* context = executor.batch_context;
     if (context == nullptr) {
@@ -797,14 +830,21 @@ Status execute_mcu_hybrid(
         state.commit_max_slots);
     if (!st.ok()) return st;
 
+    ++state.ready_epoch_value;
+    const hipError_t ready_pub = hipMemcpyAsync(
+        state.ready_epoch, &state.ready_epoch_value, sizeof(uint64_t),
+        hipMemcpyHostToDevice, stream);
+    if (ready_pub != hipSuccess) {
+        return Status::hip_error("mcu ready epoch publish",
+                                 hipGetErrorString(ready_pub), __FILE__,
+                                 __LINE__);
+    }
     const hipError_t ctx_sync = hipStreamSynchronize(stream);
     if (ctx_sync != hipSuccess) {
         return Status::hip_error("mcu batch context synchronize",
                                  hipGetErrorString(ctx_sync), __FILE__,
                                  __LINE__);
     }
-    *state.ready_epoch += 1u;
-    std::atomic_thread_fence(std::memory_order_seq_cst);
 
     st = state.persistent.start();
     if (!st.ok()) return st;
@@ -1465,6 +1505,10 @@ Result<PendingBatch> submit_co_batch(
         if (!stq.ok()) return stq;
         stq = upload(bctx_requests, staging, R * sizeof(::ps::runtime::DeviceRequestDescriptor));
         if (!stq.ok()) return stq;
+        if (mcu_selected && executor.mcu_state != nullptr) {
+            stq = stage_mcu_commit_slots(*executor.mcu_state, staging, R, stream);
+            if (!stq.ok()) return stq;
+        }
         if (ctx_src == &host_ctx) {
             hipError_t ctx_err = hipMemcpyWithStream(
                 executor.batch_context, ctx_src, sizeof(host_ctx), hipMemcpyHostToDevice, stream);
@@ -1520,8 +1564,7 @@ Result<PendingBatch> submit_co_batch(
                                             dispatch_count);
         } else {
             stq = execute_mcu_hybrid(executor, *program, ctx, stream,
-                                     dispatch_count, staging, R,
-                                     mcu_preflight);
+                                     dispatch_count, mcu_preflight);
             if (stq.ok()) {
                 executor.active_submission_mcu_epoch = executor.mcu_state->epoch;
             }
