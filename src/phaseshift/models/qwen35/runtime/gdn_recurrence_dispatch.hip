@@ -133,18 +133,12 @@ Result<GdnRecurrenceResolvedArgs> resolve_gdn_recurrence_args(
         return Status::invalid_state("gdn-recurrence: a_log invalid", __FILE__, __LINE__);
 
     const ::ps::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
-    uint32_t num_requests = ctx.staged_request_count;
-    uint32_t verify_requests = ctx.staged_verify_request_count;
-    uint32_t actual_rows = ctx.actual_rows;
-    if (requests == nullptr) {
-        if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
-            return Status::invalid_state("gdn-recurrence: request metadata null",
-                                         __FILE__, __LINE__);
-        requests = ctx.batch_context->requests;
-        num_requests = ctx.batch_context->num_requests;
-        verify_requests = ctx.batch_context->num_verify_requests;
-        actual_rows = ctx.batch_context->actual_rows;
-    }
+    const uint32_t num_requests = ctx.staged_request_count;
+    const uint32_t verify_requests = ctx.staged_verify_request_count;
+    const uint32_t actual_rows = ctx.actual_rows;
+    if (requests == nullptr)
+        return Status::invalid_state("gdn-recurrence: host request metadata missing",
+                                     __FILE__, __LINE__);
     if (num_requests == 0u || actual_rows == 0u)
         return Status::invalid_state("gdn-recurrence: requests/rows == 0", __FILE__, __LINE__);
     uint32_t max_request_rows = 0u;

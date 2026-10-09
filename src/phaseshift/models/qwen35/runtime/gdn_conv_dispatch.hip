@@ -84,18 +84,10 @@ Result<PhysicalResolveStatus> resolve_gdn_conv1d_physical(
         return PhysicalResolveStatus::NotApplicable;
 
     const ::ps::runtime::DeviceRequestDescriptor* requests = ctx.staged_requests;
-    uint32_t num_requests = ctx.staged_request_count;
-    uint32_t verify_requests = ctx.staged_verify_request_count;
-    uint32_t actual_rows = ctx.actual_rows;
-    if (requests == nullptr) {
-        if (ctx.batch_context == nullptr || ctx.batch_context->requests == nullptr)
-            return PhysicalResolveStatus::NotApplicable;
-        requests = ctx.batch_context->requests;
-        num_requests = ctx.batch_context->num_requests;
-        verify_requests = ctx.batch_context->num_verify_requests;
-        actual_rows = ctx.batch_context->actual_rows;
-    }
-    if (num_requests == 0u || actual_rows == 0u)
+    const uint32_t num_requests = ctx.staged_request_count;
+    const uint32_t verify_requests = ctx.staged_verify_request_count;
+    const uint32_t actual_rows = ctx.actual_rows;
+    if (requests == nullptr || num_requests == 0u || actual_rows == 0u)
         return PhysicalResolveStatus::NotApplicable;
     uint32_t max_request_rows = 0u;
     for (uint32_t r = 0u; r < num_requests; ++r) {

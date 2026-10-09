@@ -400,6 +400,10 @@ int main() {
 
     q35::HostExecutionContext ctx_host{};
     ctx_host.batch_context = ctx_dev;
+    ctx_host.staged_requests =
+        static_cast<const rt::DeviceRequestDescriptor*>(requests_host);
+    ctx_host.staged_request_count = bc.num_requests;
+    ctx_host.staged_verify_request_count = bc.num_verify_requests;
     ctx_host.device_requests = bc.requests;
     ctx_host.external_inputs = ext_inputs;
     ctx_host.external_input_count = 6u;

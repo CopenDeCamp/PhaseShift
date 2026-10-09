@@ -512,9 +512,9 @@ void GpuMcuPersistentMcu::dump_state(std::FILE* out) const noexcept {
                  stage.patch_index, stage.patch_source, stage.patch_width,
                  stage.patch_target_high, stage.patch_target_low);
     if (host_state_->batch_context != nullptr) {
-        std::fprintf(out, "[mcu-persistent] actual_rows=%u num_requests=%u\n",
-                     host_state_->batch_context->actual_rows,
-                     host_state_->batch_context->num_requests);
+        std::fprintf(out,
+                     "[mcu-persistent] batch_capacity=%u max_rows=%u\n",
+                     host_state_->batch_max_requests, host_state_->batch_max_rows);
     }
 }
 
