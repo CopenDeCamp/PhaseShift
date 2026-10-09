@@ -15,6 +15,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -181,6 +182,9 @@ struct RunResult {
     bool ok = false;
     std::string error;
     std::vector<int32_t> tokens;
+    double prefill_ms = 0.0;
+    double decode_ms = 0.0;
+    std::size_t decode_steps = 0;
     StepCapture capture;
     StepCapture rank1_capture;
     TraceCapture trace;
@@ -353,21 +357,28 @@ inline RunResult run_tp1(const RunOptions& opts) {
     }
     const std::uint64_t id = id_result.value();
 
+    const auto t_prefill = std::chrono::steady_clock::now();
     auto step = batcher.step();
     if (!step.ok()) {
         result.error = "tp1 prefill step: " + step.status().message();
         return result;
     }
+    result.prefill_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_prefill).count();
     fill_capture_from_executor(executor, 0, result.capture);
     executor.value_trace = nullptr;
 
+    const auto t_decode = std::chrono::steady_clock::now();
     while (batcher.has_pending()) {
         auto decode_step = batcher.step();
+        ++result.decode_steps;
         if (!decode_step.ok()) {
             result.error = "tp1 decode step: " + decode_step.status().message();
             return result;
         }
     }
+    result.decode_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_decode).count();
     collect_tokens(batcher, id, result.tokens);
 
     const Qwen35ModelWeights& weights = model.weights();
@@ -456,23 +467,30 @@ inline RunResult run_tp2(const RunOptions& opts) {
     }
     const std::uint64_t id = id_result.value();
 
+    const auto t_prefill = std::chrono::steady_clock::now();
     auto step = batcher.step();
     if (!step.ok()) {
         result.error = "tp2 prefill step: " + step.status().message();
         return result;
     }
+    result.prefill_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_prefill).count();
     fill_capture_from_executor(rank0.executor(), 0, result.capture);
     fill_capture_from_executor(rank1.executor(), 1, result.rank1_capture);
     rank0.executor().value_trace = nullptr;
     rank1.executor().value_trace = nullptr;
 
+    const auto t_decode = std::chrono::steady_clock::now();
     while (batcher.has_pending()) {
         auto decode_step = batcher.step();
+        ++result.decode_steps;
         if (!decode_step.ok()) {
             result.error = "tp2 decode step: " + decode_step.status().message();
             return result;
         }
     }
+    result.decode_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_decode).count();
     collect_tokens(batcher, id, result.tokens);
 
     (void)batcher.cancel_all();

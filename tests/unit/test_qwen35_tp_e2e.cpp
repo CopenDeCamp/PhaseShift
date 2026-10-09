@@ -103,6 +103,21 @@ int main() {
     print_tokens("tp1 tokens", tp1.tokens);
     print_tokens("tp2 tokens", tp2.tokens);
 
+    std::printf(
+        "TP_TIMING tp1_prefill_ms=%.3f tp1_decode_ms=%.3f tp1_tok=%zu "
+        "tp1_decode_steps=%zu tp2_prefill_ms=%.3f tp2_decode_ms=%.3f tp2_tok=%zu "
+        "tp2_decode_steps=%zu\n",
+        tp1.prefill_ms, tp1.decode_ms, tp1.tokens.size(), tp1.decode_steps,
+        tp2.prefill_ms, tp2.decode_ms, tp2.tokens.size(), tp2.decode_steps);
+    if (tp1.decode_ms > 0.0 && tp1.decode_steps > 0) {
+        std::printf("TP_TOKPS tp1_decode=%.2f\n",
+                    1000.0 * static_cast<double>(tp1.decode_steps) / tp1.decode_ms);
+    }
+    if (tp2.decode_ms > 0.0 && tp2.decode_steps > 0) {
+        std::printf("TP_TOKPS tp2_decode=%.2f\n",
+                    1000.0 * static_cast<double>(tp2.decode_steps) / tp2.decode_ms);
+    }
+
     check(!tp1.tokens.empty(), "tp1 produced tokens");
     check(tp1.tokens.size() == tp2.tokens.size(),
           "tp1 and tp2 produced the same number of tokens");
